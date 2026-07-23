@@ -1,0 +1,21 @@
+{
+  "name": "orchestrator",
+  "owner": {
+    "name": "Colin Charles"
+  },
+  "metadata": {
+    "description": "A boss layer for delegating work from Claude Code to Codex.",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "orchestrator",
+      "description": "Keep Codex briefed across tasks: durable lanes, a shared ledger, and acceptance checks on delegated work.",
+      "version": "0.1.0",
+      "author": {
+        "name": "Colin Charles"
+      },
+      "source": "./plugins/orchestrator"
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "name": "orchestrator-plugin",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A boss layer for delegating work from Claude Code to Codex.",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=18.18"
+  },
+  "scripts": {
+    "test": "node --test \"tests/**/*.test.mjs\""
+  }
+}

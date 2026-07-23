@@ -1,0 +1,9 @@
+{
+  "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
+  "name": "orchestrator",
+  "version": "0.1.0",
+  "description": "Keep Codex briefed across tasks: durable lanes, a shared ledger, and acceptance checks on delegated work.",
+  "author": {
+    "name": "Colin Charles"
+  }
+}
