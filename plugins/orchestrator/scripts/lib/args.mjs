@@ -2,7 +2,10 @@
  * Tiny argv parser. Repeatable options collect into arrays so `--scope a --scope b`
  * reads naturally for lane definitions.
  */
-export function parseArgs(argv, { booleanOptions = [], repeatableOptions = [] } = {}) {
+export function parseArgs(
+  argv,
+  { booleanOptions = [], repeatableOptions = [], valueOptions = [] } = {}
+) {
   const options = {};
   const positionals = [];
 
@@ -23,8 +26,17 @@ export function parseArgs(argv, { booleanOptions = [], repeatableOptions = [] } 
     const equals = body.indexOf("=");
     const key = equals === -1 ? body : body.slice(0, equals);
     let value = equals === -1 ? null : body.slice(equals + 1);
+    const known = booleanOptions.includes(key) ||
+      repeatableOptions.includes(key) ||
+      valueOptions.includes(key);
+    if (!known) {
+      throw new Error(`Unknown option --${key}.`);
+    }
 
     if (booleanOptions.includes(key)) {
+      if (value !== null) {
+        throw new Error(`Boolean option --${key} does not take a value.`);
+      }
       options[key] = true;
       continue;
     }

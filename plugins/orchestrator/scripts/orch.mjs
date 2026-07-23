@@ -5,7 +5,7 @@ import process from "node:process";
 import { evaluateRun } from "./lib/acceptance.mjs";
 import { parseArgs, splitList } from "./lib/args.mjs";
 import { briefingLedger, renderBriefing } from "./lib/briefing.mjs";
-import { changedFiles, currentBranch, headSha } from "./lib/git.mjs";
+import { captureGitSnapshot, changesSinceSnapshot } from "./lib/git.mjs";
 import { addLedgerEntry, readLedger } from "./lib/ledger.mjs";
 import { addLane, bindThread, listLanes, removeLane, requireLane, unbindThread } from "./lib/lanes.mjs";
 import { preflight } from "./lib/preflight.mjs";
@@ -100,10 +100,12 @@ function commandInit(cwd) {
 }
 
 function commandLane(argv, cwd) {
+  requireInitialized(cwd);
   const [action = "list", ...rest] = argv;
   const { options, positionals } = parseArgs(rest, {
     booleanOptions: ["json"],
-    repeatableOptions: ["scope", "constraint"]
+    repeatableOptions: ["scope", "constraint"],
+    valueOptions: ["description", "done"]
   });
 
   if (action === "list") {
@@ -156,7 +158,10 @@ function commandLane(argv, cwd) {
 
 function commandBrief(argv, cwd) {
   requireInitialized(cwd);
-  const { options, positionals } = parseArgs(argv, { booleanOptions: ["json", "no-snapshot"] });
+  const { options, positionals } = parseArgs(argv, {
+    booleanOptions: ["json", "no-snapshot"],
+    valueOptions: ["task", "task-file"]
+  });
   const name = positionals.shift();
   if (!name) {
     throw new Error("`orch brief` requires a lane name.");
@@ -173,9 +178,7 @@ function commandBrief(argv, cwd) {
   if (!options["no-snapshot"]) {
     updateLocalState(cwd, (local) => {
       local.snapshots[lane.name] = {
-        head: headSha(cwd),
-        branch: currentBranch(cwd),
-        changedFiles: changedFiles(cwd),
+        ...captureGitSnapshot(cwd),
         task,
         takenAt: nowIso()
       };
@@ -203,7 +206,10 @@ function commandBrief(argv, cwd) {
 
 function commandAccept(argv, cwd) {
   requireInitialized(cwd);
-  const { options, positionals } = parseArgs(argv, { booleanOptions: ["json"] });
+  const { options, positionals } = parseArgs(argv, {
+    booleanOptions: ["json"],
+    valueOptions: ["result-file"]
+  });
   const name = positionals.shift();
   if (!name) {
     throw new Error("`orch accept` requires a lane name.");
@@ -226,7 +232,7 @@ function commandAccept(argv, cwd) {
   const evaluation = evaluateRun({
     lane,
     snapshot,
-    changedNow: changedFiles(cwd),
+    changeSet: changesSinceSnapshot(cwd, snapshot),
     resultText
   });
 

@@ -67,6 +67,10 @@ export function renderAcceptance(lane, evaluation) {
     lines.push("", "## Pre-existing changes (not attributed to this run)", "");
     lines.push(evaluation.preexisting.map((file) => `- ${file}`).join("\n"));
   }
+  if (evaluation.committed?.length) {
+    lines.push("", "## Changes committed during this run", "");
+    lines.push(evaluation.committed.map((file) => `- ${file}`).join("\n"));
+  }
 
   if (evaluation.result.found) {
     const { fields } = evaluation.result;

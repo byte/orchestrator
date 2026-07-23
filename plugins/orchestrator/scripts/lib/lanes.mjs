@@ -1,4 +1,4 @@
-import { loadLanesState, loadLocalState, nowIso, saveLanesState, updateLocalState } from "./state.mjs";
+import { loadLanesState, loadLocalState, nowIso, updateLanesState, updateLocalState } from "./state.mjs";
 
 const NAME_PATTERN = /^[a-z0-9][a-z0-9._-]*$/;
 
@@ -53,30 +53,32 @@ export function requireLane(cwd, name) {
 
 export function addLane(cwd, name, { description = "", scope = [], constraints = [], done = "" } = {}) {
   const laneName = assertValidLaneName(name);
-  const state = loadLanesState(cwd);
-  const existing = state.lanes[laneName];
-
-  state.lanes[laneName] = {
-    description: description || existing?.description || "",
-    scope: scope.length ? scope : existing?.scope ?? [],
-    constraints: constraints.length ? constraints : existing?.constraints ?? [],
-    done: done || existing?.done || "",
-    createdAt: existing?.createdAt ?? nowIso(),
-    updatedAt: nowIso()
-  };
-
-  saveLanesState(cwd, state);
+  updateLanesState(cwd, (state) => {
+    const existing = state.lanes[laneName];
+    state.lanes[laneName] = {
+      description: description || existing?.description || "",
+      scope: scope.length ? scope : existing?.scope ?? [],
+      constraints: constraints.length ? constraints : existing?.constraints ?? [],
+      done: done || existing?.done || "",
+      createdAt: existing?.createdAt ?? nowIso(),
+      updatedAt: nowIso()
+    };
+  });
   return getLane(cwd, laneName);
 }
 
 export function removeLane(cwd, name) {
   const laneName = assertValidLaneName(name);
-  const state = loadLanesState(cwd);
-  if (!state.lanes[laneName]) {
+  let removed = false;
+  updateLanesState(cwd, (state) => {
+    if (state.lanes[laneName]) {
+      delete state.lanes[laneName];
+      removed = true;
+    }
+  });
+  if (!removed) {
     return false;
   }
-  delete state.lanes[laneName];
-  saveLanesState(cwd, state);
   updateLocalState(cwd, (local) => {
     delete local.threads[laneName];
     delete local.snapshots[laneName];

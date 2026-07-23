@@ -12,12 +12,18 @@ import { partitionByScope } from "./glob.mjs";
  * `phantom` is the interesting one. It usually means the run failed partway and
  * the summary describes intent rather than outcome.
  */
-export function evaluateRun({ lane, snapshot, changedNow = [], resultText = "" }) {
+export function evaluateRun({
+  lane,
+  snapshot,
+  changedNow = [],
+  changeSet = null,
+  resultText = ""
+}) {
   const before = new Set(snapshot?.changedFiles ?? []);
-  const headChanged = Boolean(snapshot) && snapshot.head !== (snapshot.headAfter ?? snapshot.head);
-
-  const attributable = changedNow.filter((filePath) => !before.has(filePath));
-  const preexisting = changedNow.filter((filePath) => before.has(filePath));
+  const attributable = changeSet?.changed ??
+    changedNow.filter((filePath) => !before.has(filePath));
+  const preexisting = changeSet?.preexisting ??
+    changedNow.filter((filePath) => before.has(filePath));
 
   const scope = lane?.scope ?? [];
   const { inScope, outOfScope } = scope.length
@@ -35,6 +41,11 @@ export function evaluateRun({ lane, snapshot, changedNow = [], resultText = "" }
   const problems = [];
   if (scope.length && outOfScope.length) {
     problems.push(`${outOfScope.length} file(s) changed outside the lane's declared scope`);
+  }
+  if (changeSet?.branchChanged) {
+    problems.push(
+      `repository branch changed from ${snapshot?.branch ?? "(detached)"} to ${changeSet.currentBranch ?? "(detached)"}`
+    );
   }
   if (!result.found) {
     problems.push("no RESULT block was returned, so nothing could be cross-checked");
@@ -64,7 +75,9 @@ export function evaluateRun({ lane, snapshot, changedNow = [], resultText = "" }
     declared,
     undeclared,
     phantom,
-    headChanged,
+    committed: changeSet?.committed ?? [],
+    headChanged: changeSet?.headChanged ?? false,
+    branchChanged: changeSet?.branchChanged ?? false,
     result
   };
 }

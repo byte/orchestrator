@@ -1,4 +1,7 @@
 import { execFileSync } from "node:child_process";
+import crypto from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
 
 import { isGitRepository, resolveWorkspaceRoot } from "./workspace.mjs";
 
@@ -63,6 +66,106 @@ export function changedFiles(cwd) {
   }
 
   return [...files].filter((filePath) => !SELF_STATE.test(filePath)).sort();
+}
+
+function fingerprint(root, filePath) {
+  const absolute = path.join(root, filePath);
+  try {
+    const stat = fs.lstatSync(absolute);
+    if (stat.isSymbolicLink()) {
+      return `symlink:${fs.readlinkSync(absolute)}`;
+    }
+    if (!stat.isFile()) {
+      return `${stat.mode}:non-file`;
+    }
+    const digest = crypto.createHash("sha256").update(fs.readFileSync(absolute)).digest("hex");
+    return `file:${stat.mode}:${digest}`;
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      return "missing";
+    }
+    throw error;
+  }
+}
+
+function treeChangedFiles(cwd, before, after) {
+  if (!before || !after || before === after) {
+    return [];
+  }
+  const output = git(cwd, ["diff", "--name-status", "-z", before, after]);
+  const records = output.split("\0").filter(Boolean);
+  const files = new Set();
+  for (let index = 0; index < records.length; index += 1) {
+    const status = records[index];
+    const first = records[index + 1];
+    if (!first) {
+      break;
+    }
+    files.add(first);
+    index += 1;
+    if (/^[RC]/.test(status)) {
+      const second = records[index + 1];
+      if (second) {
+        files.add(second);
+        index += 1;
+      }
+    }
+  }
+  return [...files].filter((filePath) => !SELF_STATE.test(filePath));
+}
+
+export function captureGitSnapshot(cwd) {
+  const root = resolveWorkspaceRoot(cwd);
+  const dirtyFiles = changedFiles(root);
+  return {
+    head: headSha(root),
+    branch: currentBranch(root),
+    dirtyFiles,
+    fingerprints: Object.fromEntries(
+      dirtyFiles.map((filePath) => [filePath, fingerprint(root, filePath)])
+    )
+  };
+}
+
+export function changesSinceSnapshot(cwd, snapshot) {
+  const root = resolveWorkspaceRoot(cwd);
+  const currentHead = headSha(root);
+  const currentBranchName = currentBranch(root);
+  const currentDirty = changedFiles(root);
+  const beforeDirty = new Set(snapshot?.dirtyFiles ?? snapshot?.changedFiles ?? []);
+  const beforeFingerprints = snapshot?.fingerprints ?? {};
+  const committed = treeChangedFiles(root, snapshot?.head, currentHead);
+  const committedSet = new Set(committed);
+  const candidates = new Set([...beforeDirty, ...currentDirty, ...committed]);
+  const changed = [];
+  const preexisting = [];
+
+  for (const filePath of candidates) {
+    if (committedSet.has(filePath)) {
+      changed.push(filePath);
+      continue;
+    }
+    if (beforeDirty.has(filePath)) {
+      const before = beforeFingerprints[filePath];
+      if (before === undefined || before === fingerprint(root, filePath)) {
+        preexisting.push(filePath);
+      } else {
+        changed.push(filePath);
+      }
+      continue;
+    }
+    changed.push(filePath);
+  }
+
+  return {
+    changed: [...new Set(changed)].sort(),
+    preexisting: [...new Set(preexisting)].sort(),
+    committed: committed.sort(),
+    currentHead,
+    currentBranch: currentBranchName,
+    headChanged: snapshot?.head !== currentHead,
+    branchChanged: snapshot?.branch !== currentBranchName
+  };
 }
 
 export function diffStat(cwd) {

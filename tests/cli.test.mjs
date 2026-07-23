@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
+import { spawn } from "node:child_process";
 import { after, test } from "node:test";
 
-import { cleanup, git, makeRepo, runCli, write, writeResult } from "./helpers.mjs";
+import { CLI, cleanup, git, makeRepo, runCli, write, writeResult } from "./helpers.mjs";
 
 const repos = [];
 
@@ -118,7 +119,8 @@ test("brief compiles a briefing and snapshots the tree", () => {
   assert.match(payload.briefing, /## RESULT/);
 
   const local = JSON.parse(fs.readFileSync(path.join(root, ".orchestrator", "local", "threads.json"), "utf8"));
-  assert.deepEqual(local.snapshots.api.changedFiles, ["already-dirty.txt"]);
+  assert.deepEqual(local.snapshots.api.dirtyFiles, ["already-dirty.txt"]);
+  assert.match(local.snapshots.api.fingerprints["already-dirty.txt"], /^file:/);
 });
 
 test("brief marks a bound lane as resuming", () => {
@@ -204,6 +206,104 @@ test("commands refuse to run before init", () => {
   const result = runCli(root, ["brief", "api", "--task", "x"]);
   assert.equal(result.code, 1);
   assert.match(result.stderr, /not initialized/);
+});
+
+test("lane commands refuse to create a partially initialized workspace", () => {
+  const root = makeRepo();
+  repos.push(root);
+  const result = runCli(root, ["lane", "add", "api", "--scope", "src/**"]);
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /not initialized/);
+  assert.equal(fs.existsSync(path.join(root, ".orchestrator")), false);
+});
+
+test("unknown options are rejected instead of silently weakening a lane", () => {
+  const root = repo();
+  const result = runCli(root, ["lane", "add", "api", "--scoop", "src/**"]);
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /Unknown option --scoop/);
+});
+
+test("accept detects changes made to a file that was already dirty", () => {
+  const root = repo();
+  runCli(root, ["lane", "add", "api", "--scope", "src/**"]);
+  write(root, "src/existing.js", "before dispatch\n");
+  runCli(root, ["brief", "api", "--task", "finish the file"]);
+  write(root, "src/existing.js", "after dispatch\n");
+
+  const resultPath = writeResult(
+    "## RESULT\nfiles_touched: src/existing.js\ndecisions: none\nassumptions: none\nblockers: none\nconfidence: high\n"
+  );
+  const result = runCli(root, ["accept", "api", "--result-file", resultPath, "--json"]);
+  assert.equal(result.code, 0);
+  const evaluation = JSON.parse(result.stdout);
+  assert.deepEqual(evaluation.changed, ["src/existing.js"]);
+  assert.deepEqual(evaluation.preexisting, []);
+});
+
+test("accept detects files committed by a worker after the briefing", () => {
+  const root = repo();
+  runCli(root, ["lane", "add", "api", "--scope", "src/**"]);
+  runCli(root, ["brief", "api", "--task", "add a module"]);
+  write(root, "src/new.js", "export const value = 1;\n");
+  git(root, ["add", "src/new.js"]);
+  git(root, ["commit", "--quiet", "-m", "worker change"]);
+
+  const resultPath = writeResult(
+    "## RESULT\nfiles_touched: src/new.js\ndecisions: none\nassumptions: none\nblockers: none\nconfidence: high\n"
+  );
+  const result = runCli(root, ["accept", "api", "--result-file", resultPath, "--json"]);
+  assert.equal(result.code, 0);
+  const evaluation = JSON.parse(result.stdout);
+  assert.deepEqual(evaluation.changed, ["src/new.js"]);
+  assert.deepEqual(evaluation.committed, ["src/new.js"]);
+  assert.equal(evaluation.headChanged, true);
+});
+
+test("accept flags a branch switch after the briefing", () => {
+  const root = repo();
+  runCli(root, ["lane", "add", "api", "--scope", "src/**"]);
+  runCli(root, ["brief", "api", "--task", "inspect"]);
+  git(root, ["checkout", "-q", "-b", "other"]);
+  const resultPath = writeResult(
+    "## RESULT\nfiles_touched: none\ndecisions: none\nassumptions: none\nblockers: none\nconfidence: high\n"
+  );
+  const result = runCli(root, ["accept", "api", "--result-file", resultPath, "--json"]);
+  assert.equal(result.code, 2);
+  const evaluation = JSON.parse(result.stdout);
+  assert.equal(evaluation.branchChanged, true);
+  assert.match(evaluation.problems.join(" "), /branch changed/);
+});
+
+test("concurrent lane additions do not lose state", async () => {
+  const root = repo();
+  const names = Array.from({ length: 8 }, (_, index) => `lane-${index}`);
+  await Promise.all(
+    names.map(
+      (name) =>
+        new Promise((resolve, reject) => {
+          const child = spawn(process.execPath, [CLI, "lane", "add", name, "--scope", `${name}/**`], {
+            cwd: root,
+            stdio: ["ignore", "pipe", "pipe"]
+          });
+          let stderr = "";
+          child.stderr.setEncoding("utf8");
+          child.stderr.on("data", (chunk) => {
+            stderr += chunk;
+          });
+          child.on("error", reject);
+          child.on("exit", (code) => {
+            if (code === 0) {
+              resolve();
+            } else {
+              reject(new Error(`lane add exited ${code}: ${stderr}`));
+            }
+          });
+        })
+    )
+  );
+  const lanes = JSON.parse(runCli(root, ["lane", "list", "--json"]).stdout);
+  assert.deepEqual(lanes.map((lane) => lane.name), names);
 });
 
 test("state written by a newer version is refused rather than misread", () => {

@@ -3,7 +3,7 @@ import path from "node:path";
 
 import { resolveWorkspaceRoot } from "./workspace.mjs";
 
-export const STATE_VERSION = 1;
+export const STATE_VERSION = 2;
 
 const ORCH_DIR = ".orchestrator";
 const LOCAL_DIR = "local";
@@ -40,7 +40,12 @@ export function threadsFile(cwd) {
 }
 
 export function isInitialized(cwd) {
-  return fs.existsSync(lanesFile(cwd));
+  const dir = orchDir(cwd);
+  return [
+    path.join(dir, ".gitignore"),
+    lanesFile(cwd),
+    ledgerFile(cwd)
+  ].every((filePath) => fs.existsSync(filePath));
 }
 
 function readJson(filePath, fallback) {
@@ -62,10 +67,76 @@ function readJson(filePath, fallback) {
   return parsed;
 }
 
-function writeJson(filePath, payload) {
+function atomicWrite(filePath, contents) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  fs.writeFileSync(filePath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+  const temporary = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+  try {
+    fs.writeFileSync(temporary, contents, { encoding: "utf8", mode: 0o600 });
+    fs.renameSync(temporary, filePath);
+  } finally {
+    if (fs.existsSync(temporary)) {
+      fs.unlinkSync(temporary);
+    }
+  }
   return filePath;
+}
+
+function writeJson(filePath, payload) {
+  return atomicWrite(filePath, `${JSON.stringify(payload, null, 2)}\n`);
+}
+
+const LOCK_TIMEOUT_MS = 5000;
+const STALE_LOCK_MS = 30000;
+const LOCK_WAIT_MS = 20;
+const LOCK_SLEEP = new Int32Array(new SharedArrayBuffer(4));
+
+function withFileLock(filePath, operation) {
+  const lockPath = `${filePath}.lock`;
+  const deadline = Date.now() + LOCK_TIMEOUT_MS;
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+
+  while (true) {
+    let descriptor;
+    try {
+      descriptor = fs.openSync(lockPath, "wx", 0o600);
+    } catch (error) {
+      if (error.code !== "EEXIST") {
+        throw error;
+      }
+
+      try {
+        const age = Date.now() - fs.statSync(lockPath).mtimeMs;
+        if (age > STALE_LOCK_MS) {
+          fs.unlinkSync(lockPath);
+          continue;
+        }
+      } catch (statError) {
+        if (statError.code === "ENOENT") {
+          continue;
+        }
+        throw statError;
+      }
+
+      if (Date.now() >= deadline) {
+        throw new Error(`Timed out waiting for state lock ${lockPath}.`);
+      }
+      Atomics.wait(LOCK_SLEEP, 0, 0, LOCK_WAIT_MS);
+      continue;
+    }
+
+    try {
+      return operation();
+    } finally {
+      fs.closeSync(descriptor);
+      try {
+        fs.unlinkSync(lockPath);
+      } catch (error) {
+        if (error.code !== "ENOENT") {
+          throw error;
+        }
+      }
+    }
+  }
 }
 
 export function nowIso() {
@@ -81,7 +152,7 @@ export function initWorkspace(cwd) {
 
   const gitignorePath = path.join(dir, ".gitignore");
   if (!fs.existsSync(gitignorePath)) {
-    fs.writeFileSync(gitignorePath, LOCAL_GITIGNORE, "utf8");
+    atomicWrite(gitignorePath, LOCAL_GITIGNORE);
     created.push(gitignorePath);
   }
 
@@ -91,7 +162,7 @@ export function initWorkspace(cwd) {
   }
 
   if (!fs.existsSync(ledgerFile(root))) {
-    fs.writeFileSync(ledgerFile(root), defaultLedger(), "utf8");
+    atomicWrite(ledgerFile(root), defaultLedger());
     created.push(ledgerFile(root));
   }
 
@@ -134,6 +205,16 @@ export function saveLanesState(cwd, state) {
   });
 }
 
+export function updateLanesState(cwd, mutate) {
+  const filePath = lanesFile(cwd);
+  return withFileLock(filePath, () => {
+    const state = loadLanesState(cwd);
+    mutate(state);
+    saveLanesState(cwd, state);
+    return state;
+  });
+}
+
 export function loadLocalState(cwd) {
   const state = readJson(threadsFile(cwd), { version: STATE_VERSION, threads: {}, snapshots: {} });
   return {
@@ -152,7 +233,11 @@ export function saveLocalState(cwd, state) {
 }
 
 export function updateLocalState(cwd, mutate) {
-  const state = loadLocalState(cwd);
-  mutate(state);
-  return saveLocalState(cwd, state);
+  const filePath = threadsFile(cwd);
+  return withFileLock(filePath, () => {
+    const state = loadLocalState(cwd);
+    mutate(state);
+    saveLocalState(cwd, state);
+    return state;
+  });
 }
