@@ -402,4 +402,68 @@ test("run commands persist a plan, ready queue, checkpoint, and restart briefing
   assert.match(briefing, /Plan approved/);
   assert.match(briefing, /implementation — Implement/);
   assert.match(briefing, /No new dependencies/);
+
+  const dispatch = JSON.parse(
+    runCli(root, ["run", "claim", "run-cli", "implementation", "--json"]).stdout
+  );
+  assert.equal(dispatch.model, "gpt-5.6-sol");
+  assert.deepEqual(dispatch.routingFlags.slice(0, 3), [
+    "--fresh",
+    "--model",
+    "gpt-5.6-sol"
+  ]);
+  const bound = runCli(root, [
+    "run",
+    "bind",
+    "run-cli",
+    "implementation",
+    "--attempt",
+    dispatch.attemptId,
+    "--agent-id",
+    "agent-cli",
+    "--job-id",
+    "job-cli",
+    "--thread-id",
+    "thread-cli"
+  ]);
+  assert.equal(bound.code, 0);
+
+  const active = JSON.parse(
+    runCli(root, ["run", "recover", "run-cli", "--json"]).stdout
+  );
+  assert.equal(active[0].jobId, "job-cli");
+
+  const resultPath = writeResult(
+    "Implemented pagination.\n\n## RESULT\nfiles_touched: src/api/users.js\ndecisions: none\nassumptions: none\nblockers: none\nconfidence: high\n"
+  );
+  const reported = JSON.parse(
+    runCli(root, [
+      "run",
+      "report",
+      "run-cli",
+      "implementation",
+      "--attempt",
+      dispatch.attemptId,
+      "--result-file",
+      resultPath,
+      "--json"
+    ]).stdout
+  );
+  assert.equal(reported.task.status, "reported");
+
+  const verified = JSON.parse(
+    runCli(root, [
+      "run",
+      "verify",
+      "run-cli",
+      "implementation",
+      "--verdict",
+      "pass",
+      "--evidence",
+      "targeted tests passed",
+      "--json"
+    ]).stdout
+  );
+  assert.equal(verified.task.status, "completed");
+  assert.deepEqual(verified.ready.map((task) => task.id), ["review"]);
 });

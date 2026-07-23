@@ -12,12 +12,20 @@ import { preflight } from "./lib/preflight.mjs";
 import { renderAcceptance, renderLanes, renderPreflight } from "./lib/render.mjs";
 import {
   addCheckpoint,
+  bindAttempt,
+  cancelRun,
+  cancelTask,
+  claimTask,
   createRun,
   listRuns,
   loadRun,
   readyTasks,
+  recordTaskResult,
+  recoveryReport,
   renderSupervisorBriefing,
-  replacePlan
+  replacePlan,
+  retryTask,
+  verifyTask
 } from "./lib/runs.mjs";
 import {
   initWorkspace,
@@ -51,6 +59,13 @@ Usage:
   orch run ready <run-id> [--json]
   orch run briefing <run-id>
   orch run checkpoint <run-id> --summary <text> [--decision <text>]... [--risk <text>]... [--next <text>]...
+  orch run claim <run-id> <task-id> [--json]
+  orch run bind <run-id> <task-id> --attempt <id> [--agent-id <id>] [--job-id <id>] [--thread-id <id>]
+  orch run report <run-id> <task-id> --attempt <id> --result-file <path> [--json]
+  orch run verify <run-id> <task-id> --verdict <pass|fail> [--evidence <text>]... [--json]
+  orch run retry <run-id> <task-id> [--json]
+  orch run cancel <run-id> [task-id] [--reason <text>] [--json]
+  orch run recover <run-id> [--json]
 `;
 
 function fail(message) {
@@ -337,8 +352,18 @@ function commandRun(argv, cwd) {
 
   const { options, positionals } = parseArgs(rest, {
     booleanOptions: ["json"],
-    repeatableOptions: ["decision", "risk", "next"],
-    valueOptions: ["plan-file", "summary"]
+    repeatableOptions: ["decision", "risk", "next", "evidence"],
+    valueOptions: [
+      "plan-file",
+      "summary",
+      "attempt",
+      "agent-id",
+      "job-id",
+      "thread-id",
+      "result-file",
+      "verdict",
+      "reason"
+    ]
   });
   const runId = positionals[0];
   if (!runId) {
@@ -382,6 +407,80 @@ function commandRun(argv, cwd) {
       next: splitList(options.next)
     });
     return options.json ? emitJson(checkpoint) : emit(`Checkpoint recorded for ${runId}: ${checkpoint.summary}`);
+  }
+
+  if (action === "claim") {
+    const taskId = positionals[1];
+    if (!taskId) {
+      throw new Error("`orch run claim` requires a task id.");
+    }
+    const run = loadRun(cwd, runId);
+    const dispatch = claimTask(cwd, runId, taskId, requireLane(cwd, run.lane));
+    return options.json ? emitJson(dispatch) : emit(dispatch.briefing.trimEnd());
+  }
+
+  if (action === "bind") {
+    const taskId = positionals[1];
+    if (!taskId || !options.attempt) {
+      throw new Error("`orch run bind` requires a task id and --attempt.");
+    }
+    const attempt = bindAttempt(cwd, runId, taskId, {
+      attemptId: options.attempt,
+      agentId: options["agent-id"],
+      jobId: options["job-id"],
+      threadId: options["thread-id"]
+    });
+    return options.json ? emitJson(attempt) : emit(`Bound ${attempt.id}; task is running.`);
+  }
+
+  if (action === "report") {
+    const taskId = positionals[1];
+    if (!taskId || !options.attempt || !options["result-file"]) {
+      throw new Error("`orch run report` requires a task id, --attempt, and --result-file.");
+    }
+    const result = recordTaskResult(cwd, runId, taskId, {
+      attemptId: options.attempt,
+      resultText: fs.readFileSync(options["result-file"], "utf8")
+    });
+    return options.json ? emitJson(result) : emit(`Recorded ${result.task.status} result for ${taskId}.`);
+  }
+
+  if (action === "verify") {
+    const taskId = positionals[1];
+    if (!taskId) {
+      throw new Error("`orch run verify` requires a task id.");
+    }
+    const result = verifyTask(cwd, runId, taskId, {
+      verdict: options.verdict,
+      evidence: splitList(options.evidence)
+    });
+    return options.json
+      ? emitJson(result)
+      : emit(`Task ${taskId}: ${result.task.status}; run: ${result.runStatus}.`);
+  }
+
+  if (action === "retry") {
+    const taskId = positionals[1];
+    if (!taskId) {
+      throw new Error("`orch run retry` requires a task id.");
+    }
+    const task = retryTask(cwd, runId, taskId);
+    return options.json ? emitJson(task) : emit(`Task ${taskId} is pending retry.`);
+  }
+
+  if (action === "cancel") {
+    const taskId = positionals[1];
+    const result = taskId
+      ? cancelTask(cwd, runId, taskId, options.reason)
+      : cancelRun(cwd, runId, options.reason);
+    return options.json ? emitJson(result) : emit(taskId ? `Cancelled task ${taskId}.` : `Cancelled run ${runId}.`);
+  }
+
+  if (action === "recover") {
+    const report = recoveryReport(loadRun(cwd, runId));
+    return options.json
+      ? emitJson(report)
+      : emit(report.length ? report.map((item) => `${item.taskId}\t${item.attemptStatus}\t${item.jobId ?? item.agentId ?? "unbound"}`).join("\n") : "No active workers need recovery.");
   }
 
   throw new Error(`Unknown run action "${action}".`);

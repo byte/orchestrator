@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 
+import { parseResultBlock } from "./briefing.mjs";
 import { ledgerForBriefing } from "./ledger.mjs";
 import {
   STATE_VERSION,
@@ -19,6 +20,8 @@ const RUN_ID_PATTERN = /^[a-z0-9][a-z0-9._-]*$/;
 const TASK_ID_PATTERN = RUN_ID_PATTERN;
 const TASK_KINDS = new Set(["write", "read", "verify"]);
 const REASONING_EFFORTS = new Set(["low", "medium", "high", "xhigh", "max", "ultra"]);
+const ACTIVE_TASK_STATUSES = new Set(["dispatching", "running"]);
+const RETRYABLE_TASK_STATUSES = new Set(["blocked", "failed", "cancelled"]);
 
 function runsDir(cwd) {
   return path.join(localDir(cwd), "runs");
@@ -253,6 +256,19 @@ function validateGraph(tasks) {
   }
 }
 
+function taskDefinition(task) {
+  return {
+    id: task.id,
+    title: task.title,
+    objective: task.objective,
+    kind: task.kind,
+    scope: task.scope,
+    dependsOn: task.dependsOn,
+    constraints: task.constraints,
+    acceptance: task.acceptance
+  };
+}
+
 export function replacePlan(cwd, runId, rawTasks, { defaultScope = [] } = {}) {
   if (!Array.isArray(rawTasks) || !rawTasks.length) {
     throw new Error("A run plan requires a non-empty tasks array.");
@@ -261,9 +277,11 @@ export function replacePlan(cwd, runId, rawTasks, { defaultScope = [] } = {}) {
   const filePath = runFile(cwd, id);
   return withFileLock(filePath, () => {
     const run = loadRun(cwd, id);
-    const active = Object.values(run.tasks).filter((task) => task.status !== "pending");
+    const active = Object.values(run.tasks).filter(
+      (task) => ACTIVE_TASK_STATUSES.has(task.status) || task.status === "reported"
+    );
     if (active.length) {
-      throw new Error(`Run "${id}" has started; its plan can no longer be replaced.`);
+      throw new Error(`Run "${id}" has active or unverified work; its plan cannot be revised.`);
     }
     const tasks = {};
     for (const raw of rawTasks) {
@@ -271,12 +289,34 @@ export function replacePlan(cwd, runId, rawTasks, { defaultScope = [] } = {}) {
       if (tasks[task.id]) {
         throw new Error(`Duplicate task id "${task.id}".`);
       }
-      tasks[task.id] = task;
+      const existing = run.tasks[task.id];
+      if (existing?.status === "completed") {
+        if (
+          JSON.stringify(taskDefinition(existing)) !==
+          JSON.stringify(taskDefinition(task))
+        ) {
+          throw new Error(`Completed task "${task.id}" cannot be redefined.`);
+        }
+        tasks[task.id] = existing;
+      } else if (existing) {
+        tasks[task.id] = {
+          ...task,
+          attempts: existing.attempts,
+          createdAt: existing.createdAt
+        };
+      } else {
+        tasks[task.id] = task;
+      }
+    }
+    for (const existing of Object.values(run.tasks)) {
+      if (existing.status === "completed" && !tasks[existing.id]) {
+        throw new Error(`Completed task "${existing.id}" cannot be removed from the plan.`);
+      }
     }
     validateGraph(tasks);
     run.tasks = tasks;
     run.planRevision += 1;
-    run.status = "ready";
+    refreshRunStatus(run);
     writeRun(cwd, run);
     appendEvent(cwd, id, {
       type: "run.plan_replaced",
@@ -304,6 +344,411 @@ export function readyTasks(run) {
         task.dependsOn.every((dependency) => completed.has(dependency))
     )
     .sort((left, right) => left.id.localeCompare(right.id));
+}
+
+function refreshRunStatus(run) {
+  const tasks = Object.values(run.tasks);
+  if (run.status === "cancelled") {
+    return run.status;
+  }
+  if (!tasks.length) {
+    run.status = "planning";
+  } else if (tasks.every((task) => task.status === "completed")) {
+    run.status = "completed";
+  } else if (tasks.some((task) => ACTIVE_TASK_STATUSES.has(task.status))) {
+    run.status = "running";
+  } else if (tasks.some((task) => task.status === "reported")) {
+    run.status = "verifying";
+  } else if (
+    tasks.some((task) => task.status === "blocked") &&
+    readyTasks(run).length === 0
+  ) {
+    run.status = "blocked";
+  } else if (
+    tasks.some((task) => task.status === "failed") &&
+    readyTasks(run).length === 0
+  ) {
+    run.status = "failed";
+  } else if (
+    tasks.some((task) => task.status === "cancelled") &&
+    readyTasks(run).length === 0
+  ) {
+    run.status = "blocked";
+  } else {
+    run.status = "ready";
+  }
+  return run.status;
+}
+
+function activeTaskCount(run) {
+  return Object.values(run.tasks).filter((task) => ACTIVE_TASK_STATUSES.has(task.status)).length;
+}
+
+function requireTask(run, taskId) {
+  const id = assertId(taskId, "task");
+  const task = run.tasks[id];
+  if (!task) {
+    throw new Error(`Unknown task "${id}" in run "${run.id}".`);
+  }
+  return task;
+}
+
+function currentAttempt(task, attemptId = null) {
+  const attempt = attemptId
+    ? task.attempts.find((entry) => entry.id === attemptId)
+    : task.attempts.at(-1);
+  if (!attempt) {
+    throw new Error(`Task "${task.id}" has no matching attempt.`);
+  }
+  return attempt;
+}
+
+function renderWorkerLedger(cwd) {
+  const ledger = ledgerForBriefing(cwd);
+  if (!ledger.populated.length) {
+    return "No durable project facts are relevant yet.";
+  }
+  return ledger.populated
+    .map(([section, entries]) => `### ${section}\n${renderList(entries)}`)
+    .join("\n\n");
+}
+
+export function renderWorkerBriefing(cwd, run, task, lane) {
+  const dependencyContext = task.dependsOn
+    .map((dependency) => run.tasks[dependency])
+    .map((dependency) => {
+      const summary = dependency.result?.summary || "completed without a stored summary";
+      return `- ${dependency.id}: ${summary}`;
+    });
+  return `You are one GPT-5.6-sol worker in a pool managed by Claude Fable.
+
+Do not redefine the overall goal, widen scope, integrate other workers, or spawn subagents. Complete only the bounded assignment below and return evidence to the supervisor.
+
+## Run
+
+- run id: ${run.id}
+- task id: ${task.id}
+- overall goal: ${run.objective}
+
+## Assignment
+
+${task.objective}
+
+## Task kind
+
+${task.kind}
+
+## Scope
+
+${task.scope.length ? task.scope.map((entry) => `- \`${entry}\``).join("\n") : "- Read-only. Do not modify files."}
+
+## Constraints
+
+${renderList([...(lane.constraints ?? []), ...task.constraints])}
+
+## Acceptance criteria
+
+${renderList(task.acceptance)}
+
+## Completed dependency context
+
+${dependencyContext.length ? dependencyContext.join("\n") : "- none"}
+
+## Durable project context
+
+${renderWorkerLedger(cwd)}
+
+## Required behavior
+
+- Inspect the real code before deciding.
+- Stay within the declared scope. If another file is required, stop and report it as a blocker.
+- Run the nearest meaningful checks for your assignment.
+- Do not claim success from inspection alone.
+- Do not commit, merge, push, or modify orchestration state. The supervisor owns integration.
+
+## Required output
+
+End your response with exactly this block and nothing after it:
+
+## RESULT
+files_touched: comma-separated repo-relative paths you modified, or "none"
+decisions: choices a reviewer should know about, or "none"
+assumptions: anything not specified, or "none"
+blockers: what stopped you, or "none"
+confidence: high | medium | low
+
+Before the block, summarize the work and list every verification command with its outcome.
+`;
+}
+
+export function claimTask(cwd, runId, taskId, lane) {
+  const id = assertId(runId, "run");
+  const filePath = runFile(cwd, id);
+  return withFileLock(filePath, () => {
+    const run = loadRun(cwd, id);
+    const task = requireTask(run, taskId);
+    const ready = new Set(readyTasks(run).map((entry) => entry.id));
+    if (!ready.has(task.id)) {
+      throw new Error(`Task "${task.id}" is not ready.`);
+    }
+    if (activeTaskCount(run) >= run.workerPolicy.maxWorkers) {
+      throw new Error(
+        `Run "${id}" is at its ${run.workerPolicy.maxWorkers}-worker concurrency limit.`
+      );
+    }
+    const attempt = {
+      id: `${task.id}-attempt-${task.attempts.length + 1}`,
+      status: "dispatching",
+      agentId: null,
+      jobId: null,
+      threadId: null,
+      claimedAt: nowIso(),
+      startedAt: null,
+      finishedAt: null
+    };
+    task.attempts.push(attempt);
+    task.status = "dispatching";
+    task.updatedAt = nowIso();
+    refreshRunStatus(run);
+    writeRun(cwd, run);
+    appendEvent(cwd, id, {
+      type: "task.claimed",
+      taskId: task.id,
+      attemptId: attempt.id
+    });
+    return {
+      runId: id,
+      taskId: task.id,
+      attemptId: attempt.id,
+      model: run.workerPolicy.model,
+      reasoningEffort: run.workerPolicy.reasoningEffort,
+      routingFlags: [
+        "--fresh",
+        "--model",
+        run.workerPolicy.model,
+        "--effort",
+        run.workerPolicy.reasoningEffort
+      ],
+      briefing: renderWorkerBriefing(cwd, run, task, lane)
+    };
+  });
+}
+
+export function bindAttempt(
+  cwd,
+  runId,
+  taskId,
+  { attemptId, agentId = null, jobId = null, threadId = null }
+) {
+  const id = assertId(runId, "run");
+  const filePath = runFile(cwd, id);
+  return withFileLock(filePath, () => {
+    const run = loadRun(cwd, id);
+    const task = requireTask(run, taskId);
+    const attempt = currentAttempt(task, attemptId);
+    if (!["dispatching", "running"].includes(attempt.status)) {
+      throw new Error(`Attempt "${attempt.id}" cannot be bound from status "${attempt.status}".`);
+    }
+    attempt.agentId = agentId ? String(agentId) : attempt.agentId;
+    attempt.jobId = jobId ? String(jobId) : attempt.jobId;
+    attempt.threadId = threadId ? String(threadId) : attempt.threadId;
+    attempt.status = "running";
+    attempt.startedAt ??= nowIso();
+    task.status = "running";
+    task.updatedAt = nowIso();
+    refreshRunStatus(run);
+    writeRun(cwd, run);
+    appendEvent(cwd, id, {
+      type: "task.bound",
+      taskId: task.id,
+      attemptId: attempt.id,
+      agentId: attempt.agentId,
+      jobId: attempt.jobId,
+      threadId: attempt.threadId
+    });
+    return attempt;
+  });
+}
+
+function isNone(value) {
+  return ["", "none", "n/a", "na", "-"].includes(String(value ?? "").trim().toLowerCase());
+}
+
+function resultSummary(text) {
+  const source = String(text ?? "");
+  const beforeContract = source.slice(0, source.lastIndexOf("## RESULT")).trim();
+  if (!beforeContract) {
+    return "Worker returned no prose summary.";
+  }
+  return beforeContract.length > 4000
+    ? `${beforeContract.slice(0, 3997)}...`
+    : beforeContract;
+}
+
+export function recordTaskResult(cwd, runId, taskId, { attemptId, resultText }) {
+  const id = assertId(runId, "run");
+  const filePath = runFile(cwd, id);
+  return withFileLock(filePath, () => {
+    const run = loadRun(cwd, id);
+    const task = requireTask(run, taskId);
+    const attempt = currentAttempt(task, attemptId);
+    if (!["dispatching", "running"].includes(attempt.status)) {
+      throw new Error(`Attempt "${attempt.id}" cannot report from status "${attempt.status}".`);
+    }
+    const parsed = parseResultBlock(resultText);
+    const blocked = parsed.found && !isNone(parsed.fields.blockers);
+    const malformed = !parsed.found || parsed.missing.length > 0;
+    const status = malformed ? "failed" : blocked ? "blocked" : "reported";
+    const result = {
+      summary: resultSummary(resultText),
+      contractFound: parsed.found,
+      missingFields: parsed.missing,
+      fields: parsed.fields,
+      reportedAt: nowIso()
+    };
+    attempt.status = status;
+    attempt.finishedAt = nowIso();
+    task.status = status;
+    task.result = result;
+    task.updatedAt = nowIso();
+    refreshRunStatus(run);
+    writeRun(cwd, run);
+    appendEvent(cwd, id, {
+      type: "task.reported",
+      taskId: task.id,
+      attemptId: attempt.id,
+      status,
+      result
+    });
+    return { task, attempt, runStatus: run.status };
+  });
+}
+
+export function verifyTask(cwd, runId, taskId, { verdict, evidence = [] }) {
+  const id = assertId(runId, "run");
+  const normalizedVerdict = String(verdict ?? "").trim().toLowerCase();
+  if (!["pass", "fail"].includes(normalizedVerdict)) {
+    throw new Error('Verification verdict must be "pass" or "fail".');
+  }
+  const filePath = runFile(cwd, id);
+  return withFileLock(filePath, () => {
+    const run = loadRun(cwd, id);
+    const task = requireTask(run, taskId);
+    if (task.status !== "reported") {
+      throw new Error(`Task "${task.id}" cannot be verified from status "${task.status}".`);
+    }
+    const verification = {
+      verdict: normalizedVerdict,
+      evidence: stringList(evidence, "verification evidence"),
+      at: nowIso()
+    };
+    task.verification = verification;
+    task.status = normalizedVerdict === "pass" ? "completed" : "failed";
+    task.updatedAt = nowIso();
+    const attempt = currentAttempt(task);
+    attempt.status = task.status;
+    refreshRunStatus(run);
+    writeRun(cwd, run);
+    appendEvent(cwd, id, {
+      type: "task.verified",
+      taskId: task.id,
+      attemptId: attempt.id,
+      verification
+    });
+    return { task, ready: readyTasks(run), runStatus: run.status };
+  });
+}
+
+export function retryTask(cwd, runId, taskId) {
+  const id = assertId(runId, "run");
+  const filePath = runFile(cwd, id);
+  return withFileLock(filePath, () => {
+    const run = loadRun(cwd, id);
+    const task = requireTask(run, taskId);
+    if (!RETRYABLE_TASK_STATUSES.has(task.status)) {
+      throw new Error(`Task "${task.id}" cannot be retried from status "${task.status}".`);
+    }
+    task.status = "pending";
+    task.result = null;
+    task.verification = null;
+    task.updatedAt = nowIso();
+    refreshRunStatus(run);
+    writeRun(cwd, run);
+    appendEvent(cwd, id, { type: "task.retried", taskId: task.id });
+    return task;
+  });
+}
+
+export function cancelTask(cwd, runId, taskId, reason = "") {
+  const id = assertId(runId, "run");
+  const filePath = runFile(cwd, id);
+  return withFileLock(filePath, () => {
+    const run = loadRun(cwd, id);
+    const task = requireTask(run, taskId);
+    if (task.status === "completed") {
+      throw new Error(`Completed task "${task.id}" cannot be cancelled.`);
+    }
+    const attempt = task.attempts.at(-1);
+    if (attempt && ACTIVE_TASK_STATUSES.has(attempt.status)) {
+      attempt.status = "cancelled";
+      attempt.finishedAt = nowIso();
+    }
+    task.status = "cancelled";
+    task.cancelReason = String(reason ?? "").trim();
+    task.updatedAt = nowIso();
+    refreshRunStatus(run);
+    writeRun(cwd, run);
+    appendEvent(cwd, id, {
+      type: "task.cancelled",
+      taskId: task.id,
+      reason: task.cancelReason
+    });
+    return task;
+  });
+}
+
+export function cancelRun(cwd, runId, reason = "") {
+  const id = assertId(runId, "run");
+  const filePath = runFile(cwd, id);
+  return withFileLock(filePath, () => {
+    const run = loadRun(cwd, id);
+    for (const task of Object.values(run.tasks)) {
+      if (task.status !== "completed") {
+        const attempt = task.attempts.at(-1);
+        if (attempt && ACTIVE_TASK_STATUSES.has(attempt.status)) {
+          attempt.status = "cancelled";
+          attempt.finishedAt = nowIso();
+        }
+        task.status = "cancelled";
+        task.cancelReason = String(reason ?? "").trim();
+        task.updatedAt = nowIso();
+      }
+    }
+    run.status = "cancelled";
+    run.cancelReason = String(reason ?? "").trim();
+    writeRun(cwd, run);
+    appendEvent(cwd, id, { type: "run.cancelled", reason: run.cancelReason });
+    return run;
+  });
+}
+
+export function recoveryReport(run) {
+  return Object.values(run.tasks)
+    .filter((task) => ACTIVE_TASK_STATUSES.has(task.status))
+    .map((task) => {
+      const attempt = task.attempts.at(-1);
+      return {
+        taskId: task.id,
+        taskStatus: task.status,
+        attemptId: attempt.id,
+        attemptStatus: attempt.status,
+        agentId: attempt.agentId,
+        jobId: attempt.jobId,
+        threadId: attempt.threadId,
+        claimedAt: attempt.claimedAt,
+        startedAt: attempt.startedAt
+      };
+    });
 }
 
 export function addCheckpoint(

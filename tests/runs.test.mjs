@@ -5,12 +5,20 @@ import { after, test } from "node:test";
 import {
   DEFAULT_WORKER_MODEL,
   addCheckpoint,
+  bindAttempt,
+  cancelRun,
+  cancelTask,
+  claimTask,
   createRun,
   eventsFile,
   loadRun,
   readyTasks,
+  recordTaskResult,
+  recoveryReport,
   renderSupervisorBriefing,
-  replacePlan
+  replacePlan,
+  retryTask,
+  verifyTask
 } from "../plugins/orchestrator/scripts/lib/runs.mjs";
 import { cleanup, makeRepo, runCli } from "./helpers.mjs";
 
@@ -160,4 +168,203 @@ test("the supervisor briefing reconstructs authority, graph, checkpoint, and led
   assert.match(briefing, /implementation — Implement pagination/);
   assert.match(briefing, /Planning complete/);
   assert.match(briefing, /Public IDs remain opaque/);
+});
+
+function resultBlock({ files = "src/a.js", blockers = "none", confidence = "high" } = {}) {
+  return `Implemented the assignment and ran the targeted tests.
+
+## RESULT
+files_touched: ${files}
+decisions: none
+assumptions: none
+blockers: ${blockers}
+confidence: ${confidence}`;
+}
+
+test("task claims enforce pool capacity and route explicitly to GPT-5.6 Sol", () => {
+  const root = repo();
+  createRun(root, {
+    id: "run-pool",
+    lane: "api",
+    objective: "Build in parallel",
+    maxWorkers: 1,
+    reasoningEffort: "xhigh"
+  });
+  replacePlan(root, "run-pool", [
+    { id: "a", title: "A", objective: "Implement A", scope: ["src/a/**"] },
+    { id: "b", title: "B", objective: "Implement B", scope: ["src/b/**"] }
+  ]);
+  const dispatch = claimTask(root, "run-pool", "a", { constraints: [] });
+  assert.equal(dispatch.model, "gpt-5.6-sol");
+  assert.equal(dispatch.reasoningEffort, "xhigh");
+  assert.deepEqual(dispatch.routingFlags, [
+    "--fresh",
+    "--model",
+    "gpt-5.6-sol",
+    "--effort",
+    "xhigh"
+  ]);
+  assert.match(dispatch.briefing, /Do not redefine the overall goal/);
+  assert.match(dispatch.briefing, /do not.*spawn subagents/i);
+  assert.throws(
+    () => claimTask(root, "run-pool", "b", { constraints: [] }),
+    /concurrency limit/
+  );
+});
+
+test("worker binding, reporting, supervisor verification, and dependencies form a gated lifecycle", () => {
+  const root = repo();
+  createRun(root, { id: "run-life", lane: "api", objective: "Ship safely" });
+  replacePlan(root, "run-life", [
+    { id: "build", title: "Build", objective: "Build it", scope: ["src/**"] },
+    {
+      id: "review",
+      title: "Review",
+      objective: "Review it",
+      kind: "verify",
+      dependsOn: ["build"]
+    }
+  ]);
+  const dispatch = claimTask(root, "run-life", "build", { constraints: [] });
+  const bound = bindAttempt(root, "run-life", "build", {
+    attemptId: dispatch.attemptId,
+    agentId: "agent-1",
+    jobId: "job-1",
+    threadId: "thread-1"
+  });
+  assert.equal(bound.status, "running");
+  assert.deepEqual(recoveryReport(loadRun(root, "run-life")), [
+    {
+      taskId: "build",
+      taskStatus: "running",
+      attemptId: dispatch.attemptId,
+      attemptStatus: "running",
+      agentId: "agent-1",
+      jobId: "job-1",
+      threadId: "thread-1",
+      claimedAt: bound.claimedAt,
+      startedAt: bound.startedAt
+    }
+  ]);
+
+  const reported = recordTaskResult(root, "run-life", "build", {
+    attemptId: dispatch.attemptId,
+    resultText: resultBlock()
+  });
+  assert.equal(reported.task.status, "reported");
+  assert.equal(reported.runStatus, "verifying");
+  assert.deepEqual(readyTasks(loadRun(root, "run-life")), []);
+
+  const verified = verifyTask(root, "run-life", "build", {
+    verdict: "pass",
+    evidence: ["node --test passed"]
+  });
+  assert.equal(verified.task.status, "completed");
+  assert.equal(verified.runStatus, "ready");
+  assert.deepEqual(verified.ready.map((task) => task.id), ["review"]);
+});
+
+test("blocked and failed tasks retain attempts and can be retried", () => {
+  const root = repo();
+  createRun(root, { id: "run-retry", lane: "api", objective: "Recover" });
+  replacePlan(root, "run-retry", [
+    { id: "work", title: "Work", objective: "Do work", scope: ["src/**"] }
+  ]);
+  const first = claimTask(root, "run-retry", "work", { constraints: [] });
+  const blocked = recordTaskResult(root, "run-retry", "work", {
+    attemptId: first.attemptId,
+    resultText: resultBlock({ blockers: "needs schema scope" })
+  });
+  assert.equal(blocked.task.status, "blocked");
+  assert.equal(blocked.runStatus, "blocked");
+
+  retryTask(root, "run-retry", "work");
+  const second = claimTask(root, "run-retry", "work", { constraints: [] });
+  assert.equal(second.attemptId, "work-attempt-2");
+  const failed = recordTaskResult(root, "run-retry", "work", {
+    attemptId: second.attemptId,
+    resultText: "No result contract"
+  });
+  assert.equal(failed.task.status, "failed");
+  assert.deepEqual(failed.task.result.missingFields, [
+    "files_touched",
+    "decisions",
+    "assumptions",
+    "blockers",
+    "confidence"
+  ]);
+});
+
+test("supervisor verification can fail a report and cancellation is durable", () => {
+  const root = repo();
+  createRun(root, { id: "run-control", lane: "api", objective: "Control workers" });
+  replacePlan(root, "run-control", [
+    { id: "a", title: "A", objective: "A", scope: ["src/a/**"] },
+    { id: "b", title: "B", objective: "B", scope: ["src/b/**"] }
+  ]);
+  const dispatch = claimTask(root, "run-control", "a", { constraints: [] });
+  recordTaskResult(root, "run-control", "a", {
+    attemptId: dispatch.attemptId,
+    resultText: resultBlock()
+  });
+  const rejected = verifyTask(root, "run-control", "a", {
+    verdict: "fail",
+    evidence: ["tests failed"]
+  });
+  assert.equal(rejected.task.status, "failed");
+  const cancelledTask = cancelTask(root, "run-control", "b", "superseded");
+  assert.equal(cancelledTask.status, "cancelled");
+
+  retryTask(root, "run-control", "a");
+  const run = cancelRun(root, "run-control", "user stopped the run");
+  assert.equal(run.status, "cancelled");
+  assert.equal(run.tasks.a.status, "cancelled");
+  assert.equal(run.cancelReason, "user stopped the run");
+});
+
+test("replanning preserves verified work while replacing unfinished tasks", () => {
+  const root = repo();
+  createRun(root, { id: "run-replan", lane: "api", objective: "Adapt the plan" });
+  const completedDefinition = {
+    id: "discovery",
+    title: "Discovery",
+    objective: "Map the code",
+    kind: "read",
+    acceptance: ["return file references"]
+  };
+  replacePlan(root, "run-replan", [
+    completedDefinition,
+    { id: "old-fix", title: "Old fix", objective: "Try old fix", scope: ["src/**"], dependsOn: ["discovery"] }
+  ]);
+  const dispatch = claimTask(root, "run-replan", "discovery", { constraints: [] });
+  recordTaskResult(root, "run-replan", "discovery", {
+    attemptId: dispatch.attemptId,
+    resultText: resultBlock({ files: "none" })
+  });
+  verifyTask(root, "run-replan", "discovery", {
+    verdict: "pass",
+    evidence: ["mapped files"]
+  });
+
+  const revised = replacePlan(root, "run-replan", [
+    completedDefinition,
+    {
+      id: "new-fix",
+      title: "New fix",
+      objective: "Apply the corrected approach",
+      scope: ["src/**"],
+      dependsOn: ["discovery"]
+    }
+  ]);
+  assert.equal(revised.planRevision, 2);
+  assert.equal(revised.tasks.discovery.status, "completed");
+  assert.equal(revised.tasks["old-fix"], undefined);
+  assert.deepEqual(readyTasks(revised).map((task) => task.id), ["new-fix"]);
+  assert.throws(
+    () =>
+      replacePlan(root, "run-replan", [
+        { ...completedDefinition, objective: "Rewrite history" }
+      ]),
+    /cannot be redefined/
+  );
 });
