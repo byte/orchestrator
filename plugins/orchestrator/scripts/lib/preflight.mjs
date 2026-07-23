@@ -74,6 +74,7 @@ function checkCodexPlugin() {
     id: "codex-plugin",
     label: "Legacy Codex bridge installed (optional)",
     ok: installed,
+    optional: true,
     detail,
     remedy: "/plugin marketplace add openai/codex-plugin-cc  then  /plugin install codex@openai-codex"
   };
@@ -113,7 +114,7 @@ export function preflight(cwd = process.cwd()) {
   // Native pool dispatch uses Codex CLI directly. The upstream Claude bridge is
   // optional and retained only for the legacy single-task /orch:do workflow.
   const blocking = checks.filter(
-    (check) => !check.ok && !["initialized", "codex-plugin"].includes(check.id)
+    (check) => !check.ok && check.id !== "initialized" && !check.optional
   );
 
   return { ok: blocking.length === 0, blocking, checks };

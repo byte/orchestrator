@@ -12,8 +12,9 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" init
 Present the output, then:
 
 - If any blocking check failed, give the exact remedy command from the report. The Codex
-  plugin and Codex login are prerequisites this plugin cannot install for the user — do not
-  improvise an alternate auth flow.
+  CLI and Codex login are prerequisites this plugin cannot install for the user — do not
+  improvise an alternate auth flow. The legacy Claude Codex bridge is optional and only
+  needed for `/orch:do`; pooled `/orch:run` execution invokes Codex CLI directly.
 - If the repository has no lanes yet, offer to create a first one. A good starting lane is
   narrow: one subsystem, an explicit scope glob, and a definition of done.
 - Mention that `.orchestrator/lanes.json` and `.orchestrator/ledger.md` are meant to be

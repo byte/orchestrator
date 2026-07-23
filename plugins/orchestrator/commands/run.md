@@ -95,12 +95,12 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" run poll <run-id> --json
 Use the durable recovery view after compaction or interruption:
 
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" run recover <run-id> --json
-node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" run briefing <run-id>
+node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" run resume <run-id> --json
 ```
 
-Polling collects finished structured output into the task automatically. A worker report is not
-completion. It is evidence awaiting supervisor verification.
+This polls detached workers before returning the complete supervisor briefing, active handles,
+results, checkpoints, and memory. Polling collects finished structured output into the task
+automatically. A worker report is not completion. It is evidence awaiting supervisor verification.
 
 ## 6. Verify
 
@@ -165,12 +165,25 @@ unmet prerequisite are blockers; do not loop indefinitely.
 
 Before reporting success:
 
-- ensure the run status is `completed`
 - run the nearest full repository verification
 - inspect the final combined diff
 - confirm no worker or temporary orchestration artifact remains in the tracked tree
 - remove completed isolated worktrees with `run cleanup <run-id>`
 - update the ledger only with durable, confirmed facts and only when appropriate
+
+When every task is complete, the run enters `finalizing`. Record the combined supervisor gate:
+
+```bash
+node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" run finalize <run-id> \
+  --verdict pass \
+  --summary "<combined outcome>" \
+  --evidence "<exact command and outcome>" \
+  --json
+```
+
+Finalization refuses a dirty checkout, the wrong branch, branch drift outside the run, incomplete
+tasks, or missing evidence. Use `--verdict fail` when the combined checks fail, then replan or
+report the blocker. Only report success after the run status is `completed`.
 
 Report the objective, task outcomes, important decisions, exact verification evidence, commits if
 created, and any residual risk. Distinguish built, verified, and unverified work.

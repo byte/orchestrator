@@ -1,6 +1,6 @@
 ---
 name: orchestrator-runtime
-description: Internal contract for the orchestrator CLI — how to compile briefings, dispatch to Codex, bind lane threads, and check results
+description: Internal contract for the orchestrator CLI — how Claude supervises durable GPT-5.6-sol worker-pool runs and the legacy single-task bridge
 user-invocable: false
 ---
 
@@ -8,39 +8,35 @@ user-invocable: false
 
 Helper: `node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" <command>`
 
-Commands: `preflight`, `init`, `lane`, `brief`, `accept`, `ledger`.
+Commands: `preflight`, `init`, `lane`, `brief`, `accept`, `ledger`, `run`.
 All support `--json` where structured output is useful.
 
-## Execution rules
+## Pool execution rules
 
 - Everything here runs **inline in the main thread**. Never fork a general-purpose subagent
-  to compile a briefing or evaluate a result. A forked agent starts cold, which is the exact
-  failure this plugin exists to prevent.
-- The only subagent involved is `codex:codex-rescue`, from the upstream Codex plugin, and it
-  is a thin forwarder. Give it the compiled briefing and routing flags; nothing else.
-- Always `brief` before dispatching. It writes the pre-dispatch snapshot that `accept`
-  needs to attribute changes. Without it, `accept` cannot tell this run's edits from
-  whatever was already dirty.
-- Never hand-roll `codex exec` calls. Dispatch goes through the upstream plugin.
+  to plan, manage, or evaluate a pool run. Fable's existing context is part of the supervisor.
+- Use `run launch`; it starts detached Codex CLI workers pinned to `gpt-5.6-sol` with the saved
+  effort, output schema, least sandbox, and isolated worktree.
+- Use `run resume` after interruption or compaction. It polls workers and reconstructs the
+  briefing from durable state. Never continue from conversation memory alone.
+- A report is not completion. Verify read tasks directly; inspect and integrate write worktrees.
+- The run is not complete when its tasks finish. Run the combined checks and use `run finalize`
+  with exact evidence. Finalization is the user-facing success gate.
 
-## Resume semantics
+## Durable state
 
-The upstream plugin's `--resume` means "resume the most recent Codex thread in this Claude
-session". It is not thread-addressed, so it is only correct when the lane being dispatched
-is also the most recently run one. Default to `--fresh` and let the briefing carry the
-context.
+Run JSON, events, worker status, structured results, PIDs, Codex thread ids, worktree pointers,
+checkpoints, verification evidence, and integration commits live under the self-ignored
+`.orchestrator/local/runs/`. The committed ledger carries durable project facts across machines.
 
-A lane's bound `threadId` is a durable handoff pointer, not something the plugin can be
-told to resume. Its value is that it survives `SessionEnd` — the user can reopen that
-thread directly with `codex resume <thread-id>`.
+## Legacy single-task bridge
 
-## Result handling
+`/orch:do` still composes with `codex:codex-rescue`. For that compatibility path:
 
+- Always `brief` before dispatching so `accept` has a pre-dispatch snapshot.
+- The upstream plugin's `--resume` is session-relative, not lane-addressed. Default to `--fresh`.
+- A lane's bound `threadId` is a handoff pointer for direct `codex resume <thread-id>`.
 - `accept` exits 2 for "needs review". That is a signal, not an error.
-- Lead with scope violations and phantom files.
-- Do not repair Codex's work as part of a dispatch. Report and ask.
-- If Codex was never successfully invoked, do not substitute your own implementation.
-- Preserve Codex's own distinctions between observed fact, inference, and open question.
 
 ## Ledger discipline
 

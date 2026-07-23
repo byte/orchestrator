@@ -11,6 +11,7 @@ import {
   claimTask,
   createRun,
   eventsFile,
+  finalizeRun,
   loadRun,
   readyTasks,
   recordTaskResult,
@@ -20,7 +21,7 @@ import {
   retryTask,
   verifyTask
 } from "../plugins/orchestrator/scripts/lib/runs.mjs";
-import { cleanup, makeRepo, runCli } from "./helpers.mjs";
+import { cleanup, git, makeRepo, runCli, write } from "./helpers.mjs";
 
 const repos = [];
 
@@ -242,6 +243,9 @@ test("worker binding, reporting, supervisor verification, and dependencies form 
       agentId: "agent-1",
       jobId: "job-1",
       threadId: "thread-1",
+      runnerPid: null,
+      runnerStatusFile: null,
+      worktreePath: null,
       claimedAt: bound.claimedAt,
       startedAt: bound.startedAt
     }
@@ -366,5 +370,102 @@ test("replanning preserves verified work while replacing unfinished tasks", () =
         { ...completedDefinition, objective: "Rewrite history" }
       ]),
     /cannot be redefined/
+  );
+});
+
+test("a completed task graph still requires a clean combined final verification gate", () => {
+  const root = repo();
+  createRun(root, { id: "run-final", lane: "api", objective: "Prove the result" });
+  replacePlan(root, "run-final", [
+    {
+      id: "review",
+      title: "Review",
+      objective: "Inspect the repository",
+      kind: "read",
+      acceptance: ["return evidence"]
+    }
+  ]);
+  const dispatch = claimTask(root, "run-final", "review", { constraints: [] });
+  recordTaskResult(root, "run-final", "review", {
+    attemptId: dispatch.attemptId,
+    resultText: resultBlock({ files: "none" })
+  });
+  const verified = verifyTask(root, "run-final", "review", {
+    verdict: "pass",
+    evidence: ["review evidence recorded"]
+  });
+  assert.equal(verified.runStatus, "finalizing");
+
+  const finalized = finalizeRun(root, "run-final", {
+    verdict: "pass",
+    summary: "The integrated repository passes.",
+    evidence: ["node --test: passed"]
+  });
+  assert.equal(finalized.status, "completed");
+  assert.equal(finalized.finalization.planRevision, 1);
+  const briefing = renderSupervisorBriefing(root, finalized, {
+    constraints: [],
+    done: "All tests pass."
+  });
+  assert.match(briefing, /The integrated repository passes/);
+  assert.match(briefing, /review evidence recorded/);
+  assert.match(briefing, /node --test: passed/);
+});
+
+test("final verification refuses incomplete, dirty, and externally advanced runs", () => {
+  const root = repo();
+  createRun(root, { id: "run-final-guard", lane: "api", objective: "Guard completion" });
+  replacePlan(root, "run-final-guard", [
+    {
+      id: "review",
+      title: "Review",
+      objective: "Inspect",
+      kind: "read"
+    }
+  ]);
+  assert.throws(
+    () => finalizeRun(root, "run-final-guard", {
+      verdict: "pass",
+      summary: "Too early.",
+      evidence: ["premature check passed"]
+    }),
+    /until every task is completed/
+  );
+
+  const dispatch = claimTask(root, "run-final-guard", "review", { constraints: [] });
+  recordTaskResult(root, "run-final-guard", "review", {
+    attemptId: dispatch.attemptId,
+    resultText: resultBlock({ files: "none" })
+  });
+  verifyTask(root, "run-final-guard", "review", {
+    verdict: "pass",
+    evidence: ["reviewed"]
+  });
+  assert.throws(
+    () => finalizeRun(root, "run-final-guard", {
+      verdict: "pass",
+      summary: "No real evidence.",
+      evidence: ["none"]
+    }),
+    /at least one evidence item/
+  );
+  write(root, "uncommitted.txt", "dirty\n");
+  assert.throws(
+    () => finalizeRun(root, "run-final-guard", {
+      verdict: "pass",
+      summary: "Dirty.",
+      evidence: ["test passed"]
+    }),
+    /must be clean/
+  );
+  git(root, ["add", "uncommitted.txt"]);
+  git(root, ["commit", "--quiet", "-m", "Advance outside run"]);
+  assert.throws(
+    () => finalizeRun(root, "run-final-guard", {
+      verdict: "pass",
+      summary: "Drifted.",
+      evidence: ["test passed"]
+    }),
+    /advanced outside run/
   );
 });

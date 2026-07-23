@@ -1,7 +1,8 @@
 export function renderPreflight(report) {
   const lines = ["# Orchestrator preflight", ""];
   for (const check of report.checks) {
-    lines.push(`- ${check.ok ? "ok" : "MISSING"}  ${check.label} — ${check.detail}`);
+    const status = check.ok ? "ok" : check.optional ? "optional" : "MISSING";
+    lines.push(`- ${status}  ${check.label} — ${check.detail}`);
   }
   if (report.blocking.length) {
     lines.push("", "## Fix these first", "");

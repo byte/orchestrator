@@ -432,6 +432,11 @@ test("run commands persist a plan, ready queue, checkpoint, and restart briefing
     runCli(root, ["run", "recover", "run-cli", "--json"]).stdout
   );
   assert.equal(active[0].jobId, "job-cli");
+  const resumed = JSON.parse(
+    runCli(root, ["run", "resume", "run-cli", "--json"]).stdout
+  );
+  assert.equal(resumed.recovery[0].threadId, "thread-cli");
+  assert.match(resumed.briefing, /latest worker: thread thread-cli/);
 
   const resultPath = writeResult(
     "Implemented pagination.\n\n## RESULT\nfiles_touched: src/api/users.js\ndecisions: none\nassumptions: none\nblockers: none\nconfidence: high\n"
@@ -466,4 +471,52 @@ test("run commands persist a plan, ready queue, checkpoint, and restart briefing
   );
   assert.equal(verified.task.status, "completed");
   assert.deepEqual(verified.ready.map((task) => task.id), ["review"]);
+
+  const reviewDispatch = JSON.parse(
+    runCli(root, ["run", "claim", "run-cli", "review", "--json"]).stdout
+  );
+  const reviewResult = writeResult(
+    "Reviewed the implementation.\n\n## RESULT\nfiles_touched: none\ndecisions: none\nassumptions: none\nblockers: none\nconfidence: high\n"
+  );
+  runCli(root, [
+    "run",
+    "report",
+    "run-cli",
+    "review",
+    "--attempt",
+    reviewDispatch.attemptId,
+    "--result-file",
+    reviewResult
+  ]);
+  const reviewVerified = JSON.parse(
+    runCli(root, [
+      "run",
+      "verify",
+      "run-cli",
+      "review",
+      "--verdict",
+      "pass",
+      "--evidence",
+      "review passed",
+      "--json"
+    ]).stdout
+  );
+  assert.equal(reviewVerified.runStatus, "finalizing");
+
+  const finalized = JSON.parse(
+    runCli(root, [
+      "run",
+      "finalize",
+      "run-cli",
+      "--verdict",
+      "pass",
+      "--summary",
+      "Combined checks passed.",
+      "--evidence",
+      "node --test passed",
+      "--json"
+    ]).stdout
+  );
+  assert.equal(finalized.status, "completed");
+  assert.equal(finalized.finalization.summary, "Combined checks passed.");
 });

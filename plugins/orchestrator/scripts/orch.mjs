@@ -17,6 +17,7 @@ import {
   cancelTask,
   claimTask,
   createRun,
+  finalizeRun,
   listRuns,
   loadRun,
   readyTasks,
@@ -65,6 +66,7 @@ Usage:
   orch run plan <run-id> --plan-file <path> [--json]
   orch run ready <run-id> [--json]
   orch run briefing <run-id>
+  orch run resume <run-id> [--json]
   orch run checkpoint <run-id> --summary <text> [--decision <text>]... [--risk <text>]... [--next <text>]...
   orch run claim <run-id> <task-id> [--json]
   orch run bind <run-id> <task-id> --attempt <id> [--agent-id <id>] [--job-id <id>] [--thread-id <id>]
@@ -77,6 +79,7 @@ Usage:
   orch run poll <run-id> [--json]
   orch run inspect <run-id> <task-id> [--json]
   orch run integrate <run-id> <task-id> [--evidence <text>]... [--json]
+  orch run finalize <run-id> --verdict <pass|fail> --summary <text> [--evidence <text>]... [--json]
   orch run cleanup <run-id> [task-id] [--json]
 `;
 
@@ -411,6 +414,16 @@ function commandRun(argv, cwd) {
     return emit(renderSupervisorBriefing(cwd, run, requireLane(cwd, run.lane)).trimEnd());
   }
 
+  if (action === "resume") {
+    const updates = pollRunWorkers(cwd, runId);
+    const run = loadRun(cwd, runId);
+    const recovery = recoveryReport(run);
+    const briefing = renderSupervisorBriefing(cwd, run, requireLane(cwd, run.lane)).trimEnd();
+    return options.json
+      ? emitJson({ updates, recovery, run, briefing })
+      : emit(`${briefing}\n\n## Active worker recovery\n\n${recovery.length ? recovery.map((item) => `- ${item.taskId}: pid ${item.runnerPid ?? "unknown"}, thread ${item.threadId ?? "pending"}, worktree ${item.worktreePath ?? "unavailable"}`).join("\n") : "- none"}`);
+  }
+
   if (action === "checkpoint") {
     const checkpoint = addCheckpoint(cwd, runId, {
       summary: options.summary,
@@ -545,6 +558,17 @@ function commandRun(argv, cwd) {
       ...integrated
     });
     return options.json ? emitJson(result) : emit(`Integrated ${taskId}; run: ${result.runStatus}.`);
+  }
+
+  if (action === "finalize") {
+    const run = finalizeRun(cwd, runId, {
+      verdict: options.verdict,
+      summary: options.summary,
+      evidence: splitList(options.evidence)
+    });
+    return options.json
+      ? emitJson(run)
+      : emit(`Run ${runId}: ${run.status}; final verification ${run.finalization.verdict}.`);
   }
 
   if (action === "cleanup") {
