@@ -7,10 +7,12 @@ import { fileURLToPath } from "node:url";
 import {
   claimTask,
   createRun,
+  finalizeRun,
   loadRun,
   recordIntegration,
   recordTaskResult,
-  replacePlan
+  replacePlan,
+  verifyTask
 } from "../plugins/orchestrator/scripts/lib/runs.mjs";
 import {
   launchTaskWorker,
@@ -35,6 +37,11 @@ const slowFixture = path.join(
   path.dirname(fileURLToPath(import.meta.url)),
   "fixtures",
   "fake-codex-slow.mjs"
+);
+const writeFixture = path.join(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "fixtures",
+  "fake-codex-write.mjs"
 );
 
 function repo() {
@@ -174,6 +181,101 @@ test("detached workers persist status, thread id, and structured results", async
   const task = loadRun(root, "run-worker").tasks.build;
   assert.equal(task.result.structured.summary, "Fake worker completed.");
   assert.equal(task.attempts.at(-1).threadId, "thread-fake");
+});
+
+test("the pool runs independent ready tasks in separate detached worktrees", async () => {
+  const root = repo();
+  createRun(root, {
+    id: "run-pool-e2e",
+    lane: "api",
+    objective: "Inspect in parallel",
+    maxWorkers: 2
+  });
+  replacePlan(root, "run-pool-e2e", [
+    { id: "inspect-a", title: "Inspect A", objective: "Inspect A", kind: "read" },
+    { id: "inspect-b", title: "Inspect B", objective: "Inspect B", kind: "read" }
+  ]);
+  const first = launchTaskWorker(root, "run-pool-e2e", "inspect-a", { constraints: [] }, {
+    codexCommand: [process.execPath, fixture]
+  });
+  const second = launchTaskWorker(root, "run-pool-e2e", "inspect-b", { constraints: [] }, {
+    codexCommand: [process.execPath, fixture]
+  });
+  assert.notEqual(first.runner.pid, second.runner.pid);
+  assert.notEqual(first.worktree.path, second.worktree.path);
+
+  for (let index = 0; index < 100; index += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    pollRunWorkers(root, "run-pool-e2e");
+    const statuses = Object.values(loadRun(root, "run-pool-e2e").tasks)
+      .map((task) => task.status);
+    if (statuses.every((status) => status === "reported")) {
+      break;
+    }
+  }
+  let run = loadRun(root, "run-pool-e2e");
+  assert.deepEqual(
+    Object.values(run.tasks).map((task) => task.status),
+    ["reported", "reported"]
+  );
+  for (const task of Object.values(run.tasks)) {
+    assert.equal(task.result.structured.summary, "Fake worker completed.");
+    verifyTask(root, "run-pool-e2e", task.id, {
+      verdict: "pass",
+      evidence: [`${task.id} evidence reviewed`]
+    });
+  }
+  run = loadRun(root, "run-pool-e2e");
+  assert.equal(run.status, "finalizing");
+  for (const task of Object.values(run.tasks)) {
+    assert.equal(cleanupTaskWorktree(root, task.attempts.at(-1)), true);
+  }
+});
+
+test("a detached write worker completes the full launch, inspect, integrate, finalize, and cleanup lifecycle", async () => {
+  const root = repo();
+  plan(root, "run-e2e");
+  const launched = launchTaskWorker(root, "run-e2e", "build", { constraints: [] }, {
+    codexCommand: [process.execPath, writeFixture]
+  });
+
+  let update;
+  for (let index = 0; index < 100; index += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    update = pollRunWorkers(root, "run-e2e")[0];
+    if (update && !["running", "dispatching"].includes(update.status)) {
+      break;
+    }
+  }
+  assert.equal(update.status, "reported");
+  assert.equal(update.threadId, "thread-fake-write");
+
+  let run = loadRun(root, "run-e2e");
+  let task = run.tasks.build;
+  const attempt = task.attempts.at(-1);
+  const inspection = inspectTaskWorktree(task, attempt);
+  assert.equal(inspection.ready, true);
+  assert.deepEqual(inspection.files, ["src/generated.js"]);
+
+  const integrated = integrateTaskWorktree(root, run, task, attempt);
+  const recorded = recordIntegration(root, "run-e2e", "build", {
+    evidence: ["worker check passed", "scope and declaration inspection passed"],
+    ...integrated
+  });
+  assert.equal(recorded.runStatus, "finalizing");
+  assert.equal(
+    fs.readFileSync(path.join(root, "src", "generated.js"), "utf8"),
+    "export const generated = true;\n"
+  );
+
+  run = finalizeRun(root, "run-e2e", {
+    verdict: "pass",
+    summary: "The write-worker lifecycle completed.",
+    evidence: ["generated module present after integration"]
+  });
+  assert.equal(run.status, "completed");
+  assert.equal(cleanupTaskWorktree(root, attempt), true);
+  assert.equal(fs.existsSync(launched.worktree.path), false);
 });
 
 test("detached workers can be stopped without losing their durable handle", async () => {
