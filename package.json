@@ -1,9 +1,9 @@
 {
   "name": "orchestrator-plugin",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
-  "description": "A boss layer for delegating work from Claude Code to Codex.",
+  "description": "A durable Claude Fable supervisor for a pool of GPT-5.6-sol Codex workers.",
   "license": "Apache-2.0",
   "engines": {
     "node": ">=18.18"

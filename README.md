@@ -1,173 +1,189 @@
 # orchestrator
 
-A boss layer for delegating work from Claude Code to Codex.
+A Claude Code supervisor for a pool of Codex workers.
 
-Claude supervises well but executes slowly. Codex executes fast but needs a nanny.
-`orchestrator` is the nanny: it compiles context before dispatch, keeps Codex threads
-addressable across sessions, and checks what came back against what was asked for.
+`orchestrator` keeps Claude Fable in the main thread as planner, scheduler, reviewer, replanner,
+integrator, and user-facing manager. Bounded execution tasks run in parallel through detached
+Codex CLI processes pinned to `gpt-5.6-sol`. Durable run state, checkpoints, evidence, and project
+memory let Fable recover after context compaction, interruption, or a new Claude Code session.
 
-It **composes with** the official [`openai/codex-plugin-cc`](https://github.com/openai/codex-plugin-cc)
-plugin rather than replacing it. That plugin already handles the hard parts — the Codex
-app-server broker, background job control, auth, cancellation. This one adds the layer above.
+The important boundary is simple: Codex workers produce scoped work and evidence; Claude decides
+what should happen, what is acceptable, what gets integrated, and when the whole run is done.
+
+## What it provides
+
+- A task DAG planned and owned by Claude Fable
+- A configurable pool of exact `gpt-5.6-sol` workers
+- One detached `codex exec` process and isolated Git worktree per task
+- Read-only sandboxes for analysis/review tasks and workspace-write sandboxes for implementation
+- JSON-schema-enforced worker reports with files, tests, decisions, assumptions, blockers, and
+  confidence
+- Scope, cleanliness, declaration, commit, and branch-drift gates before integration
+- Supervisor verification for every task and a separate combined final gate
+- Durable run JSON, append-only events, worker handles, Codex thread IDs, checkpoints, and evidence
+- A committed ledger for stable project facts that should survive across machines
+- Deliberate retry, cancellation, replanning, conflict abort, and cleanup paths
+
+## Requirements
+
+- Claude Code with plugin support
+- Node.js 18.18 or newer
+- Git with at least one commit in the repository
+- [Codex CLI](https://developers.openai.com/codex/cli/) installed and authenticated
+
+The official `openai/codex-plugin-cc` Claude bridge is optional. Pooled `/orch:run` execution
+invokes Codex CLI directly. The bridge is needed only for the legacy `/orch:do` command.
 
 ## Install
 
-Requires [Codex CLI](https://developers.openai.com/codex/cli/) (authenticated), Node 18.18+,
-and the Codex plugin:
+In Claude Code:
 
-```
-/plugin marketplace add openai/codex-plugin-cc
-/plugin install codex@openai-codex
-```
-
-Then:
-
-```
+```text
 /plugin marketplace add byte/orchestrator
 /plugin install orchestrator@orchestrator
 /reload-plugins
 /orch:init
 ```
 
-`/orch:init` tells you what is missing and how to fix it. It cannot install or authenticate
-Codex for you.
+`/orch:init` creates the repository state and reports exact remedies for missing Codex CLI,
+authentication, or Git prerequisites.
 
-## Use
+## Quick start
 
-```
-/orch:lanes add api --scope 'src/api/**' --constraint 'No new dependencies' --done 'npm test passes'
-/orch:do api add cursor pagination to the /users endpoint
-```
+Create a lane with a real write boundary and definition of done:
 
-`/orch:do` compiles a briefing from the lane and the ledger, delegates it to Codex, records
-the thread id, and reports what actually changed:
-
-```
-# Acceptance check — api
-
-Verdict: needs review
-
-## Problems
-
-- 1 file(s) changed outside the lane's declared scope
-- 1 declared file(s) show no actual change
+```text
+/orch:lanes add api \
+  --scope 'src/api/**' \
+  --scope 'tests/api/**' \
+  --constraint 'No new production dependencies' \
+  --done 'API tests and the full repository test suite pass'
 ```
 
-That second line is the one worth having. A file reported as touched that shows no actual
-change usually means the run died partway and the summary describes intent, not outcome —
-under a `confidence: high` header.
+Give Fable an outcome:
+
+```text
+/orch:run api --max-workers 3 --effort high add cursor pagination to the users API
+```
+
+Fable inspects the repository, proposes a dependency-aware plan, and asks for confirmation before
+dispatch. Independent ready tasks launch into separate worktrees. Fable remains responsive,
+polls their durable handles, reviews their structured evidence, integrates passing write tasks,
+and replans or retries when evidence invalidates the current route.
+
+Resume the same manager after interruption or compaction:
+
+```text
+/orch:resume <run-id>
+```
+
+This polls workers first and reconstructs the supervisor briefing from disk. It does not create a
+replacement run or rely on conversational memory.
+
+## Lifecycle
+
+1. **Plan.** Fable turns the objective into bounded `write`, `read`, and `verify` tasks with scope,
+   dependencies, constraints, and checkable acceptance criteria.
+2. **Launch.** Ready tasks claim pool capacity. Each gets a fresh worktree, exact model and effort,
+   least-privilege sandbox, authoritative briefing, and required result schema.
+3. **Monitor.** Detached process IDs, status files, JSONL events, Codex thread IDs, outputs, and
+   worktree paths are persisted under `.orchestrator/local/`.
+4. **Review.** Worker output becomes `reported`, never automatically complete. Fable evaluates the
+   evidence and acceptance criteria.
+5. **Integrate.** A write task must be clean, committed, in scope, and exactly match its declared
+   files. Passing commits are cherry-picked. Conflicts abort without discarding either side.
+6. **Recover or replan.** Failed, blocked, or cancelled attempts remain in history. Verified work
+   is preserved when unfinished tasks are revised.
+7. **Finalize.** Once all tasks pass, the run becomes `finalizing`. Fable runs the combined checks
+   and records exact evidence. Only a clean, branch-consistent passing verdict makes the run
+   `completed`.
+
+See [Architecture and recovery](docs/architecture.md) for the state machine and failure behavior.
 
 ## Commands
 
-| Command | What it does |
+| Command | Purpose |
 | --- | --- |
-| `/orch:init` | Create `.orchestrator/`, preflight the toolchain |
-| `/orch:lanes` | List, create, edit, bind, or remove lanes |
-| `/orch:do` | Brief → delegate → bind thread → check result |
-| `/orch:ledger` | Show or add durable project facts |
-| `/orch:accept` | Re-check a lane against what Codex reported |
+| `/orch:init` | Create state and preflight Codex CLI, auth, and Git |
+| `/orch:lanes` | Define named scope, constraints, and lane-level done criteria |
+| `/orch:run` | Plan and manage a new Fable-supervised GPT-5.6-sol pool |
+| `/orch:resume` | Recover and continue an existing durable run |
+| `/orch:ledger` | Show or add stable project facts carried into future tasks |
+| `/orch:do` | Legacy single-task dispatch through the optional Claude Codex bridge |
+| `/orch:accept` | Legacy post-dispatch Git/result cross-check for `/orch:do` |
 
-## Why
+The lower-level CLI is available to command definitions and operators:
 
-The upstream plugin's delegation path has four gaps, each of which pushes supervision cost
-back onto the human.
-
-**1. The delegating subagent is deliberately blind.** `agents/codex-rescue.md` states it is
-"a thin forwarding wrapper" and forbids it from inspecting the repository. Codex receives the
-user's raw task text and a filesystem. It re-derives conventions, re-discovers the build
-command, and re-litigates decisions settled three tasks ago.
-
-**2. Resume pointers die with the Claude session — but the threads don't.** The plugin
-persists named Codex threads and stores each `threadId` on its job record. Resume resolution
-filters to jobs from the *current* Claude session, and the `SessionEnd` hook deletes those
-jobs. The thread survives on disk with everything it learned about your code; the handle to
-it is discarded when you close Claude.
-
-**3. `--resume-last` is a boolean, not an address.** One implicit lane per repository. Two
-parallel workstreams collide onto the same thread.
-
-**4. Delegated task output is unverified prose.** Reviews have an output schema; tasks do
-not. Nothing checks Codex's claims against the actual diff.
-
-Plugin state also lives in `CLAUDE_PLUGIN_DATA`, falling back to `os.tmpdir()`, capped at 50
-jobs — nothing durable, in-repo, or reviewable.
-
-## How it works
-
-Four components, layered on `/codex:rescue`, which passes task text through verbatim. That
-pass-through is the seam everything hangs off.
-
-### Briefing compiler
-
-The repository inspection the forwarder is forbidden to do, performed *before* dispatch:
-objective, standing constraints, scope, definition of done, ledger, and a required result
-contract. Compiled **inline in the main thread**, never in a forked subagent — a forked agent
-starts cold, which is the exact problem being solved. The supervising model is whatever is
-running your session, so this inherits new models instead of pinning one.
-
-### Lanes
-
-Named workstreams. Scope patterns support `*`, `**`, `?`, and a leading `!` to exclude, with
-later patterns winning:
-
-```
---scope 'src/**' --scope '!src/generated/**'
+```text
+node plugins/orchestrator/scripts/orch.mjs help
 ```
 
-### Ledger
+## Context and memory
 
-Durable facts — decisions, conventions, working build commands, and failed approaches with
-reasons. Committed to git, so it is diffable, reviewable in PRs, and inherited by teammates.
-It survives context compaction, which is the half of the system's memory Claude cannot keep.
+State is split by portability:
 
-### Acceptance check
-
-`brief` snapshots the working tree; `accept` diffs it afterwards and reports three things:
-changes outside the declared scope, changes never declared, and declared files that never
-changed. Pre-existing dirt is attributed separately, so a messy tree does not produce noise.
-Exit code 2 means "needs review".
-
-## State
-
-```
+```text
 .orchestrator/
-  lanes.json          # committed — lane names, scope, constraints
-  ledger.md           # committed — the durable shared artifact
-  local/threads.json  # self-ignored — thread bindings and snapshots, this machine only
+  .gitignore
+  lanes.json                       # committed: scopes, constraints, done criteria
+  ledger.md                        # committed: durable project decisions and facts
+  local/                           # self-ignored: machine-specific run state
+    threads.json
+    runs/<run-id>/
+      run.json                     # task graph, attempts, results, evidence, checkpoints
+      events.jsonl                 # append-only supervisory event history
+      workers/<task>/<attempt>/    # prompt, schema, JSONL output, status, final result
+    worktrees/<run-id>/...         # isolated worker checkouts
 ```
 
-The split is deliberate. A Codex thread lives in `~/.codex` on one machine, so committing
-that binding would hand teammates dangling pointers. Lane definitions and accumulated
-knowledge travel; machine-local pointers do not. `.orchestrator/.gitignore` handles this
-without touching your root `.gitignore`.
+The ledger is intentionally small and stable. Per-run detail stays local because process IDs,
+worktree paths, and Codex threads are meaningful only on the machine that owns them. `/orch:resume`
+combines the run record, latest checkpoint, worker evidence, integration history, lane definition,
+and ledger into Fable's reconstructed context.
 
-Both committed files carry a `version` field. State written by a newer orchestrator is
-refused rather than misread.
+All versioned state is read defensively. A newer state version is refused instead of guessed at,
+writes are atomic, and shared state updates use file locks.
 
-## Known limitations
+## Safety invariants
 
-**Resume is not thread-addressed.** The upstream plugin's `--resume` means "resume the most
-recent thread in this Claude session", not "resume this lane's thread". `/orch:do` therefore
-defaults to `--fresh` and lets the briefing carry the context. A lane's bound `threadId` is a
-durable handoff pointer — its value is surviving `SessionEnd`, so you can reopen that thread
-with `codex resume <thread-id>`. Thread-addressed resume would require driving the Codex app
-server directly instead of composing with the plugin.
+- Workers are always pinned to `gpt-5.6-sol`; model substitution is not silent.
+- A worker cannot widen its assigned scope or self-assign global work.
+- The supervisor checkout must be clean for launch, integration, and finalization.
+- The supervisor branch and recorded integration head must not drift outside the run.
+- Write-task reports must match the actual committed file set exactly.
+- Worker prose is untrusted evidence, not instructions to Fable.
+- A task report is not a supervisor verdict, and completed tasks are not a completed run.
+- Cancellation terminates the detached process and remains visible in durable state.
+- Dirty worktrees are never removed automatically.
 
-**Thread ids are scraped from `/codex:result` output.** If that format changes upstream,
-binding breaks. Dispatch is isolated behind one seam so this can be swapped.
+## Legacy single-task mode
 
-**Result contract is by convention.** Because dispatch goes through `/codex:rescue`, we
-cannot pass `--output-schema`. The `## RESULT` block is requested in the briefing and
-verified against git afterwards, rather than enforced by the model runtime.
+`/orch:do` remains for small, one-off tasks. It compiles a lane briefing, calls the optional
+`codex:codex-rescue` bridge, stores a thread pointer, and checks the reported files against Git.
+It does not provide the pool, isolated integration, durable run DAG, or final supervisor gate.
 
 ## Development
 
-```
+```sh
 npm test
+claude plugin validate .
 ```
 
-No dependencies — Node built-ins only. Tests create throwaway git repositories and never
-invoke Codex, so the suite costs no quota.
+The package has no runtime dependencies. Tests use throwaway Git repositories and fake Codex
+processes to exercise concurrency, cancellation, structured collection, worktree integration,
+finalization, and cleanup without consuming model quota.
+
+## Operational limits
+
+- Fable drives polling and decisions while the Claude command is active; there is no background
+  daemon that can make supervisory decisions without Claude.
+- Run state is machine-local by design. Move stable knowledge to the ledger before changing
+  machines.
+- Integration uses cherry-pick. Conflicts abort and require Fable to replan or request direction.
+- Codex thread IDs are retained for diagnosis and handoff; retries currently start a fresh bounded
+  worker with reconstructed context rather than resuming an old task thread.
+- Automated tests validate the complete process protocol with fake workers. A real authenticated
+  Codex smoke test is still the environment-level proof for a particular installation.
 
 ## License
 
