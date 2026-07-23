@@ -67,7 +67,7 @@ function readJson(filePath, fallback) {
   return parsed;
 }
 
-function atomicWrite(filePath, contents) {
+export function atomicWrite(filePath, contents) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   const temporary = `${filePath}.${process.pid}.${Date.now()}.tmp`;
   try {
@@ -90,7 +90,7 @@ const STALE_LOCK_MS = 30000;
 const LOCK_WAIT_MS = 20;
 const LOCK_SLEEP = new Int32Array(new SharedArrayBuffer(4));
 
-function withFileLock(filePath, operation) {
+export function withFileLock(filePath, operation) {
   const lockPath = `${filePath}.lock`;
   const deadline = Date.now() + LOCK_TIMEOUT_MS;
   fs.mkdirSync(path.dirname(filePath), { recursive: true });

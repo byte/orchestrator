@@ -317,3 +317,89 @@ test("state written by a newer version is refused rather than misread", () => {
   assert.equal(result.code, 1);
   assert.match(result.stderr, /newer orchestrator/);
 });
+
+test("run commands persist a plan, ready queue, checkpoint, and restart briefing", () => {
+  const root = repo();
+  runCli(root, [
+    "lane",
+    "add",
+    "api",
+    "--scope",
+    "src/api/**",
+    "--constraint",
+    "No new dependencies",
+    "--done",
+    "tests pass"
+  ]);
+  const created = JSON.parse(
+    runCli(root, [
+      "run",
+      "create",
+      "api",
+      "--id",
+      "run-cli",
+      "--objective",
+      "Add cursor pagination",
+      "--max-workers",
+      "4",
+      "--effort",
+      "xhigh",
+      "--json"
+    ]).stdout
+  );
+  assert.equal(created.workerPolicy.model, "gpt-5.6-sol");
+  assert.equal(created.workerPolicy.maxWorkers, 4);
+
+  const planPath = writeResult(
+    JSON.stringify({
+      tasks: [
+        {
+          id: "implementation",
+          title: "Implement",
+          objective: "Add the cursor logic",
+          acceptance: ["targeted tests pass"]
+        },
+        {
+          id: "review",
+          title: "Review",
+          objective: "Review the implementation",
+          kind: "verify",
+          dependsOn: ["implementation"],
+          acceptance: ["no P1 findings"]
+        }
+      ]
+    })
+  );
+  const planned = runCli(root, [
+    "run",
+    "plan",
+    "run-cli",
+    "--plan-file",
+    planPath,
+    "--json"
+  ]);
+  assert.equal(planned.code, 0);
+  assert.equal(JSON.parse(planned.stdout).planRevision, 1);
+
+  const ready = JSON.parse(runCli(root, ["run", "ready", "run-cli", "--json"]).stdout);
+  assert.deepEqual(ready.map((task) => task.id), ["implementation"]);
+
+  const checkpoint = runCli(root, [
+    "run",
+    "checkpoint",
+    "run-cli",
+    "--summary",
+    "Plan approved",
+    "--decision",
+    "Keep cursors opaque",
+    "--next",
+    "Dispatch implementation"
+  ]);
+  assert.equal(checkpoint.code, 0);
+
+  const briefing = runCli(root, ["run", "briefing", "run-cli"]).stdout;
+  assert.match(briefing, /Claude supervisor/);
+  assert.match(briefing, /Plan approved/);
+  assert.match(briefing, /implementation — Implement/);
+  assert.match(briefing, /No new dependencies/);
+});

@@ -11,6 +11,15 @@ import { addLane, bindThread, listLanes, removeLane, requireLane, unbindThread }
 import { preflight } from "./lib/preflight.mjs";
 import { renderAcceptance, renderLanes, renderPreflight } from "./lib/render.mjs";
 import {
+  addCheckpoint,
+  createRun,
+  listRuns,
+  loadRun,
+  readyTasks,
+  renderSupervisorBriefing,
+  replacePlan
+} from "./lib/runs.mjs";
+import {
   initWorkspace,
   isInitialized,
   loadLocalState,
@@ -35,6 +44,13 @@ Usage:
   orch accept <name> [--result-file <path>] [--json]
   orch ledger show
   orch ledger add <section> <text>
+  orch run list [--json]
+  orch run create <lane> --objective <text> [--id <run-id>] [--max-workers <n>] [--effort <level>] [--json]
+  orch run show <run-id> [--json]
+  orch run plan <run-id> --plan-file <path> [--json]
+  orch run ready <run-id> [--json]
+  orch run briefing <run-id>
+  orch run checkpoint <run-id> --summary <text> [--decision <text>]... [--risk <text>]... [--next <text>]...
 `;
 
 function fail(message) {
@@ -268,6 +284,109 @@ function commandLedger(argv, cwd) {
   throw new Error(`Unknown ledger action "${action}".`);
 }
 
+function renderRunSummary(run) {
+  const taskCounts = Object.values(run.tasks).reduce((counts, task) => {
+    counts[task.status] = (counts[task.status] ?? 0) + 1;
+    return counts;
+  }, {});
+  return [
+    `# Run ${run.id}`,
+    "",
+    run.objective,
+    "",
+    `- status: ${run.status}`,
+    `- lane: ${run.lane}`,
+    `- workers: ${run.workerPolicy.maxWorkers} × ${run.workerPolicy.model} (${run.workerPolicy.reasoningEffort})`,
+    `- plan revision: ${run.planRevision}`,
+    `- tasks: ${Object.entries(taskCounts).map(([status, count]) => `${status}=${count}`).join(", ") || "none"}`
+  ].join("\n");
+}
+
+function commandRun(argv, cwd) {
+  requireInitialized(cwd);
+  const [action = "list", ...rest] = argv;
+
+  if (action === "list") {
+    const { options } = parseArgs(rest, { booleanOptions: ["json"] });
+    const runs = listRuns(cwd);
+    if (options.json) {
+      return emitJson(runs);
+    }
+    return emit(runs.length ? runs.map(renderRunSummary).join("\n\n") : "No orchestration runs yet.");
+  }
+
+  if (action === "create") {
+    const { options, positionals } = parseArgs(rest, {
+      booleanOptions: ["json"],
+      valueOptions: ["objective", "id", "max-workers", "effort"]
+    });
+    const laneName = positionals[0];
+    if (!laneName) {
+      throw new Error("`orch run create` requires a lane name.");
+    }
+    requireLane(cwd, laneName);
+    const run = createRun(cwd, {
+      id: options.id,
+      lane: laneName,
+      objective: options.objective,
+      maxWorkers: options["max-workers"],
+      reasoningEffort: options.effort
+    });
+    return options.json ? emitJson(run) : emit(renderRunSummary(run));
+  }
+
+  const { options, positionals } = parseArgs(rest, {
+    booleanOptions: ["json"],
+    repeatableOptions: ["decision", "risk", "next"],
+    valueOptions: ["plan-file", "summary"]
+  });
+  const runId = positionals[0];
+  if (!runId) {
+    throw new Error(`\`orch run ${action}\` requires a run id.`);
+  }
+
+  if (action === "show") {
+    const run = loadRun(cwd, runId);
+    return options.json ? emitJson(run) : emit(renderRunSummary(run));
+  }
+
+  if (action === "plan") {
+    if (!options["plan-file"]) {
+      throw new Error("`orch run plan` requires --plan-file.");
+    }
+    const payload = JSON.parse(fs.readFileSync(options["plan-file"], "utf8"));
+    const run = loadRun(cwd, runId);
+    const lane = requireLane(cwd, run.lane);
+    const tasks = Array.isArray(payload) ? payload : payload.tasks;
+    const updated = replacePlan(cwd, runId, tasks, { defaultScope: lane.scope });
+    return options.json ? emitJson(updated) : emit(renderRunSummary(updated));
+  }
+
+  if (action === "ready") {
+    const tasks = readyTasks(loadRun(cwd, runId));
+    return options.json
+      ? emitJson(tasks)
+      : emit(tasks.length ? tasks.map((task) => `${task.id}\t${task.title}`).join("\n") : "No tasks are ready.");
+  }
+
+  if (action === "briefing") {
+    const run = loadRun(cwd, runId);
+    return emit(renderSupervisorBriefing(cwd, run, requireLane(cwd, run.lane)).trimEnd());
+  }
+
+  if (action === "checkpoint") {
+    const checkpoint = addCheckpoint(cwd, runId, {
+      summary: options.summary,
+      decisions: splitList(options.decision),
+      risks: splitList(options.risk),
+      next: splitList(options.next)
+    });
+    return options.json ? emitJson(checkpoint) : emit(`Checkpoint recorded for ${runId}: ${checkpoint.summary}`);
+  }
+
+  throw new Error(`Unknown run action "${action}".`);
+}
+
 function main() {
   const [, , command = "help", ...argv] = process.argv;
   const cwd = resolveWorkspaceRoot(process.cwd());
@@ -286,6 +405,8 @@ function main() {
         return commandAccept(argv, cwd);
       case "ledger":
         return commandLedger(argv, cwd);
+      case "run":
+        return commandRun(argv, cwd);
       case "where":
         return emit(orchDir(cwd));
       case "help":
