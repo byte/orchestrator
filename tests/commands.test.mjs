@@ -13,8 +13,8 @@ test("the run command keeps Claude in authority and pins the Codex pool", () => 
   );
   assert.match(command, /Claude Fable is always the planner, scheduler, reviewer, replanner, and integrator/);
   assert.match(command, /--model gpt-5\.6-sol/);
-  assert.match(command, /Do not pass the upstream `--background` flag/);
-  assert.match(command, /worker report is not completion/i);
+  assert.match(command, /detached `codex exec` process/);
+  assert.match(command, /worker report is not\s+completion/i);
   assert.match(command, /run recover/);
   assert.match(command, /run briefing/);
 });
@@ -26,5 +26,5 @@ test("the run command requires evidence gates and bounded retries", () => {
   );
   assert.match(command, /evaluate every acceptance criterion/);
   assert.match(command, /Retry transient worker failures once/);
-  assert.match(command, /Never run overlapping write tasks in one checkout/);
+  assert.match(command, /Every worker runs in its own isolated worktree/);
 });

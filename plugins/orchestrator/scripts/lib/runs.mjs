@@ -3,6 +3,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 
 import { parseResultBlock } from "./briefing.mjs";
+import { changedFiles, currentBranch, headSha } from "./git.mjs";
 import { ledgerForBriefing } from "./ledger.mjs";
 import {
   STATE_VERSION,
@@ -160,6 +161,12 @@ export function createRun(
         model: DEFAULT_WORKER_MODEL,
         reasoningEffort: effort,
         maxWorkers: positiveInteger(maxWorkers, "max-workers", DEFAULT_MAX_WORKERS)
+      },
+      repository: {
+        baseHead: headSha(cwd),
+        branch: currentBranch(cwd),
+        dirtyFiles: changedFiles(cwd),
+        integrationHead: headSha(cwd)
       },
       planRevision: 0,
       tasks: {},
@@ -464,20 +471,18 @@ ${renderWorkerLedger(cwd)}
 - Stay within the declared scope. If another file is required, stop and report it as a blocker.
 - Run the nearest meaningful checks for your assignment.
 - Do not claim success from inspection alone.
-- Do not commit, merge, push, or modify orchestration state. The supervisor owns integration.
+- ${task.kind === "write" ? "Commit the completed task in your isolated worktree with a concise imperative subject. Do not merge or push." : "Do not modify or commit files; this is a read-only assignment."}
+- Do not modify orchestration state. The supervisor owns integration.
 
 ## Required output
 
-End your response with exactly this block and nothing after it:
+Return one JSON object matching the supplied output schema:
 
-## RESULT
-files_touched: comma-separated repo-relative paths you modified, or "none"
-decisions: choices a reviewer should know about, or "none"
-assumptions: anything not specified, or "none"
-blockers: what stopped you, or "none"
-confidence: high | medium | low
-
-Before the block, summarize the work and list every verification command with its outcome.
+- \`summary\`: concise work summary
+- \`files_touched\`: exact repo-relative paths
+- \`tests\`: objects with \`command\` and \`outcome\`
+- \`decisions\`, \`assumptions\`, and \`blockers\`: arrays of strings
+- \`confidence\`: \`high\`, \`medium\`, or \`low\`
 `;
 }
 
@@ -585,6 +590,57 @@ function resultSummary(text) {
     : beforeContract;
 }
 
+function parseStructuredResult(text) {
+  let payload;
+  try {
+    payload = JSON.parse(String(text ?? ""));
+  } catch {
+    return null;
+  }
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return null;
+  }
+  const required = [
+    "summary",
+    "files_touched",
+    "tests",
+    "decisions",
+    "assumptions",
+    "blockers",
+    "confidence"
+  ];
+  const missing = required.filter((field) => !(field in payload));
+  const arrayFields = [
+    "files_touched",
+    "tests",
+    "decisions",
+    "assumptions",
+    "blockers"
+  ];
+  for (const field of arrayFields) {
+    if (field in payload && !Array.isArray(payload[field])) {
+      missing.push(field);
+    }
+  }
+  if (!["high", "medium", "low"].includes(payload.confidence)) {
+    missing.push("confidence");
+  }
+  return {
+    found: true,
+    missing: [...new Set(missing)],
+    fields: {
+      files_touched: Array.isArray(payload.files_touched)
+        ? payload.files_touched.join(", ")
+        : "",
+      decisions: Array.isArray(payload.decisions) ? payload.decisions.join("; ") || "none" : "",
+      assumptions: Array.isArray(payload.assumptions) ? payload.assumptions.join("; ") || "none" : "",
+      blockers: Array.isArray(payload.blockers) ? payload.blockers.join("; ") || "none" : "",
+      confidence: payload.confidence ?? ""
+    },
+    payload
+  };
+}
+
 export function recordTaskResult(cwd, runId, taskId, { attemptId, resultText }) {
   const id = assertId(runId, "run");
   const filePath = runFile(cwd, id);
@@ -595,15 +651,17 @@ export function recordTaskResult(cwd, runId, taskId, { attemptId, resultText }) 
     if (!["dispatching", "running"].includes(attempt.status)) {
       throw new Error(`Attempt "${attempt.id}" cannot report from status "${attempt.status}".`);
     }
-    const parsed = parseResultBlock(resultText);
+    const structured = parseStructuredResult(resultText);
+    const parsed = structured ?? parseResultBlock(resultText);
     const blocked = parsed.found && !isNone(parsed.fields.blockers);
     const malformed = !parsed.found || parsed.missing.length > 0;
     const status = malformed ? "failed" : blocked ? "blocked" : "reported";
     const result = {
-      summary: resultSummary(resultText),
+      summary: structured?.payload.summary || resultSummary(resultText),
       contractFound: parsed.found,
       missingFields: parsed.missing,
       fields: parsed.fields,
+      structured: structured?.payload ?? null,
       reportedAt: nowIso()
     };
     attempt.status = status;
@@ -624,6 +682,106 @@ export function recordTaskResult(cwd, runId, taskId, { attemptId, resultText }) 
   });
 }
 
+export function attachExecution(cwd, runId, taskId, { attemptId, worktree, runner }) {
+  const id = assertId(runId, "run");
+  const filePath = runFile(cwd, id);
+  return withFileLock(filePath, () => {
+    const run = loadRun(cwd, id);
+    const task = requireTask(run, taskId);
+    const attempt = currentAttempt(task, attemptId);
+    attempt.worktree = worktree;
+    attempt.runner = runner;
+    attempt.status = "running";
+    attempt.startedAt ??= nowIso();
+    task.status = "running";
+    task.updatedAt = nowIso();
+    refreshRunStatus(run);
+    writeRun(cwd, run);
+    appendEvent(cwd, id, {
+      type: "task.execution_started",
+      taskId: task.id,
+      attemptId: attempt.id,
+      worktree,
+      runner
+    });
+    return attempt;
+  });
+}
+
+export function failTaskAttempt(cwd, runId, taskId, { attemptId, error }) {
+  const id = assertId(runId, "run");
+  const filePath = runFile(cwd, id);
+  return withFileLock(filePath, () => {
+    const run = loadRun(cwd, id);
+    const task = requireTask(run, taskId);
+    const attempt = currentAttempt(task, attemptId);
+    attempt.status = "failed";
+    attempt.finishedAt = nowIso();
+    attempt.error = String(error ?? "Worker execution failed.");
+    task.status = "failed";
+    task.result = {
+      summary: attempt.error,
+      contractFound: false,
+      missingFields: [],
+      fields: {},
+      structured: null,
+      reportedAt: nowIso()
+    };
+    task.updatedAt = nowIso();
+    refreshRunStatus(run);
+    writeRun(cwd, run);
+    appendEvent(cwd, id, {
+      type: "task.execution_failed",
+      taskId: task.id,
+      attemptId: attempt.id,
+      error: attempt.error
+    });
+    return task;
+  });
+}
+
+export function recordIntegration(
+  cwd,
+  runId,
+  taskId,
+  { evidence = [], inspection, commits, integrationHead }
+) {
+  const id = assertId(runId, "run");
+  const filePath = runFile(cwd, id);
+  return withFileLock(filePath, () => {
+    const run = loadRun(cwd, id);
+    const task = requireTask(run, taskId);
+    if (task.status !== "reported") {
+      throw new Error(`Task "${task.id}" cannot be integrated from status "${task.status}".`);
+    }
+    task.verification = {
+      verdict: "pass",
+      evidence: stringList(evidence, "integration evidence"),
+      at: nowIso()
+    };
+    task.integration = {
+      inspection,
+      commits,
+      integrationHead,
+      integratedAt: nowIso()
+    };
+    task.status = "completed";
+    task.updatedAt = nowIso();
+    currentAttempt(task).status = "completed";
+    run.repository.integrationHead = integrationHead;
+    refreshRunStatus(run);
+    writeRun(cwd, run);
+    appendEvent(cwd, id, {
+      type: "task.integrated",
+      taskId: task.id,
+      commits,
+      integrationHead,
+      evidence: task.verification.evidence
+    });
+    return { task, ready: readyTasks(run), runStatus: run.status };
+  });
+}
+
 export function verifyTask(cwd, runId, taskId, { verdict, evidence = [] }) {
   const id = assertId(runId, "run");
   const normalizedVerdict = String(verdict ?? "").trim().toLowerCase();
@@ -636,6 +794,9 @@ export function verifyTask(cwd, runId, taskId, { verdict, evidence = [] }) {
     const task = requireTask(run, taskId);
     if (task.status !== "reported") {
       throw new Error(`Task "${task.id}" cannot be verified from status "${task.status}".`);
+    }
+    if (task.kind === "write" && currentAttempt(task).worktree) {
+      throw new Error(`Write task "${task.id}" must pass worktree integration, not direct verification.`);
     }
     const verification = {
       verdict: normalizedVerdict,

@@ -21,12 +21,19 @@ import {
   loadRun,
   readyTasks,
   recordTaskResult,
+  recordIntegration,
   recoveryReport,
   renderSupervisorBriefing,
   replacePlan,
   retryTask,
   verifyTask
 } from "./lib/runs.mjs";
+import { launchTaskWorker, pollRunWorkers, stopTaskWorker } from "./lib/workers.mjs";
+import {
+  cleanupTaskWorktree,
+  inspectTaskWorktree,
+  integrateTaskWorktree
+} from "./lib/worktrees.mjs";
 import {
   initWorkspace,
   isInitialized,
@@ -66,6 +73,11 @@ Usage:
   orch run retry <run-id> <task-id> [--json]
   orch run cancel <run-id> [task-id] [--reason <text>] [--json]
   orch run recover <run-id> [--json]
+  orch run launch <run-id> <task-id> [--json]
+  orch run poll <run-id> [--json]
+  orch run inspect <run-id> <task-id> [--json]
+  orch run integrate <run-id> <task-id> [--evidence <text>]... [--json]
+  orch run cleanup <run-id> [task-id] [--json]
 `;
 
 function fail(message) {
@@ -470,6 +482,13 @@ function commandRun(argv, cwd) {
 
   if (action === "cancel") {
     const taskId = positionals[1];
+    const activeRun = loadRun(cwd, runId);
+    const activeTasks = taskId
+      ? [activeRun.tasks[taskId]]
+      : Object.values(activeRun.tasks);
+    for (const task of activeTasks.filter(Boolean)) {
+      stopTaskWorker(task.attempts.at(-1));
+    }
     const result = taskId
       ? cancelTask(cwd, runId, taskId, options.reason)
       : cancelRun(cwd, runId, options.reason);
@@ -481,6 +500,72 @@ function commandRun(argv, cwd) {
     return options.json
       ? emitJson(report)
       : emit(report.length ? report.map((item) => `${item.taskId}\t${item.attemptStatus}\t${item.jobId ?? item.agentId ?? "unbound"}`).join("\n") : "No active workers need recovery.");
+  }
+
+  if (action === "launch") {
+    const taskId = positionals[1];
+    if (!taskId) {
+      throw new Error("`orch run launch` requires a task id.");
+    }
+    const run = loadRun(cwd, runId);
+    const launched = launchTaskWorker(cwd, runId, taskId, requireLane(cwd, run.lane));
+    return options.json
+      ? emitJson(launched)
+      : emit(`Launched ${taskId} as PID ${launched.runner.pid} in ${launched.worktree.path}.`);
+  }
+
+  if (action === "poll") {
+    const updates = pollRunWorkers(cwd, runId);
+    return options.json
+      ? emitJson(updates)
+      : emit(updates.length ? updates.map((update) => `${update.taskId}\t${update.status}`).join("\n") : "No active workers.");
+  }
+
+  if (action === "inspect") {
+    const run = loadRun(cwd, runId);
+    const taskId = positionals[1];
+    const task = run.tasks[taskId];
+    if (!task) {
+      throw new Error(`Unknown task "${taskId}" in run "${runId}".`);
+    }
+    const inspection = inspectTaskWorktree(task, task.attempts.at(-1));
+    return options.json ? emitJson(inspection) : emitJson(inspection);
+  }
+
+  if (action === "integrate") {
+    const run = loadRun(cwd, runId);
+    const taskId = positionals[1];
+    const task = run.tasks[taskId];
+    if (!task) {
+      throw new Error(`Unknown task "${taskId}" in run "${runId}".`);
+    }
+    const integrated = integrateTaskWorktree(cwd, run, task, task.attempts.at(-1));
+    const result = recordIntegration(cwd, runId, taskId, {
+      evidence: splitList(options.evidence),
+      ...integrated
+    });
+    return options.json ? emitJson(result) : emit(`Integrated ${taskId}; run: ${result.runStatus}.`);
+  }
+
+  if (action === "cleanup") {
+    const run = loadRun(cwd, runId);
+    const taskId = positionals[1];
+    const tasks = taskId ? [run.tasks[taskId]] : Object.values(run.tasks);
+    if (tasks.some((task) => !task)) {
+      throw new Error(`Unknown task "${taskId}" in run "${runId}".`);
+    }
+    const removed = [];
+    for (const task of tasks) {
+      if (!["completed", "failed", "blocked", "cancelled"].includes(task.status)) {
+        continue;
+      }
+      for (const attempt of task.attempts) {
+        if (cleanupTaskWorktree(cwd, attempt)) {
+          removed.push(attempt.worktree.path);
+        }
+      }
+    }
+    return options.json ? emitJson(removed) : emit(removed.length ? `Removed:\n${removed.map((entry) => `- ${entry}`).join("\n")}` : "No completed worktrees to remove.");
   }
 
   throw new Error(`Unknown run action "${action}".`);

@@ -1,7 +1,7 @@
 ---
 description: Have Claude Fable plan and manage a pool of GPT-5.6-sol Codex workers
 argument-hint: "<lane> [--max-workers <n>] [--effort <level>] <objective>"
-allowed-tools: Read, Grep, Glob, Write, Bash(node:*), Agent, AskUserQuestion
+allowed-tools: Read, Grep, Glob, Write, Bash(node:*), AskUserQuestion
 ---
 
 Run a complete orchestration loop in the main Claude thread.
@@ -73,37 +73,25 @@ Get the ready queue:
 node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" run ready <run-id> --json
 ```
 
-Select at most the run's remaining worker capacity. Claim each selected task:
+Select at most the run's remaining worker capacity. Launch each selected task:
 
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" run claim <run-id> <task-id> --json
+node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" run launch <run-id> <task-id> --json
 ```
 
-Each claim returns the authoritative briefing and routing flags. Invoke one
-`codex:codex-rescue` Agent per claim, concurrently, using:
-
-- the returned briefing as the prompt
-- `--fresh`
-- `--model gpt-5.6-sol`
-- the returned `--effort`
-- Claude Agent background execution so the main thread remains available
-
-Do not pass the upstream `--background` flag. The Claude Agent is the background container; the
-Codex rescue should wait for its Codex result so the supervisor receives the full worker output.
-
-Immediately bind the Claude agent id:
-
-```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" run bind <run-id> <task-id> \
-  --attempt <attempt-id> \
-  --agent-id <agent-id>
-```
-
-If the worker later reports an upstream Codex job or thread id, bind those too. Never invent an id.
+Each launch creates an isolated Git worktree and starts one detached `codex exec` process with the
+authoritative briefing, an output schema, `--model gpt-5.6-sol`, the configured effort, and the
+least sandbox needed for the task. The returned PID, files, worktree, and eventual Codex thread id
+are stored in run state. Launch independent ready tasks without waiting between them.
 
 ## 5. Monitor and collect
 
-Remain responsive while workers run. Use the Agent task handles to inspect or steer workers.
+Remain responsive while workers run. Poll without blocking:
+
+```bash
+node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" run poll <run-id> --json
+```
+
 Use the durable recovery view after compaction or interruption:
 
 ```bash
@@ -111,17 +99,8 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" run recover <run-id> --json
 node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" run briefing <run-id>
 ```
 
-When a worker finishes, write its complete output to a temporary file outside the tracked tree and
-record it:
-
-```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" run report <run-id> <task-id> \
-  --attempt <attempt-id> \
-  --result-file <worker-output-file> \
-  --json
-```
-
-A worker report is not completion. It is evidence awaiting supervisor verification.
+Polling collects finished structured output into the task automatically. A worker report is not
+completion. It is evidence awaiting supervisor verification.
 
 ## 6. Verify
 
@@ -133,7 +112,7 @@ For every reported task:
 - evaluate every acceptance criterion
 - check blockers, assumptions, and confidence
 
-Then record the supervisor verdict:
+For read and verification tasks, record the supervisor verdict:
 
 ```bash
 node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" run verify <run-id> <task-id> \
@@ -150,6 +129,25 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" run retry <run-id> <task-id>
 ```
 
 Do not mark a task complete merely because Codex said it was complete.
+
+For write tasks, first inspect the isolated worktree:
+
+```bash
+node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" run inspect <run-id> <task-id> --json
+```
+
+Require a clean worktree, at least one worker commit, exact agreement between reported and changed
+files, and no out-of-scope paths. After independently confirming tests and acceptance criteria,
+integrate it:
+
+```bash
+node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" run integrate <run-id> <task-id> \
+  --evidence "<specific check and outcome>" \
+  --json
+```
+
+Integration cherry-picks the task commits onto the supervisor branch. Conflicts are aborted and
+reported; never resolve them by silently discarding another worker's change.
 
 ## 7. Continue, replan, and checkpoint
 
@@ -171,6 +169,7 @@ Before reporting success:
 - run the nearest full repository verification
 - inspect the final combined diff
 - confirm no worker or temporary orchestration artifact remains in the tracked tree
+- remove completed isolated worktrees with `run cleanup <run-id>`
 - update the ledger only with durable, confirmed facts and only when appropriate
 
 Report the objective, task outcomes, important decisions, exact verification evidence, commits if
@@ -181,6 +180,6 @@ created, and any residual risk. Distinguish built, verified, and unverified work
 - Claude Fable is always the planner, scheduler, reviewer, replanner, and integrator.
 - All execution workers use `gpt-5.6-sol`; do not silently substitute another model.
 - Codex workers never self-assign global work or expand their scope.
-- Never run overlapping write tasks in one checkout.
+- Every worker runs in its own isolated worktree.
 - Never bypass the run state because the manual path seems faster.
 - Never continue from memory alone when `run briefing` or `run recover` can restore exact state.

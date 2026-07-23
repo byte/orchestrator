@@ -72,7 +72,7 @@ function checkCodexPlugin() {
 
   return {
     id: "codex-plugin",
-    label: "Codex plugin installed",
+    label: "Legacy Codex bridge installed (optional)",
     ok: installed,
     detail,
     remedy: "/plugin marketplace add openai/codex-plugin-cc  then  /plugin install codex@openai-codex"
@@ -110,9 +110,11 @@ export function preflight(cwd = process.cwd()) {
     checkInitialized(cwd)
   ];
 
-  // The acceptance check needs git to attribute changes; everything else is fatal
-  // to dispatch. Initialization is repaired by /orch:init rather than blocking.
-  const blocking = checks.filter((check) => !check.ok && check.id !== "initialized");
+  // Native pool dispatch uses Codex CLI directly. The upstream Claude bridge is
+  // optional and retained only for the legacy single-task /orch:do workflow.
+  const blocking = checks.filter(
+    (check) => !check.ok && !["initialized", "codex-plugin"].includes(check.id)
+  );
 
   return { ok: blocking.length === 0, blocking, checks };
 }
