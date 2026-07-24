@@ -722,6 +722,50 @@ export function attachExecution(cwd, runId, taskId, { attemptId, worktree, runne
   });
 }
 
+export function syncExecutionStatus(cwd, runId, taskId, { attemptId, status }) {
+  const id = assertId(runId, "run");
+  const filePath = runFile(cwd, id);
+  return withFileLock(filePath, () => {
+    const run = loadRun(cwd, id);
+    const task = requireTask(run, taskId);
+    const attempt = currentAttempt(task, attemptId);
+    if (!attempt.runner) {
+      throw new Error(`Attempt "${attempt.id}" has no runner to synchronize.`);
+    }
+    const previous = {
+      status: attempt.runner.status,
+      childPid: attempt.runner.childPid ?? null,
+      threadId: attempt.threadId ?? null,
+      exitCode: attempt.runner.exitCode ?? null,
+      signal: attempt.runner.signal ?? null
+    };
+    attempt.runner.status = status.status ?? attempt.runner.status;
+    attempt.runner.childPid = status.childPid ?? attempt.runner.childPid ?? null;
+    attempt.runner.exitCode = status.exitCode ?? attempt.runner.exitCode ?? null;
+    attempt.runner.signal = status.signal ?? attempt.runner.signal ?? null;
+    attempt.threadId = status.threadId ?? attempt.threadId;
+    const current = {
+      status: attempt.runner.status,
+      childPid: attempt.runner.childPid,
+      threadId: attempt.threadId ?? null,
+      exitCode: attempt.runner.exitCode,
+      signal: attempt.runner.signal
+    };
+    if (JSON.stringify(previous) === JSON.stringify(current)) {
+      return attempt;
+    }
+    task.updatedAt = nowIso();
+    writeRun(cwd, run);
+    appendEvent(cwd, id, {
+      type: "task.execution_status",
+      taskId: task.id,
+      attemptId: attempt.id,
+      runner: current
+    });
+    return attempt;
+  });
+}
+
 export function failTaskAttempt(cwd, runId, taskId, { attemptId, error }) {
   const id = assertId(runId, "run");
   const filePath = runFile(cwd, id);

@@ -181,6 +181,8 @@ test("detached workers persist status, thread id, and structured results", async
   const task = loadRun(root, "run-worker").tasks.build;
   assert.equal(task.result.structured.summary, "Fake worker completed.");
   assert.equal(task.attempts.at(-1).threadId, "thread-fake");
+  assert.equal(task.attempts.at(-1).runner.status, "completed");
+  assert.ok(task.attempts.at(-1).runner.childPid > 0);
 });
 
 test("the pool runs independent ready tasks in separate detached worktrees", async () => {

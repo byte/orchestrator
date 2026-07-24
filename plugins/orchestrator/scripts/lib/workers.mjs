@@ -5,11 +5,11 @@ import { fileURLToPath } from "node:url";
 
 import {
   attachExecution,
-  bindAttempt,
   claimTask,
   failTaskAttempt,
   loadRun,
-  recordTaskResult
+  recordTaskResult,
+  syncExecutionStatus
 } from "./runs.mjs";
 import { atomicWrite } from "./state.mjs";
 import { createTaskWorktree } from "./worktrees.mjs";
@@ -151,17 +151,15 @@ export function pollRunWorkers(cwd, runId) {
       continue;
     }
     const status = readJson(statusFile);
+    syncExecutionStatus(cwd, runId, task.id, {
+      attemptId: attempt.id,
+      status
+    });
     if (status.status === "running") {
       updates.push({ taskId: task.id, ...status });
       continue;
     }
     if (status.status === "completed" && fs.existsSync(attempt.runner.lastMessageFile)) {
-      if (status.threadId) {
-        bindAttempt(cwd, runId, task.id, {
-          attemptId: attempt.id,
-          threadId: status.threadId
-        });
-      }
       const recorded = recordTaskResult(cwd, runId, task.id, {
         attemptId: attempt.id,
         resultText: fs.readFileSync(attempt.runner.lastMessageFile, "utf8")
