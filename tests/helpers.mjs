@@ -4,6 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { addCheckpoint } from "../plugins/orchestrator/scripts/lib/runs.mjs";
+
 const here = path.dirname(fileURLToPath(import.meta.url));
 
 export const CLI = path.join(here, "..", "plugins", "orchestrator", "scripts", "orch.mjs");
@@ -63,4 +65,12 @@ export function runCli(root, args) {
       stderr: error.stderr ?? ""
     };
   }
+}
+
+/**
+ * Dispatch is gated on a checkpoint covering the current plan revision, so tests
+ * that launch or claim work record one first, exactly as a supervisor must.
+ */
+export function checkpointPlan(root, runId, summary = "plan approved") {
+  return addCheckpoint(root, runId, { summary });
 }

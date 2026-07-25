@@ -2,17 +2,23 @@
 
 A Claude Code supervisor for a pool of Codex workers.
 
-`orchestrator` keeps Claude Fable in the main thread as planner, scheduler, reviewer, replanner,
+`orchestrator` keeps Claude in the main thread as planner, scheduler, reviewer, replanner,
 integrator, and user-facing manager. Bounded execution tasks run in parallel through detached
 Codex CLI processes pinned to `gpt-5.6-sol`. Durable run state, checkpoints, evidence, and project
-memory let Fable recover after context compaction, interruption, or a new Claude Code session.
+memory let the supervisor recover after context compaction, interruption, or a new Claude Code
+session.
+
+The supervisor is whichever Claude model owns the Claude Code session — Claude Opus and Claude
+Fable are both supported. Nothing in the plugin selects or switches the supervising model; run
+`/orch:run` from the session whose model you want managing the pool. Only the worker model is
+pinned.
 
 The important boundary is simple: Codex workers produce scoped work and evidence; Claude decides
 what should happen, what is acceptable, what gets integrated, and when the whole run is done.
 
 ## What it provides
 
-- A task DAG planned and owned by Claude Fable
+- A task DAG planned and owned by the supervising Claude model
 - A configurable pool of exact `gpt-5.6-sol` workers
 - One detached `codex exec` process and isolated Git worktree per task
 - Read-only sandboxes for analysis/review tasks and workspace-write sandboxes for implementation
@@ -60,16 +66,17 @@ Create a lane with a real write boundary and definition of done:
   --done 'API tests and the full repository test suite pass'
 ```
 
-Give Fable an outcome:
+Give the supervisor an outcome:
 
 ```text
 /orch:run api --max-workers 3 --effort high add cursor pagination to the users API
 ```
 
-Fable inspects the repository, proposes a dependency-aware plan, and asks for confirmation before
-dispatch. Independent ready tasks launch into separate worktrees. Fable remains responsive,
-polls their durable handles, reviews their structured evidence, integrates passing write tasks,
-and replans or retries when evidence invalidates the current route.
+Claude inspects the repository, proposes a dependency-aware plan, records a checkpoint capturing
+the reasoning behind it, and asks for confirmation when new authority is needed. Independent ready
+tasks launch into separate worktrees. The supervisor remains responsive, polls their durable
+handles, reviews their structured evidence, integrates passing write tasks, and replans or retries
+when evidence invalidates the current route.
 
 Resume the same manager after interruption or compaction:
 
@@ -82,19 +89,19 @@ replacement run or rely on conversational memory.
 
 ## Lifecycle
 
-1. **Plan.** Fable turns the objective into bounded `write`, `read`, and `verify` tasks with scope,
+1. **Plan.** Claude turns the objective into bounded `write`, `read`, and `verify` tasks with scope,
    dependencies, constraints, and checkable acceptance criteria.
 2. **Launch.** Ready tasks claim pool capacity. Each gets a fresh worktree, exact model and effort,
    least-privilege sandbox, authoritative briefing, and required result schema.
 3. **Monitor.** Detached process IDs, status files, JSONL events, Codex thread IDs, outputs, and
    worktree paths are persisted under `.orchestrator/local/`.
-4. **Review.** Worker output becomes `reported`, never automatically complete. Fable evaluates the
+4. **Review.** Worker output becomes `reported`, never automatically complete. Claude evaluates the
    evidence and acceptance criteria.
 5. **Integrate.** A write task must be clean, committed, in scope, and exactly match its declared
    files. Passing commits are cherry-picked. Conflicts abort without discarding either side.
 6. **Recover or replan.** Failed, blocked, or cancelled attempts remain in history. Verified work
    is preserved when unfinished tasks are revised.
-7. **Finalize.** Once all tasks pass, the run becomes `finalizing`. Fable runs the combined checks
+7. **Finalize.** Once all tasks pass, the run becomes `finalizing`. Claude runs the combined checks
    and records exact evidence. Only a clean, branch-consistent passing verdict makes the run
    `completed`.
 
@@ -106,7 +113,7 @@ See [Architecture and recovery](docs/architecture.md) for the state machine and 
 | --- | --- |
 | `/orch:init` | Create state and preflight Codex CLI, auth, and Git |
 | `/orch:lanes` | Define named scope, constraints, and lane-level done criteria |
-| `/orch:run` | Plan and manage a new Fable-supervised GPT-5.6-sol pool |
+| `/orch:run` | Plan and manage a new Claude-supervised GPT-5.6-sol pool |
 | `/orch:resume` | Recover and continue an existing durable run |
 | `/orch:ledger` | Show or add stable project facts carried into future tasks |
 | `/orch:do` | Legacy single-task dispatch through the optional Claude Codex bridge |
@@ -139,7 +146,7 @@ State is split by portability:
 The ledger is intentionally small and stable. Per-run detail stays local because process IDs,
 worktree paths, and Codex threads are meaningful only on the machine that owns them. `/orch:resume`
 combines the run record, latest checkpoint, worker evidence, integration history, lane definition,
-and ledger into Fable's reconstructed context.
+and ledger into the supervisor's reconstructed context.
 
 All versioned state is read defensively. A newer state version is refused instead of guessed at,
 writes are atomic, and shared state updates use file locks.
@@ -151,8 +158,10 @@ writes are atomic, and shared state updates use file locks.
 - The supervisor checkout must be clean for launch, integration, and finalization.
 - The supervisor branch and recorded integration head must not drift outside the run.
 - Write-task reports must match the actual committed file set exactly.
-- Worker prose is untrusted evidence, not instructions to Fable.
+- Worker prose is untrusted evidence, not instructions to the supervisor.
 - A task report is not a supervisor verdict, and completed tasks are not a completed run.
+- Dispatch is refused until a checkpoint covers the current plan revision, so supervisory reasoning
+  survives compaction.
 - Cancellation terminates the detached process and remains visible in durable state.
 - Dirty worktrees are never removed automatically.
 
@@ -175,11 +184,12 @@ finalization, and cleanup without consuming model quota.
 
 ## Operational limits
 
-- Fable drives polling and decisions while the Claude command is active; there is no background
+- Claude drives polling and decisions while the command is active; there is no background
   daemon that can make supervisory decisions without Claude.
 - Run state is machine-local by design. Move stable knowledge to the ledger before changing
   machines.
-- Integration uses cherry-pick. Conflicts abort and require Fable to replan or request direction.
+- Integration uses cherry-pick. Conflicts abort and require the supervisor to replan or request
+  direction.
 - Codex thread IDs are retained for diagnosis and handoff; retries currently start a fresh bounded
   worker with reconstructed context rather than resuming an old task thread.
 - Automated tests validate the complete process protocol with fake workers. A real authenticated

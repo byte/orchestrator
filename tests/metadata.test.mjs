@@ -22,7 +22,8 @@ test("release metadata stays synchronized", () => {
 
 test("release documentation describes the supervisor pool and recovery surface", () => {
   const readme = fs.readFileSync(path.join(root, "README.md"), "utf8");
-  assert.match(readme, /Claude Fable/);
+  assert.match(readme, /Claude Opus and Claude\s+Fable are both supported/);
+  assert.match(readme, /Nothing in the plugin selects or switches the supervising model/);
   assert.match(readme, /gpt-5\.6-sol/);
   assert.match(readme, /\/orch:resume/);
   assert.match(readme, /finalizing/);

@@ -1,5 +1,5 @@
 ---
-description: Resume Claude Fable's supervision of a durable orchestration run
+description: Resume Claude's supervision of a durable orchestration run
 argument-hint: "<run-id>"
 allowed-tools: Read, Grep, Glob, Write, Bash(node:*), AskUserQuestion
 ---
@@ -25,9 +25,11 @@ recovered state. Do not create a replacement run. In particular:
 - collect and review newly reported results
 - verify read tasks; inspect and integrate write-task worktrees
 - dispatch only currently ready tasks and stay within the saved worker limit
-- checkpoint material decisions, risks, and next actions
+- checkpoint material decisions, risks, and next actions with `run checkpoint <run-id>`,
+  especially when the recovered briefing marks the latest checkpoint stale
 - replan deliberately when evidence invalidates unfinished work
 - run and record the combined final verification gate before reporting success
 
-Claude Fable remains the planner, scheduler, reviewer, replanner, integrator, and user-facing
-manager. Codex workers remain bounded executors pinned to `gpt-5.6-sol`.
+The Claude model running this main thread remains the planner, scheduler, reviewer, replanner,
+integrator, and user-facing manager, whether that is Claude Opus or Claude Fable. Codex workers
+remain bounded executors pinned to `gpt-5.6-sol`.

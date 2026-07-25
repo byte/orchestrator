@@ -1,5 +1,5 @@
 ---
-description: Have Claude Fable plan and manage a pool of GPT-5.6-sol Codex workers
+description: Plan and manage a pool of GPT-5.6-sol Codex workers from the Claude Code main thread
 argument-hint: "<lane> [--max-workers <n>] [--effort <level>] <objective>"
 allowed-tools: Read, Grep, Glob, Write, Bash(node:*), AskUserQuestion
 ---
@@ -61,7 +61,22 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" run plan <run-id> \
   --json
 ```
 
-Record a checkpoint summarizing the approved plan, important decisions, risks, and first actions.
+Then record a checkpoint summarizing the approved plan, important decisions, risks, and first
+actions:
+
+```bash
+node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" run checkpoint <run-id> \
+  --summary "<what this plan does and why>" \
+  --decision "<a choice a future supervisor must not silently reverse>" \
+  --risk "<what could invalidate this route>" \
+  --next "<the immediate next action>" \
+  --json
+```
+
+This is not optional bookkeeping. The run record preserves what happened; only the checkpoint
+preserves *why*, and it is what you get back after compaction. `run launch` refuses to dispatch
+until a checkpoint covers the current plan revision.
+
 For normal in-scope implementation work, approve your own plan and continue. Stop for the user only
 when the plan requires destructive action, an external write, or material scope expansion.
 
@@ -155,8 +170,21 @@ Verified dependencies automatically unlock downstream tasks. Dispatch successive
 task is verified, or until the run is genuinely blocked.
 
 At each major wave boundary, record a compact checkpoint. Preserve decisions and evidence, not raw
-logs. If a task reveals that the plan is wrong, stop dispatching dependent work, explain the
-conflict, revise the plan deliberately, and checkpoint the change.
+logs:
+
+```bash
+node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" run checkpoint <run-id> \
+  --summary "<what this wave established>" \
+  --decision "<decision made from the evidence>" \
+  --risk "<open risk>" \
+  --next "<next wave>" \
+  --json
+```
+
+`run ready` reports the checkpoint as stale once tasks have completed since the last one, and
+`run resume` marks a stale checkpoint in the briefing. If a task reveals that the plan is wrong,
+stop dispatching dependent work, explain the conflict, revise the plan deliberately, and
+checkpoint the change — a new plan revision blocks dispatch until it has its own checkpoint.
 
 Retry transient worker failures once. Repeated failures, scope conflicts, missing authority, or an
 unmet prerequisite are blockers; do not loop indefinitely.
@@ -190,7 +218,10 @@ created, and any residual risk. Distinguish built, verified, and unverified work
 
 ## Hard rules
 
-- Claude Fable is always the planner, scheduler, reviewer, replanner, and integrator.
+- The Claude model running the main thread is always the planner, scheduler, reviewer, replanner,
+  and integrator. Claude Opus and Claude Fable are both supported supervisors; the supervisor is
+  whichever model owns this Claude Code session, and supervisory authority never moves to a
+  subagent or to a worker.
 - All execution workers use `gpt-5.6-sol`; do not silently substitute another model.
 - Codex workers never self-assign global work or expand their scope.
 - Every worker runs in its own isolated worktree.

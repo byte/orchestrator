@@ -1,8 +1,24 @@
 # Changelog
 
+## Unreleased
+
+- Documented the supervisor as whichever Claude model owns the Claude Code session. Claude Opus
+  and Claude Fable are both supported; the plugin never selects or substitutes a supervising
+  model, and only the worker model is pinned
+- `run launch` now refuses to dispatch until a checkpoint covers the current plan revision, so
+  the reasoning behind a plan or a replan is written down before work leaves the main thread
+- `run ready` and the resume briefing report a checkpoint as stale once tasks complete beneath
+  it; staleness prompts, a new plan revision blocks
+- Worker briefings now carry each completed dependency's decisions, assumptions, changed files,
+  and supervisor-verified evidence instead of a single summary line
+- `/orch:run` documents the exact `run checkpoint` invocation at plan approval and wave
+  boundaries
+
+`orch run ready --json` now returns `{ tasks, checkpoint }` rather than a bare task array.
+
 ## 0.2.0
 
-Claude Fable can now supervise a durable pool of Codex workers inside Claude Code.
+A Claude supervisor can now manage a durable pool of Codex workers inside Claude Code.
 
 - `/orch:run` plans a task DAG, confirms it, and manages bounded workers pinned to
   `gpt-5.6-sol`
@@ -10,10 +26,10 @@ Claude Fable can now supervise a durable pool of Codex workers inside Claude Cod
   required JSON output, durable process/thread handles, and configurable pool capacity
 - Every task receives an isolated Git worktree; write integration requires clean commits,
   exact file declarations, in-scope changes, and an unchanged supervisor branch
-- Worker reports remain untrusted evidence until Fable verifies read tasks or integrates
-  passing write tasks
-- `/orch:resume` polls active workers and reconstructs Fable's full managerial context from
-  run state, checkpoints, evidence, integration history, lanes, and the ledger
+- Worker reports remain untrusted evidence until the supervisor verifies read tasks or
+  integrates passing write tasks
+- `/orch:resume` polls active workers and reconstructs the supervisor's full managerial context
+  from run state, checkpoints, evidence, integration history, lanes, and the ledger
 - Completed task graphs enter `finalizing`; a separate clean, branch-consistent combined
   verification record is required before a run becomes `completed`
 - Explicit retry, cancellation, replanning, conflict abort, branch-drift refusal, and safe

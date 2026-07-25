@@ -382,7 +382,10 @@ test("run commands persist a plan, ready queue, checkpoint, and restart briefing
   assert.equal(JSON.parse(planned.stdout).planRevision, 1);
 
   const ready = JSON.parse(runCli(root, ["run", "ready", "run-cli", "--json"]).stdout);
-  assert.deepEqual(ready.map((task) => task.id), ["implementation"]);
+  assert.deepEqual(ready.tasks.map((task) => task.id), ["implementation"]);
+  assert.equal(ready.checkpoint.current, false);
+  assert.equal(ready.checkpoint.stale, true);
+  assert.match(ready.checkpoint.reason, /no checkpoint has been recorded/);
 
   const checkpoint = runCli(root, [
     "run",
@@ -397,8 +400,12 @@ test("run commands persist a plan, ready queue, checkpoint, and restart briefing
   ]);
   assert.equal(checkpoint.code, 0);
 
+  const readyAfter = JSON.parse(runCli(root, ["run", "ready", "run-cli", "--json"]).stdout);
+  assert.equal(readyAfter.checkpoint.current, true);
+  assert.equal(readyAfter.checkpoint.stale, false);
+
   const briefing = runCli(root, ["run", "briefing", "run-cli"]).stdout;
-  assert.match(briefing, /Claude supervisor/);
+  assert.match(briefing, /you are the supervisor/);
   assert.match(briefing, /Plan approved/);
   assert.match(briefing, /implementation — Implement/);
   assert.match(briefing, /No new dependencies/);

@@ -8,6 +8,7 @@ import {
   bindAttempt,
   cancelRun,
   cancelTask,
+  checkpointStatus,
   claimTask,
   createRun,
   eventsFile,
@@ -17,11 +18,12 @@ import {
   recordTaskResult,
   recoveryReport,
   renderSupervisorBriefing,
+  renderWorkerBriefing,
   replacePlan,
   retryTask,
   verifyTask
 } from "../plugins/orchestrator/scripts/lib/runs.mjs";
-import { cleanup, git, makeRepo, runCli, write } from "./helpers.mjs";
+import { checkpointPlan, cleanup, git, makeRepo, runCli, write } from "./helpers.mjs";
 
 const repos = [];
 
@@ -164,7 +166,7 @@ test("the supervisor briefing reconstructs authority, graph, checkpoint, and led
     constraints: ["No new dependencies"],
     done: "All tests pass."
   });
-  assert.match(briefing, /You are the Claude supervisor/);
+  assert.match(briefing, /You are the Claude model running the Claude Code main thread, and you are the supervisor/);
   assert.match(briefing, /gpt-5\.6-sol/);
   assert.match(briefing, /implementation — Implement pagination/);
   assert.match(briefing, /Planning complete/);
@@ -195,6 +197,7 @@ test("task claims enforce pool capacity and route explicitly to GPT-5.6 Sol", ()
     { id: "a", title: "A", objective: "Implement A", scope: ["src/a/**"] },
     { id: "b", title: "B", objective: "Implement B", scope: ["src/b/**"] }
   ]);
+  checkpointPlan(root, "run-pool");
   const dispatch = claimTask(root, "run-pool", "a", { constraints: [] });
   assert.equal(dispatch.model, "gpt-5.6-sol");
   assert.equal(dispatch.reasoningEffort, "xhigh");
@@ -226,6 +229,7 @@ test("worker binding, reporting, supervisor verification, and dependencies form 
       dependsOn: ["build"]
     }
   ]);
+  checkpointPlan(root, "run-life");
   const dispatch = claimTask(root, "run-life", "build", { constraints: [] });
   const bound = bindAttempt(root, "run-life", "build", {
     attemptId: dispatch.attemptId,
@@ -274,6 +278,7 @@ test("blocked and failed tasks retain attempts and can be retried", () => {
   replacePlan(root, "run-retry", [
     { id: "work", title: "Work", objective: "Do work", scope: ["src/**"] }
   ]);
+  checkpointPlan(root, "run-retry");
   const first = claimTask(root, "run-retry", "work", { constraints: [] });
   const blocked = recordTaskResult(root, "run-retry", "work", {
     attemptId: first.attemptId,
@@ -283,6 +288,7 @@ test("blocked and failed tasks retain attempts and can be retried", () => {
   assert.equal(blocked.runStatus, "blocked");
 
   retryTask(root, "run-retry", "work");
+  checkpointPlan(root, "run-retry");
   const second = claimTask(root, "run-retry", "work", { constraints: [] });
   assert.equal(second.attemptId, "work-attempt-2");
   const failed = recordTaskResult(root, "run-retry", "work", {
@@ -306,6 +312,7 @@ test("supervisor verification can fail a report and cancellation is durable", ()
     { id: "a", title: "A", objective: "A", scope: ["src/a/**"] },
     { id: "b", title: "B", objective: "B", scope: ["src/b/**"] }
   ]);
+  checkpointPlan(root, "run-control");
   const dispatch = claimTask(root, "run-control", "a", { constraints: [] });
   recordTaskResult(root, "run-control", "a", {
     attemptId: dispatch.attemptId,
@@ -340,6 +347,7 @@ test("replanning preserves verified work while replacing unfinished tasks", () =
     completedDefinition,
     { id: "old-fix", title: "Old fix", objective: "Try old fix", scope: ["src/**"], dependsOn: ["discovery"] }
   ]);
+  checkpointPlan(root, "run-replan");
   const dispatch = claimTask(root, "run-replan", "discovery", { constraints: [] });
   recordTaskResult(root, "run-replan", "discovery", {
     attemptId: dispatch.attemptId,
@@ -385,6 +393,7 @@ test("a completed task graph still requires a clean combined final verification 
       acceptance: ["return evidence"]
     }
   ]);
+  checkpointPlan(root, "run-final");
   const dispatch = claimTask(root, "run-final", "review", { constraints: [] });
   recordTaskResult(root, "run-final", "review", {
     attemptId: dispatch.attemptId,
@@ -432,6 +441,7 @@ test("final verification refuses incomplete, dirty, and externally advanced runs
     /until every task is completed/
   );
 
+  checkpointPlan(root, "run-final-guard");
   const dispatch = claimTask(root, "run-final-guard", "review", { constraints: [] });
   recordTaskResult(root, "run-final-guard", "review", {
     attemptId: dispatch.attemptId,
@@ -468,4 +478,119 @@ test("final verification refuses incomplete, dirty, and externally advanced runs
     }),
     /advanced outside run/
   );
+});
+
+test("dispatch is gated on a checkpoint that covers the current plan revision", () => {
+  const root = repo();
+  createRun(root, { id: "run-gate", lane: "api", objective: "Ship safely" });
+  replacePlan(root, "run-gate", [
+    { id: "build", title: "Build", objective: "Build it", scope: ["src/**"] }
+  ]);
+
+  const beforeCheckpoint = checkpointStatus(loadRun(root, "run-gate"));
+  assert.equal(beforeCheckpoint.current, false);
+  assert.match(beforeCheckpoint.reason, /no checkpoint has been recorded/);
+  assert.throws(
+    () => claimTask(root, "run-gate", "build", { constraints: [] }),
+    /cannot dispatch work because no checkpoint has been recorded/
+  );
+
+  addCheckpoint(root, "run-gate", { summary: "Plan approved" });
+  const afterCheckpoint = checkpointStatus(loadRun(root, "run-gate"));
+  assert.equal(afterCheckpoint.current, true);
+  assert.equal(afterCheckpoint.stale, false);
+  assert.equal(claimTask(root, "run-gate", "build", { constraints: [] }).taskId, "build");
+  cancelTask(root, "run-gate", "build", "superseded");
+
+  // Replanning invalidates the recorded reasoning, so dispatch closes again.
+  replacePlan(root, "run-gate", [
+    { id: "rework", title: "Rework", objective: "Rework it", scope: ["src/**"] }
+  ]);
+  const afterReplan = checkpointStatus(loadRun(root, "run-gate"));
+  assert.equal(afterReplan.current, false);
+  assert.match(afterReplan.reason, /plan revision 1, but the run is on revision 2/);
+  assert.throws(
+    () => claimTask(root, "run-gate", "rework", { constraints: [] }),
+    /orch run checkpoint run-gate --summary/
+  );
+});
+
+test("a checkpoint goes stale once tasks complete beneath it", () => {
+  const root = repo();
+  createRun(root, { id: "run-stale", lane: "api", objective: "Ship safely" });
+  replacePlan(root, "run-stale", [
+    { id: "review", title: "Review", objective: "Review it", kind: "verify" },
+    { id: "audit", title: "Audit", objective: "Audit it", kind: "read" }
+  ]);
+  addCheckpoint(root, "run-stale", { summary: "Plan approved" });
+
+  const dispatch = claimTask(root, "run-stale", "review", { constraints: [] });
+  recordTaskResult(root, "run-stale", "review", {
+    attemptId: dispatch.attemptId,
+    resultText: resultBlock()
+  });
+  verifyTask(root, "run-stale", "review", { verdict: "pass", evidence: ["checked"] });
+
+  const stale = checkpointStatus(loadRun(root, "run-stale"));
+  assert.equal(stale.current, true);
+  assert.equal(stale.stale, true);
+  assert.equal(stale.completedSinceCheckpoint, 1);
+  assert.match(stale.reason, /1 task\(s\) completed since the latest checkpoint/);
+  assert.match(
+    renderSupervisorBriefing(root, loadRun(root, "run-stale"), { name: "api", constraints: [] }),
+    /This checkpoint is stale/
+  );
+
+  // Staleness is a prompt, not a block: the next wave still dispatches.
+  assert.equal(claimTask(root, "run-stale", "audit", { constraints: [] }).taskId, "audit");
+
+  addCheckpoint(root, "run-stale", { summary: "Wave one verified" });
+  assert.equal(checkpointStatus(loadRun(root, "run-stale")).stale, false);
+});
+
+test("a worker inherits its dependencies' decisions, not just their summaries", () => {
+  const root = repo();
+  createRun(root, { id: "run-context", lane: "api", objective: "Ship pagination" });
+  replacePlan(root, "run-context", [
+    { id: "design", title: "Design", objective: "Choose the cursor format", kind: "read" },
+    {
+      id: "build",
+      title: "Build",
+      objective: "Implement the cursor",
+      scope: ["src/**"],
+      dependsOn: ["design"]
+    }
+  ]);
+  addCheckpoint(root, "run-context", { summary: "Plan approved" });
+
+  const dispatch = claimTask(root, "run-context", "design", { constraints: [] });
+  recordTaskResult(root, "run-context", "design", {
+    attemptId: dispatch.attemptId,
+    resultText: JSON.stringify({
+      summary: "Chose an opaque base64 cursor",
+      files_touched: ["docs/cursors.md"],
+      tests: [],
+      decisions: ["Cursors are opaque base64, never a raw offset"],
+      assumptions: ["Page size stays at 50"],
+      blockers: [],
+      confidence: "high"
+    })
+  });
+  verifyTask(root, "run-context", "design", {
+    verdict: "pass",
+    evidence: ["Read docs/cursors.md and confirmed the format"]
+  });
+
+  const briefing = renderWorkerBriefing(
+    root,
+    loadRun(root, "run-context"),
+    loadRun(root, "run-context").tasks.build,
+    { name: "api", constraints: [] }
+  );
+  assert.match(briefing, /### design/);
+  assert.match(briefing, /Chose an opaque base64 cursor/);
+  assert.match(briefing, /Decisions you must not contradict:\n- Cursors are opaque base64/);
+  assert.match(briefing, /Assumptions it made:\n- Page size stays at 50/);
+  assert.match(briefing, /Files it changed:\n- docs\/cursors\.md/);
+  assert.match(briefing, /Supervisor-verified evidence:\n- Read docs\/cursors\.md/);
 });

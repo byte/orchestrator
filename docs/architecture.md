@@ -2,9 +2,11 @@
 
 ## Authority model
 
-The Claude Code main thread is the control plane. Claude Fable owns:
+The Claude Code main thread is the control plane. The Claude model running that thread is the
+supervisor — Claude Opus and Claude Fable are both supported, and the plugin never selects or
+substitutes a supervising model. The supervisor owns:
 
-- goal interpretation and plan approval
+- goal interpretation, plan approval, and durable checkpointing
 - task boundaries, dependencies, priority, and pool capacity
 - worker monitoring and cancellation
 - evidence review and acceptance decisions
@@ -12,7 +14,9 @@ The Claude Code main thread is the control plane. Claude Fable owns:
 - replanning, checkpoints, final verification, and the user report
 
 Codex workers are data-plane executors. A worker receives one bounded task, repository context,
-completed-dependency summaries, lane constraints, durable ledger facts, and an output schema. It
+lane constraints, durable ledger facts, and an output schema. For each completed dependency it
+also receives that task's summary, decisions, assumptions, changed files, and supervisor-verified
+evidence, so it builds on settled choices instead of re-deriving or contradicting them. A worker
 may not spawn a subordinate pool, widen scope, integrate other work, or alter orchestration state.
 
 ## Run and task state machines
@@ -43,7 +47,8 @@ together.
 
 `run launch` performs these steps:
 
-1. Lock and claim a ready task while enforcing `maxWorkers`.
+1. Lock and claim a ready task while enforcing `maxWorkers` and requiring a checkpoint that
+   covers the current plan revision.
 2. Require a committed, clean supervisor checkout on the run's branch and integration head.
 3. Create `.orchestrator/local/worktrees/<run>/<task-attempt>` and a dedicated task branch.
 4. Write the prompt, JSON schema, worker specification, output paths, and status path.
@@ -96,6 +101,20 @@ Completing every task moves the run to `finalizing`, not `completed`. `run final
 A passing record is tied to the current plan revision and head. Replacing the unfinished plan
 clears prior finalization.
 
+## Checkpoints
+
+Run JSON records what happened; a checkpoint records why. Because the checkpoint is the only
+supervisory reasoning that survives compaction, dispatch is gated on it:
+
+- `run checkpoint` stamps each entry with the plan revision and completed-task count it describes.
+- `run launch` refuses to claim a task unless the latest checkpoint covers the current plan
+  revision, so approving a plan or replanning forces the reasoning to be written down.
+- `run ready` reports the checkpoint as stale once tasks have completed since it was written, and
+  `run resume` marks a stale checkpoint at the top of its briefing section.
+
+Staleness after a completed wave is a prompt, not a block. A plan revision without a checkpoint is
+a block.
+
 ## Recovery protocol
 
 `run resume` first polls all durable worker handles. It then returns:
@@ -110,7 +129,8 @@ clears prior finalization.
 - durable ledger facts
 
 The generated supervisor briefing explicitly treats stored worker prose as untrusted evidence.
-Fable continues the existing run rather than inventing a replacement from conversation memory.
+The supervisor continues the existing run rather than inventing a replacement from conversation
+memory.
 
 ## Failure behavior
 
@@ -124,6 +144,7 @@ Fable continues the existing run rather than inventing a replacement from conver
 | Cherry-pick conflict | Cherry-pick aborted | Replan integration order or create a bounded conflict task |
 | Supervisor branch drift | Launch/integration/finalization refused | Reconcile external commit deliberately |
 | Claude interruption | Workers and state remain on disk | `/orch:resume <run-id>` |
+| Plan revised without a checkpoint | Dispatch refused | Record a checkpoint for the new revision |
 | User cancellation | Child and wrapper receive termination; state cancelled | Inspect retained artifacts, retry only explicitly |
 
 ## Portability and retention

@@ -13,6 +13,7 @@ import { renderAcceptance, renderLanes, renderPreflight } from "./lib/render.mjs
 import {
   addCheckpoint,
   bindAttempt,
+  checkpointStatus,
   cancelRun,
   cancelTask,
   claimTask,
@@ -403,10 +404,24 @@ function commandRun(argv, cwd) {
   }
 
   if (action === "ready") {
-    const tasks = readyTasks(loadRun(cwd, runId));
-    return options.json
-      ? emitJson(tasks)
-      : emit(tasks.length ? tasks.map((task) => `${task.id}\t${task.title}`).join("\n") : "No tasks are ready.");
+    const run = loadRun(cwd, runId);
+    const tasks = readyTasks(run);
+    const checkpoint = checkpointStatus(run);
+    if (options.json) {
+      return emitJson({ tasks, checkpoint });
+    }
+    const lines = tasks.length
+      ? tasks.map((task) => `${task.id}\t${task.title}`)
+      : ["No tasks are ready."];
+    if (checkpoint.stale) {
+      lines.push(
+        `checkpoint: stale — ${checkpoint.reason}`,
+        checkpoint.current
+          ? "Record one at this wave boundary so the reasoning survives compaction."
+          : "Dispatch is blocked until a checkpoint covers the current plan revision."
+      );
+    }
+    return emit(lines.join("\n"));
   }
 
   if (action === "briefing") {
@@ -420,7 +435,7 @@ function commandRun(argv, cwd) {
     const recovery = recoveryReport(run);
     const briefing = renderSupervisorBriefing(cwd, run, requireLane(cwd, run.lane)).trimEnd();
     return options.json
-      ? emitJson({ updates, recovery, run, briefing })
+      ? emitJson({ updates, recovery, run, briefing, checkpoint: checkpointStatus(run) })
       : emit(`${briefing}\n\n## Active worker recovery\n\n${recovery.length ? recovery.map((item) => `- ${item.taskId}: pid ${item.runnerPid ?? "unknown"}, thread ${item.threadId ?? "pending"}, worktree ${item.worktreePath ?? "unavailable"}`).join("\n") : "- none"}`);
   }
 

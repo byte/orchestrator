@@ -14,11 +14,15 @@ All support `--json` where structured output is useful.
 ## Pool execution rules
 
 - Everything here runs **inline in the main thread**. Never fork a general-purpose subagent
-  to plan, manage, or evaluate a pool run. Fable's existing context is part of the supervisor.
+  to plan, manage, or evaluate a pool run. The main thread's existing context is part of the
+  supervisor, and the supervisor is whichever Claude model owns the session (Opus or Fable).
 - Use `run launch`; it starts detached Codex CLI workers pinned to `gpt-5.6-sol` with the saved
   effort, output schema, least sandbox, and isolated worktree.
 - Use `run resume` after interruption or compaction. It polls workers and reconstructs the
   briefing from durable state. Never continue from conversation memory alone.
+- Use `run checkpoint` after approving a plan and at every wave boundary. `run launch` refuses to
+  dispatch until a checkpoint covers the current plan revision, because the run record preserves
+  what happened and only the checkpoint preserves why.
 - A report is not completion. Verify read tasks directly; inspect and integrate write worktrees.
 - The run is not complete when its tasks finish. Run the combined checks and use `run finalize`
   with exact evidence. Finalization is the user-facing success gate.

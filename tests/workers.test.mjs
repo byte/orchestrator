@@ -25,7 +25,7 @@ import {
   inspectTaskWorktree,
   integrateTaskWorktree
 } from "../plugins/orchestrator/scripts/lib/worktrees.mjs";
-import { cleanup, git, makeRepo, runCli, write } from "./helpers.mjs";
+import { checkpointPlan, cleanup, git, makeRepo, runCli, write } from "./helpers.mjs";
 
 const repos = [];
 const fixture = path.join(
@@ -74,6 +74,7 @@ function plan(root, id) {
 test("write worktrees require committed, clean, declared, in-scope changes before integration", () => {
   const root = repo();
   plan(root, "run-worktree");
+  checkpointPlan(root, "run-worktree");
   const dispatch = claimTask(root, "run-worktree", "build", { constraints: [] });
   let run = loadRun(root, "run-worktree");
   let task = run.tasks.build;
@@ -116,6 +117,7 @@ test("write worktrees require committed, clean, declared, in-scope changes befor
 test("worktree inspection rejects out-of-scope files", () => {
   const root = repo();
   plan(root, "run-scope");
+  checkpointPlan(root, "run-scope");
   const dispatch = claimTask(root, "run-scope", "build", { constraints: [] });
   const run = loadRun(root, "run-scope");
   const task = run.tasks.build;
@@ -145,6 +147,7 @@ test("worktree inspection rejects out-of-scope files", () => {
 test("worker launch rejects supervisor branch drift outside the run", () => {
   const root = repo();
   plan(root, "run-drift");
+  checkpointPlan(root, "run-drift");
   write(root, "src/manual.js", "export const manual = true;\n");
   git(root, ["add", "src/manual.js"]);
   git(root, ["commit", "--quiet", "-m", "Add manual change"]);
@@ -161,6 +164,7 @@ test("worker launch rejects supervisor branch drift outside the run", () => {
 test("detached workers persist status, thread id, and structured results", async () => {
   const root = repo();
   plan(root, "run-worker");
+  checkpointPlan(root, "run-worker");
   const launched = launchTaskWorker(root, "run-worker", "build", { constraints: [] }, {
     codexCommand: [process.execPath, fixture]
   });
@@ -197,9 +201,11 @@ test("the pool runs independent ready tasks in separate detached worktrees", asy
     { id: "inspect-a", title: "Inspect A", objective: "Inspect A", kind: "read" },
     { id: "inspect-b", title: "Inspect B", objective: "Inspect B", kind: "read" }
   ]);
+  checkpointPlan(root, "run-pool-e2e");
   const first = launchTaskWorker(root, "run-pool-e2e", "inspect-a", { constraints: [] }, {
     codexCommand: [process.execPath, fixture]
   });
+  checkpointPlan(root, "run-pool-e2e");
   const second = launchTaskWorker(root, "run-pool-e2e", "inspect-b", { constraints: [] }, {
     codexCommand: [process.execPath, fixture]
   });
@@ -237,6 +243,7 @@ test("the pool runs independent ready tasks in separate detached worktrees", asy
 test("a detached write worker completes the full launch, inspect, integrate, finalize, and cleanup lifecycle", async () => {
   const root = repo();
   plan(root, "run-e2e");
+  checkpointPlan(root, "run-e2e");
   const launched = launchTaskWorker(root, "run-e2e", "build", { constraints: [] }, {
     codexCommand: [process.execPath, writeFixture]
   });
@@ -283,6 +290,7 @@ test("a detached write worker completes the full launch, inspect, integrate, fin
 test("detached workers can be stopped without losing their durable handle", async () => {
   const root = repo();
   plan(root, "run-stop");
+  checkpointPlan(root, "run-stop");
   launchTaskWorker(root, "run-stop", "build", { constraints: [] }, {
     codexCommand: [process.execPath, slowFixture]
   });

@@ -2,7 +2,7 @@
   "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
   "name": "orchestrator",
   "version": "0.2.0",
-  "description": "Have Claude Fable plan, manage, recover, and verify a pool of GPT-5.6-sol Codex workers.",
+  "description": "Have Claude plan, manage, recover, and verify a pool of GPT-5.6-sol Codex workers.",
   "author": {
     "name": "Colin Charles"
   }

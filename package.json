@@ -3,7 +3,7 @@
   "version": "0.2.0",
   "private": true,
   "type": "module",
-  "description": "A durable Claude Fable supervisor for a pool of GPT-5.6-sol Codex workers.",
+  "description": "A durable Claude supervisor for a pool of GPT-5.6-sol Codex workers.",
   "license": "Apache-2.0",
   "engines": {
     "node": ">=18.18"
