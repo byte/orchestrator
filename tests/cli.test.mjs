@@ -342,12 +342,14 @@ test("run commands persist a plan, ready queue, checkpoint, and restart briefing
       "Add cursor pagination",
       "--max-workers",
       "4",
+      "--model",
+      "terra",
       "--effort",
       "xhigh",
       "--json"
     ]).stdout
   );
-  assert.equal(created.workerPolicy.model, "gpt-5.6-sol");
+  assert.equal(created.workerPolicy.model, "gpt-5.6-terra");
   assert.equal(created.workerPolicy.maxWorkers, 4);
 
   const planPath = writeResult(
@@ -357,7 +359,9 @@ test("run commands persist a plan, ready queue, checkpoint, and restart briefing
           id: "implementation",
           title: "Implement",
           objective: "Add the cursor logic",
-          acceptance: ["targeted tests pass"]
+          acceptance: ["targeted tests pass"],
+          model: "luna",
+          effort: "low"
         },
         {
           id: "review",
@@ -413,11 +417,12 @@ test("run commands persist a plan, ready queue, checkpoint, and restart briefing
   const dispatch = JSON.parse(
     runCli(root, ["run", "claim", "run-cli", "implementation", "--json"]).stdout
   );
-  assert.equal(dispatch.model, "gpt-5.6-sol");
+  assert.equal(dispatch.model, "gpt-5.6-luna");
+  assert.equal(dispatch.reasoningEffort, "low");
   assert.deepEqual(dispatch.routingFlags.slice(0, 3), [
     "--fresh",
     "--model",
-    "gpt-5.6-sol"
+    "gpt-5.6-luna"
   ]);
   const bound = runCli(root, [
     "run",
@@ -439,6 +444,8 @@ test("run commands persist a plan, ready queue, checkpoint, and restart briefing
     runCli(root, ["run", "recover", "run-cli", "--json"]).stdout
   );
   assert.equal(active[0].jobId, "job-cli");
+  assert.equal(active[0].model, "gpt-5.6-luna");
+  assert.equal(active[0].reasoningEffort, "low");
   const resumed = JSON.parse(
     runCli(root, ["run", "resume", "run-cli", "--json"]).stdout
   );

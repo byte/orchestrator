@@ -1,6 +1,6 @@
 ---
 name: orchestrator-runtime
-description: Internal contract for the orchestrator CLI — how Claude supervises durable GPT-5.6-sol worker-pool runs and the legacy single-task bridge
+description: Internal contract for the orchestrator CLI — how Claude supervises durable routed GPT-5.6 worker-pool runs and the legacy single-task bridge
 user-invocable: false
 ---
 
@@ -16,8 +16,9 @@ All support `--json` where structured output is useful.
 - Everything here runs **inline in the main thread**. Never fork a general-purpose subagent
   to plan, manage, or evaluate a pool run. The main thread's existing context is part of the
   supervisor, and the supervisor is whichever Claude model owns the session (Opus or Fable).
-- Use `run launch`; it starts detached Codex CLI workers pinned to `gpt-5.6-sol` with the saved
-  effort, output schema, least sandbox, and isolated worktree.
+- Use `run launch`; it starts detached Codex CLI workers on the task's saved `gpt-5.6-sol`,
+  `gpt-5.6-terra`, or `gpt-5.6-luna` route with the saved effort, output schema, least sandbox,
+  and isolated worktree. Never substitute a different route during recovery or retry.
 - Use `run resume` after interruption or compaction. It polls workers and reconstructs the
   briefing from durable state. Never continue from conversation memory alone.
 - Use `run checkpoint` after approving a plan and at every wave boundary. `run launch` refuses to

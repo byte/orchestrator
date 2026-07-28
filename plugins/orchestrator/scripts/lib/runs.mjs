@@ -16,6 +16,20 @@ import {
 export const DEFAULT_WORKER_MODEL = "gpt-5.6-sol";
 export const DEFAULT_REASONING_EFFORT = "high";
 export const DEFAULT_MAX_WORKERS = 3;
+export const WORKER_MODELS = Object.freeze({
+  "gpt-5.6-sol": Object.freeze({
+    aliases: Object.freeze(["sol", "gpt-5.6", "gpt-5.6-sol"]),
+    efforts: Object.freeze(["low", "medium", "high", "xhigh", "max", "ultra"])
+  }),
+  "gpt-5.6-terra": Object.freeze({
+    aliases: Object.freeze(["terra", "gpt-5.6-terra"]),
+    efforts: Object.freeze(["low", "medium", "high", "xhigh", "max", "ultra"])
+  }),
+  "gpt-5.6-luna": Object.freeze({
+    aliases: Object.freeze(["luna", "gpt-5.6-luna"]),
+    efforts: Object.freeze(["low", "medium", "high", "xhigh", "max"])
+  })
+});
 
 const RUN_ID_PATTERN = /^[a-z0-9][a-z0-9._-]*$/;
 const TASK_ID_PATTERN = RUN_ID_PATTERN;
@@ -124,6 +138,46 @@ function positiveInteger(value, label, fallback) {
   return parsed;
 }
 
+export function normalizeWorkerModel(value = DEFAULT_WORKER_MODEL) {
+  const requested = String(value ?? DEFAULT_WORKER_MODEL).trim().toLowerCase();
+  for (const [model, policy] of Object.entries(WORKER_MODELS)) {
+    if (policy.aliases.includes(requested)) {
+      return model;
+    }
+  }
+  throw new Error(
+    `Unsupported worker model "${value}". Use one of: sol, terra, luna (or their exact gpt-5.6-* slugs).`
+  );
+}
+
+function normalizeReasoningEffort(value = DEFAULT_REASONING_EFFORT) {
+  const effort = String(value ?? DEFAULT_REASONING_EFFORT).trim().toLowerCase();
+  if (!REASONING_EFFORTS.has(effort)) {
+    throw new Error(
+      `Unsupported reasoning effort "${value}". Use one of: ${[...REASONING_EFFORTS].join(", ")}.`
+    );
+  }
+  return effort;
+}
+
+function validateWorkerRoute(model, reasoningEffort, label = "Worker") {
+  if (!WORKER_MODELS[model].efforts.includes(reasoningEffort)) {
+    throw new Error(
+      `${label} cannot use reasoning effort "${reasoningEffort}" with ${model}. ` +
+        `Use one of: ${WORKER_MODELS[model].efforts.join(", ")}.`
+    );
+  }
+}
+
+export function resolveTaskWorker(run, task) {
+  const model = normalizeWorkerModel(task.model ?? run.workerPolicy.model);
+  const reasoningEffort = normalizeReasoningEffort(
+    task.reasoningEffort ?? run.workerPolicy.reasoningEffort
+  );
+  validateWorkerRoute(model, reasoningEffort, `Task "${task.id}"`);
+  return { model, reasoningEffort };
+}
+
 export function createRun(
   cwd,
   {
@@ -131,6 +185,7 @@ export function createRun(
     lane,
     objective,
     maxWorkers = DEFAULT_MAX_WORKERS,
+    workerModel = DEFAULT_WORKER_MODEL,
     reasoningEffort = DEFAULT_REASONING_EFFORT
   }
 ) {
@@ -139,12 +194,9 @@ export function createRun(
   if (!body) {
     throw new Error("A run objective is required.");
   }
-  const effort = String(reasoningEffort).trim().toLowerCase();
-  if (!REASONING_EFFORTS.has(effort)) {
-    throw new Error(
-      `Unsupported reasoning effort "${reasoningEffort}". Use one of: ${[...REASONING_EFFORTS].join(", ")}.`
-    );
-  }
+  const model = normalizeWorkerModel(workerModel);
+  const effort = normalizeReasoningEffort(reasoningEffort);
+  validateWorkerRoute(model, effort, "Run default");
   const filePath = runFile(cwd, runId);
   return withFileLock(filePath, () => {
     if (fs.existsSync(filePath)) {
@@ -158,7 +210,7 @@ export function createRun(
       objective: body,
       status: "planning",
       workerPolicy: {
-        model: DEFAULT_WORKER_MODEL,
+        model,
         reasoningEffort: effort,
         maxWorkers: positiveInteger(maxWorkers, "max-workers", DEFAULT_MAX_WORKERS)
       },
@@ -196,7 +248,7 @@ function stringList(value, label) {
   return value.map((entry) => entry.trim()).filter(Boolean);
 }
 
-function normalizeTask(raw, defaultScope) {
+function normalizeTask(raw, defaultScope, workerPolicy) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
     throw new Error("Every task must be an object.");
   }
@@ -214,6 +266,22 @@ function normalizeTask(raw, defaultScope) {
   if (kind === "write" && !scope.length) {
     throw new Error(`Write task "${id}" requires at least one scope pattern.`);
   }
+  const model =
+    raw.model === undefined || raw.model === null || String(raw.model).trim() === ""
+      ? null
+      : normalizeWorkerModel(raw.model);
+  const requestedEffort = raw.effort ?? raw.reasoningEffort;
+  const reasoningEffort =
+    requestedEffort === undefined ||
+    requestedEffort === null ||
+    String(requestedEffort).trim() === ""
+      ? null
+      : normalizeReasoningEffort(requestedEffort);
+  validateWorkerRoute(
+    model ?? normalizeWorkerModel(workerPolicy.model),
+    reasoningEffort ?? normalizeReasoningEffort(workerPolicy.reasoningEffort),
+    `Task "${id}"`
+  );
   return {
     id,
     title,
@@ -225,6 +293,8 @@ function normalizeTask(raw, defaultScope) {
     ),
     constraints: stringList(raw.constraints, `Task "${id}" constraints`),
     acceptance: stringList(raw.acceptance, `Task "${id}" acceptance`),
+    model,
+    reasoningEffort,
     status: "pending",
     attempts: [],
     result: null,
@@ -273,7 +343,9 @@ function taskDefinition(task) {
     scope: task.scope,
     dependsOn: task.dependsOn,
     constraints: task.constraints,
-    acceptance: task.acceptance
+    acceptance: task.acceptance,
+    model: task.model ?? null,
+    reasoningEffort: task.reasoningEffort ?? null
   };
 }
 
@@ -293,7 +365,7 @@ export function replacePlan(cwd, runId, rawTasks, { defaultScope = [] } = {}) {
     }
     const tasks = {};
     for (const raw of rawTasks) {
-      const task = normalizeTask(raw, defaultScope);
+      const task = normalizeTask(raw, defaultScope, run.workerPolicy);
       if (tasks[task.id]) {
         throw new Error(`Duplicate task id "${task.id}".`);
       }
@@ -333,7 +405,8 @@ export function replacePlan(cwd, runId, rawTasks, { defaultScope = [] } = {}) {
       tasks: Object.values(tasks).map((task) => ({
         id: task.id,
         kind: task.kind,
-        dependsOn: task.dependsOn
+        dependsOn: task.dependsOn,
+        ...resolveTaskWorker(run, task)
       }))
     });
     return run;
@@ -479,6 +552,7 @@ function renderWorkerLedger(cwd) {
 }
 
 export function renderWorkerBriefing(cwd, run, task, lane) {
+  const route = resolveTaskWorker(run, task);
   // A one-line summary is not enough to build on: without the predecessor's
   // decisions and assumptions a downstream worker re-derives or contradicts them.
   const dependencyContext = task.dependsOn
@@ -501,7 +575,7 @@ export function renderWorkerBriefing(cwd, run, task, lane) {
       }
       return lines.join("\n");
     });
-  return `You are one GPT-5.6-sol worker in a pool managed by a Claude supervisor.
+  return `You are one ${route.model} worker in a GPT-5.6 pool managed by a Claude supervisor.
 
 Do not redefine the overall goal, widen scope, integrate other workers, or spawn subagents. Complete only the bounded assignment below and return evidence to the supervisor.
 
@@ -509,6 +583,8 @@ Do not redefine the overall goal, widen scope, integrate other workers, or spawn
 
 - run id: ${run.id}
 - task id: ${task.id}
+- worker model: ${route.model}
+- reasoning effort: ${route.reasoningEffort}
 - overall goal: ${run.objective}
 
 ## Assignment
@@ -582,12 +658,15 @@ export function claimTask(cwd, runId, taskId, lane) {
           `  orch run checkpoint ${id} --summary "<plan and why>" --decision "<decision>" --risk "<risk>" --next "<next action>"`
       );
     }
+    const route = resolveTaskWorker(run, task);
     const attempt = {
       id: `${task.id}-attempt-${task.attempts.length + 1}`,
       status: "dispatching",
       agentId: null,
       jobId: null,
       threadId: null,
+      model: route.model,
+      reasoningEffort: route.reasoningEffort,
       claimedAt: nowIso(),
       startedAt: null,
       finishedAt: null
@@ -600,20 +679,22 @@ export function claimTask(cwd, runId, taskId, lane) {
     appendEvent(cwd, id, {
       type: "task.claimed",
       taskId: task.id,
-      attemptId: attempt.id
+      attemptId: attempt.id,
+      model: route.model,
+      reasoningEffort: route.reasoningEffort
     });
     return {
       runId: id,
       taskId: task.id,
       attemptId: attempt.id,
-      model: run.workerPolicy.model,
-      reasoningEffort: run.workerPolicy.reasoningEffort,
+      model: route.model,
+      reasoningEffort: route.reasoningEffort,
       routingFlags: [
         "--fresh",
         "--model",
-        run.workerPolicy.model,
+        route.model,
         "--effort",
-        run.workerPolicy.reasoningEffort
+        route.reasoningEffort
       ],
       briefing: renderWorkerBriefing(cwd, run, task, lane)
     };
@@ -1031,6 +1112,9 @@ export function recoveryReport(run) {
         agentId: attempt.agentId,
         jobId: attempt.jobId,
         threadId: attempt.threadId,
+        model: attempt.model ?? resolveTaskWorker(run, task).model,
+        reasoningEffort:
+          attempt.reasoningEffort ?? resolveTaskWorker(run, task).reasoningEffort,
         runnerPid: attempt.runner?.pid ?? null,
         runnerStatusFile: attempt.runner?.statusFile ?? null,
         worktreePath: attempt.worktree?.path ?? null,
@@ -1141,6 +1225,13 @@ export function renderSupervisorBriefing(cwd, run, lane) {
       const dependencies = task.dependsOn.length ? task.dependsOn.join(", ") : "none";
       const attempt = task.attempts.at(-1);
       const structured = task.result?.structured;
+      const route = attempt?.model
+        ? {
+            model: attempt.model,
+            reasoningEffort:
+              attempt.reasoningEffort ?? resolveTaskWorker(run, task).reasoningEffort
+          }
+        : resolveTaskWorker(run, task);
       const workerTests = structured?.tests?.length
         ? structured.tests.map((test) => `${test.command}: ${test.outcome}`)
         : [];
@@ -1153,6 +1244,7 @@ export function renderSupervisorBriefing(cwd, run, lane) {
 
 - status: ${task.status}
 - kind: ${task.kind}
+- worker route: ${route.model} (${route.reasoningEffort})
 - depends on: ${dependencies}
 - scope: ${task.scope.length ? task.scope.join(", ") : "read-only / no write scope"}
 - objective: ${task.objective}
@@ -1189,8 +1281,8 @@ ${run.objective}
 
 - status: ${run.status}
 - lane: ${run.lane}
-- worker model: ${run.workerPolicy.model}
-- worker reasoning: ${run.workerPolicy.reasoningEffort}
+- default worker model: ${run.workerPolicy.model}
+- default worker reasoning: ${run.workerPolicy.reasoningEffort}
 - maximum concurrent workers: ${run.workerPolicy.maxWorkers}
 - plan revision: ${run.planRevision}
 - supervisor branch: ${run.repository.branch}

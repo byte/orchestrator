@@ -19,6 +19,11 @@ also receives that task's summary, decisions, assumptions, changed files, and su
 evidence, so it builds on settled choices instead of re-deriving or contradicting them. A worker
 may not spawn a subordinate pool, widen scope, integrate other work, or alter orchestration state.
 
+The run stores a default worker route, while each task may override `model` and `effort`. Short
+aliases normalize to exact `gpt-5.6-sol`, `gpt-5.6-terra`, or `gpt-5.6-luna` slugs. The runtime
+validates the effective combination when planning and persists it again on the attempt before
+dispatch, making retries and recovery auditable without silently changing models.
+
 ## Run and task state machines
 
 The run progresses through:
@@ -57,15 +62,16 @@ together.
 
    ```text
    codex exec -C <worktree> \
-     --model gpt-5.6-sol \
-     -c model_reasoning_effort="<saved effort>" \
+     --model <resolved task model> \
+     -c model_reasoning_effort="<resolved task effort>" \
      --sandbox <read-only|workspace-write> \
      --json \
      --output-schema <schema> \
      --output-last-message <result> -
    ```
 
-7. Persist the wrapper PID immediately, then the Codex thread ID when `thread.started` arrives.
+7. Persist the exact model and effort with the attempt, the wrapper PID immediately, then the Codex
+   thread ID when `thread.started` arrives.
 
 The wrapper owns signal forwarding and atomic status updates. Claude never needs to block on a
 worker process.
@@ -121,6 +127,7 @@ a block.
 
 - current run and task status
 - process, status-file, thread, and worktree handles
+- the exact model and effort selected for each active attempt
 - worker summaries, checks, blockers, confidence, and attempts
 - supervisor evidence and integrated commits
 - repository base and integration head

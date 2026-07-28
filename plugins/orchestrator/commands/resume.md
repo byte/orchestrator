@@ -32,4 +32,5 @@ recovered state. Do not create a replacement run. In particular:
 
 The Claude model running this main thread remains the planner, scheduler, reviewer, replanner,
 integrator, and user-facing manager, whether that is Claude Opus or Claude Fable. Codex workers
-remain bounded executors pinned to `gpt-5.6-sol`.
+remain bounded executors routed only to the exact saved `gpt-5.6-sol`, `gpt-5.6-terra`, or
+`gpt-5.6-luna` model and effort for each attempt.

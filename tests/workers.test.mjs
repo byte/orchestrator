@@ -58,15 +58,22 @@ after(() => {
   }
 });
 
-function plan(root, id) {
-  createRun(root, { id, lane: "api", objective: "Build safely" });
+function plan(root, id, { workerModel, taskModel, taskEffort } = {}) {
+  createRun(root, {
+    id,
+    lane: "api",
+    objective: "Build safely",
+    workerModel
+  });
   replacePlan(root, id, [
     {
       id: "build",
       title: "Build",
       objective: "Add the module",
       scope: ["src/**"],
-      acceptance: ["tests pass"]
+      acceptance: ["tests pass"],
+      model: taskModel,
+      effort: taskEffort
     }
   ]);
 }
@@ -163,14 +170,18 @@ test("worker launch rejects supervisor branch drift outside the run", () => {
 
 test("detached workers persist status, thread id, and structured results", async () => {
   const root = repo();
-  plan(root, "run-worker");
+  plan(root, "run-worker", { taskModel: "terra", taskEffort: "medium" });
   checkpointPlan(root, "run-worker");
   const launched = launchTaskWorker(root, "run-worker", "build", { constraints: [] }, {
     codexCommand: [process.execPath, fixture]
   });
-  assert.equal(launched.model, "gpt-5.6-sol");
+  assert.equal(launched.model, "gpt-5.6-terra");
+  assert.equal(launched.reasoningEffort, "medium");
   assert.ok(launched.runner.pid > 0);
   assert.ok(fs.existsSync(launched.worktree.path));
+  const spec = JSON.parse(fs.readFileSync(launched.runner.specFile, "utf8"));
+  assert.equal(spec.model, "gpt-5.6-terra");
+  assert.equal(spec.reasoningEffort, "medium");
 
   let update;
   for (let index = 0; index < 50; index += 1) {

@@ -1,6 +1,6 @@
 ---
-description: Plan and manage a pool of GPT-5.6-sol Codex workers from the Claude Code main thread
-argument-hint: "<lane> [--max-workers <n>] [--effort <level>] <objective>"
+description: Plan and manage a routed GPT-5.6 Codex worker pool from the Claude Code main thread
+argument-hint: "<lane> [--max-workers <n>] [--model <sol|terra|luna>] [--effort <level>] <objective>"
 allowed-tools: Read, Grep, Glob, Write, Bash(node:*), AskUserQuestion
 ---
 
@@ -15,8 +15,8 @@ $ARGUMENTS
 
 ## 1. Parse and inspect
 
-The first positional token is the lane. `--max-workers` and `--effort` configure the pool;
-everything else is the objective.
+The first positional token is the lane. `--max-workers`, `--model`, and `--effort` configure the
+pool; everything else is the objective. The model defaults to `sol`.
 
 Inspect the relevant repository guidance and implementation before planning. Keep this inspection
 in the main thread so the plan benefits from the user's conversation context.
@@ -30,11 +30,12 @@ materially change the result or require new authority.
 node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" run create <lane> \
   --objective "<objective>" \
   --max-workers <n> \
+  --model <sol|terra|luna> \
   --effort <level> \
   --json
 ```
 
-The run pins every worker to `gpt-5.6-sol`. Keep the returned run id.
+The run stores an exact default model slug. Keep the returned run id.
 
 ## 3. Plan
 
@@ -48,6 +49,19 @@ Produce a small task DAG. Each task must have:
 - `dependsOn`: task ids that must be supervisor-verified first
 - `constraints`
 - `acceptance`: evidence-based completion criteria
+- `model`: optional `sol`, `terra`, `luna`, or exact `gpt-5.6-*` slug
+- `effort`: optional per-task reasoning effort
+
+Route by the demands of each bounded task:
+
+- use `sol` for the hardest open-ended implementation, security, architecture, debugging, and
+  deep verification work
+- use `terra` for strong general coding, review, and everyday work where balance matters
+- use `luna` for clear, repeatable, high-volume transformations and extraction
+
+An omitted task model or effort inherits the run default. Override a task only deliberately; do
+not use a weaker route merely to maximize concurrency. `luna` does not support `ultra`, and the
+runtime rejects unknown models or unsupported model-effort combinations.
 
 Prefer 3–5 substantial parallel tasks over many tiny tasks. Separate implementation from
 independent verification when risk warrants it. Two tasks must not own the same write surface in
@@ -61,8 +75,8 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" run plan <run-id> \
   --json
 ```
 
-Then record a checkpoint summarizing the approved plan, important decisions, risks, and first
-actions:
+Then record a checkpoint summarizing the approved plan, model-routing rationale, important
+decisions, risks, and first actions:
 
 ```bash
 node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" run checkpoint <run-id> \
@@ -95,9 +109,10 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" run launch <run-id> <task-id> --js
 ```
 
 Each launch creates an isolated Git worktree and starts one detached `codex exec` process with the
-authoritative briefing, an output schema, `--model gpt-5.6-sol`, the configured effort, and the
-least sandbox needed for the task. The returned PID, files, worktree, and eventual Codex thread id
-are stored in run state. Launch independent ready tasks without waiting between them.
+authoritative briefing, an output schema, the task's exact resolved `--model`, its resolved effort,
+and the least sandbox needed for the task. The selected route, PID, files, worktree, and eventual
+Codex thread id are stored in run state. Launch independent ready tasks without waiting between
+them.
 
 ## 5. Monitor and collect
 
@@ -222,7 +237,8 @@ created, and any residual risk. Distinguish built, verified, and unverified work
   and integrator. Claude Opus and Claude Fable are both supported supervisors; the supervisor is
   whichever model owns this Claude Code session, and supervisory authority never moves to a
   subagent or to a worker.
-- All execution workers use `gpt-5.6-sol`; do not silently substitute another model.
+- Execution workers use only `gpt-5.6-sol`, `gpt-5.6-terra`, or `gpt-5.6-luna`, exactly as
+  resolved and persisted by the run plan. Never silently substitute another model or effort.
 - Codex workers never self-assign global work or expand their scope.
 - Every worker runs in its own isolated worktree.
 - Never bypass the run state because the manual path seems faster.

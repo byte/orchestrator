@@ -17,6 +17,8 @@ import {
   readyTasks,
   recordTaskResult,
   recoveryReport,
+  resolveTaskWorker,
+  runFile,
   renderSupervisorBriefing,
   renderWorkerBriefing,
   replacePlan,
@@ -247,6 +249,8 @@ test("worker binding, reporting, supervisor verification, and dependencies form 
       agentId: "agent-1",
       jobId: "job-1",
       threadId: "thread-1",
+      model: "gpt-5.6-sol",
+      reasoningEffort: "high",
       runnerPid: null,
       runnerStatusFile: null,
       worktreePath: null,
@@ -270,6 +274,168 @@ test("worker binding, reporting, supervisor verification, and dependencies form 
   assert.equal(verified.task.status, "completed");
   assert.equal(verified.runStatus, "ready");
   assert.deepEqual(verified.ready.map((task) => task.id), ["review"]);
+});
+
+test("runs and tasks route across the GPT-5.6 family with exact persisted audit data", () => {
+  const root = repo();
+  const run = createRun(root, {
+    id: "run-tiered",
+    lane: "api",
+    objective: "Route work by complexity",
+    maxWorkers: 3,
+    workerModel: "terra",
+    reasoningEffort: "medium"
+  });
+  assert.equal(run.workerPolicy.model, "gpt-5.6-terra");
+
+  const planned = replacePlan(root, "run-tiered", [
+    {
+      id: "balanced",
+      title: "Balanced task",
+      objective: "Handle everyday implementation",
+      scope: ["src/balanced/**"]
+    },
+    {
+      id: "frontier",
+      title: "Frontier task",
+      objective: "Solve the difficult subsystem",
+      scope: ["src/frontier/**"],
+      model: "sol",
+      effort: "high"
+    },
+    {
+      id: "volume",
+      title: "Volume task",
+      objective: "Apply a clear repetitive transform",
+      scope: ["src/volume/**"],
+      model: "gpt-5.6-luna",
+      effort: "low"
+    }
+  ]);
+  assert.deepEqual(resolveTaskWorker(planned, planned.tasks.balanced), {
+    model: "gpt-5.6-terra",
+    reasoningEffort: "medium"
+  });
+  assert.equal(planned.tasks.frontier.model, "gpt-5.6-sol");
+  assert.equal(planned.tasks.volume.model, "gpt-5.6-luna");
+
+  checkpointPlan(root, "run-tiered");
+  const balanced = claimTask(root, "run-tiered", "balanced", { constraints: [] });
+  const frontier = claimTask(root, "run-tiered", "frontier", { constraints: [] });
+  const volume = claimTask(root, "run-tiered", "volume", { constraints: [] });
+  assert.deepEqual(
+    [balanced, frontier, volume].map(({ model, reasoningEffort }) => [
+      model,
+      reasoningEffort
+    ]),
+    [
+      ["gpt-5.6-terra", "medium"],
+      ["gpt-5.6-sol", "high"],
+      ["gpt-5.6-luna", "low"]
+    ]
+  );
+  assert.match(volume.briefing, /You are one gpt-5\.6-luna worker/);
+  assert.match(volume.briefing, /reasoning effort: low/);
+
+  const persisted = loadRun(root, "run-tiered");
+  assert.deepEqual(
+    Object.values(persisted.tasks).map((task) => {
+      const attempt = task.attempts.at(-1);
+      return [attempt.model, attempt.reasoningEffort];
+    }),
+    [
+      ["gpt-5.6-terra", "medium"],
+      ["gpt-5.6-sol", "high"],
+      ["gpt-5.6-luna", "low"]
+    ]
+  );
+});
+
+test("worker routing rejects unsupported models and invalid model-effort combinations", () => {
+  const root = repo();
+  assert.throws(
+    () =>
+      createRun(root, {
+        id: "run-unknown-model",
+        lane: "api",
+        objective: "Reject unknown routing",
+        workerModel: "gpt-5.6-mars"
+      }),
+    /Use one of: sol, terra, luna/
+  );
+  assert.throws(
+    () =>
+      createRun(root, {
+        id: "run-luna-ultra",
+        lane: "api",
+        objective: "Reject invalid routing",
+        workerModel: "luna",
+        reasoningEffort: "ultra"
+      }),
+    /cannot use reasoning effort "ultra" with gpt-5\.6-luna/
+  );
+
+  createRun(root, {
+    id: "run-inherited-ultra",
+    lane: "api",
+    objective: "Validate task overrides",
+    workerModel: "sol",
+    reasoningEffort: "ultra"
+  });
+  assert.throws(
+    () =>
+      replacePlan(root, "run-inherited-ultra", [
+        {
+          id: "too-much",
+          title: "Invalid Luna route",
+          objective: "Attempt unsupported effort",
+          scope: ["src/**"],
+          model: "luna"
+        }
+      ]),
+    /Task "too-much" cannot use reasoning effort "ultra" with gpt-5\.6-luna/
+  );
+});
+
+test("tasks from pre-routing state inherit the run default and can be replanned unchanged", () => {
+  const root = repo();
+  createRun(root, {
+    id: "run-legacy",
+    lane: "api",
+    objective: "Resume old state",
+    workerModel: "terra",
+    reasoningEffort: "medium"
+  });
+  const definition = {
+    id: "legacy",
+    title: "Legacy task",
+    objective: "Complete an old task",
+    kind: "read"
+  };
+  replacePlan(root, "run-legacy", [definition]);
+
+  const file = runFile(root, "run-legacy");
+  const legacyState = JSON.parse(fs.readFileSync(file, "utf8"));
+  legacyState.version = 2;
+  delete legacyState.tasks.legacy.model;
+  delete legacyState.tasks.legacy.reasoningEffort;
+  fs.writeFileSync(file, `${JSON.stringify(legacyState, null, 2)}\n`);
+
+  checkpointPlan(root, "run-legacy");
+  const dispatch = claimTask(root, "run-legacy", "legacy", { constraints: [] });
+  assert.equal(dispatch.model, "gpt-5.6-terra");
+  assert.equal(dispatch.reasoningEffort, "medium");
+  recordTaskResult(root, "run-legacy", "legacy", {
+    attemptId: dispatch.attemptId,
+    resultText: resultBlock({ files: "none" })
+  });
+  verifyTask(root, "run-legacy", "legacy", {
+    verdict: "pass",
+    evidence: ["legacy task reviewed"]
+  });
+
+  const replanned = replacePlan(root, "run-legacy", [definition]);
+  assert.equal(replanned.tasks.legacy.status, "completed");
 });
 
 test("blocked and failed tasks retain attempts and can be retried", () => {

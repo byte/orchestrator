@@ -62,7 +62,7 @@ Usage:
   orch ledger show
   orch ledger add <section> <text>
   orch run list [--json]
-  orch run create <lane> --objective <text> [--id <run-id>] [--max-workers <n>] [--effort <level>] [--json]
+  orch run create <lane> --objective <text> [--id <run-id>] [--max-workers <n>] [--model <sol|terra|luna>] [--effort <level>] [--json]
   orch run show <run-id> [--json]
   orch run plan <run-id> --plan-file <path> [--json]
   orch run ready <run-id> [--json]
@@ -327,7 +327,7 @@ function renderRunSummary(run) {
     "",
     `- status: ${run.status}`,
     `- lane: ${run.lane}`,
-    `- workers: ${run.workerPolicy.maxWorkers} × ${run.workerPolicy.model} (${run.workerPolicy.reasoningEffort})`,
+    `- workers: ${run.workerPolicy.maxWorkers} max; default ${run.workerPolicy.model} (${run.workerPolicy.reasoningEffort})`,
     `- plan revision: ${run.planRevision}`,
     `- tasks: ${Object.entries(taskCounts).map(([status, count]) => `${status}=${count}`).join(", ") || "none"}`
   ].join("\n");
@@ -349,7 +349,7 @@ function commandRun(argv, cwd) {
   if (action === "create") {
     const { options, positionals } = parseArgs(rest, {
       booleanOptions: ["json"],
-      valueOptions: ["objective", "id", "max-workers", "effort"]
+      valueOptions: ["objective", "id", "max-workers", "model", "effort"]
     });
     const laneName = positionals[0];
     if (!laneName) {
@@ -361,6 +361,7 @@ function commandRun(argv, cwd) {
       lane: laneName,
       objective: options.objective,
       maxWorkers: options["max-workers"],
+      workerModel: options.model,
       reasoningEffort: options.effort
     });
     return options.json ? emitJson(run) : emit(renderRunSummary(run));
@@ -436,7 +437,7 @@ function commandRun(argv, cwd) {
     const briefing = renderSupervisorBriefing(cwd, run, requireLane(cwd, run.lane)).trimEnd();
     return options.json
       ? emitJson({ updates, recovery, run, briefing, checkpoint: checkpointStatus(run) })
-      : emit(`${briefing}\n\n## Active worker recovery\n\n${recovery.length ? recovery.map((item) => `- ${item.taskId}: pid ${item.runnerPid ?? "unknown"}, thread ${item.threadId ?? "pending"}, worktree ${item.worktreePath ?? "unavailable"}`).join("\n") : "- none"}`);
+      : emit(`${briefing}\n\n## Active worker recovery\n\n${recovery.length ? recovery.map((item) => `- ${item.taskId}: ${item.model} (${item.reasoningEffort}), pid ${item.runnerPid ?? "unknown"}, thread ${item.threadId ?? "pending"}, worktree ${item.worktreePath ?? "unavailable"}`).join("\n") : "- none"}`);
   }
 
   if (action === "checkpoint") {
@@ -527,7 +528,7 @@ function commandRun(argv, cwd) {
     const report = recoveryReport(loadRun(cwd, runId));
     return options.json
       ? emitJson(report)
-      : emit(report.length ? report.map((item) => `${item.taskId}\t${item.attemptStatus}\t${item.jobId ?? item.agentId ?? "unbound"}`).join("\n") : "No active workers need recovery.");
+      : emit(report.length ? report.map((item) => `${item.taskId}\t${item.attemptStatus}\t${item.model}\t${item.reasoningEffort}\t${item.jobId ?? item.agentId ?? "unbound"}`).join("\n") : "No active workers need recovery.");
   }
 
   if (action === "launch") {

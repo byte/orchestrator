@@ -1,10 +1,19 @@
 # Changelog
 
-## Unreleased
+## 0.3.0
+
+- Runs accept `--model sol|terra|luna`, with Sol remaining the backwards-compatible default
+- Planned tasks can override `model` and `effort`; aliases normalize to exact GPT-5.6 model slugs
+  and unsupported routes, including Luna with `ultra`, are rejected before dispatch
+- Every attempt persists its exact resolved model and effort for recovery, audit, and stable retry
+- State version 3 keeps older plugin builds from silently dropping saved per-task routes; version
+  2 runs remain readable and inherit their saved run default
+- Claude's planning contract now routes hard open-ended work to Sol, balanced general work to
+  Terra, and clear high-volume work to Luna
 
 - Documented the supervisor as whichever Claude model owns the Claude Code session. Claude Opus
   and Claude Fable are both supported; the plugin never selects or substitutes a supervising
-  model, and only the worker model is pinned
+  model, and only worker routes are selected and pinned
 - `run launch` now refuses to dispatch until a checkpoint covers the current plan revision, so
   the reasoning behind a plan or a replan is written down before work leaves the main thread
 - `run ready` and the resume briefing report a checkpoint as stale once tasks complete beneath

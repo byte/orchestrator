@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 
-test("the run command keeps Claude in authority and pins the Codex pool", () => {
+test("the run command keeps Claude in authority and routes only within the GPT-5.6 pool", () => {
   const command = fs.readFileSync(
     path.join(root, "plugins", "orchestrator", "commands", "run.md"),
     "utf8"
@@ -16,7 +16,15 @@ test("the run command keeps Claude in authority and pins the Codex pool", () => 
     /The Claude model running the main thread is always the planner, scheduler, reviewer, replanner,\s+and integrator/
   );
   assert.match(command, /Claude Opus and Claude Fable are both supported supervisors/);
-  assert.match(command, /--model gpt-5\.6-sol/);
+  assert.match(command, /--model <sol\|terra\|luna>/);
+  assert.match(command, /use `sol` for the hardest open-ended implementation/);
+  assert.match(command, /use `terra` for strong general coding/);
+  assert.match(command, /use `luna` for clear, repeatable, high-volume/);
+  assert.match(
+    command,
+    /only `gpt-5\.6-sol`, `gpt-5\.6-terra`, or `gpt-5\.6-luna`/
+  );
+  assert.match(command, /model-routing rationale/);
   assert.match(command, /detached `codex exec` process/);
   assert.match(command, /worker report is not\s+completion/i);
   assert.match(command, /run recover/);
@@ -50,4 +58,6 @@ test("the resume command restores durable state and keeps Claude in authority", 
   );
   assert.match(command, /whether that is Claude Opus or Claude Fable/);
   assert.match(command, /gpt-5\.6-sol/);
+  assert.match(command, /gpt-5\.6-terra/);
+  assert.match(command, /gpt-5\.6-luna/);
 });
