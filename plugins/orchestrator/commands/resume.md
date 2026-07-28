@@ -25,6 +25,7 @@ recovered state. Do not create a replacement run. In particular:
 - collect and review newly reported results
 - verify read tasks; inspect and integrate write-task worktrees
 - dispatch only currently ready tasks and stay within the saved worker limit
+- preserve every saved task route and honor any explicit run-level model or effort pin
 - checkpoint material decisions, risks, and next actions with `run checkpoint <run-id>`,
   especially when the recovered briefing marks the latest checkpoint stale
 - replan deliberately when evidence invalidates unfinished work

@@ -59,11 +59,13 @@ after(() => {
 });
 
 function plan(root, id, { workerModel, taskModel, taskEffort } = {}) {
+  const autoRouted = Boolean(taskModel || taskEffort);
   createRun(root, {
     id,
     lane: "api",
     objective: "Build safely",
-    workerModel
+    workerModel: autoRouted ? undefined : workerModel ?? "sol",
+    reasoningEffort: autoRouted ? undefined : "high"
   });
   replacePlan(root, id, [
     {
@@ -73,7 +75,10 @@ function plan(root, id, { workerModel, taskModel, taskEffort } = {}) {
       scope: ["src/**"],
       acceptance: ["tests pass"],
       model: taskModel,
-      effort: taskEffort
+      effort: taskEffort,
+      routingReason: autoRouted
+        ? "The supervisor selected this route for the bounded task."
+        : undefined
     }
   ]);
 }
@@ -206,7 +211,9 @@ test("the pool runs independent ready tasks in separate detached worktrees", asy
     id: "run-pool-e2e",
     lane: "api",
     objective: "Inspect in parallel",
-    maxWorkers: 2
+    maxWorkers: 2,
+    workerModel: "sol",
+    reasoningEffort: "high"
   });
   replacePlan(root, "run-pool-e2e", [
     { id: "inspect-a", title: "Inspect A", objective: "Inspect A", kind: "read" },

@@ -14,7 +14,7 @@ test("release metadata stays synchronized", () => {
   const packageManifest = json("package.json");
   const pluginManifest = json("plugins/orchestrator/.claude-plugin/plugin.json");
   const marketplace = json(".claude-plugin/marketplace.json");
-  assert.equal(packageManifest.version, "0.3.0");
+  assert.equal(packageManifest.version, "0.4.0");
   assert.equal(pluginManifest.version, packageManifest.version);
   assert.equal(marketplace.metadata.version, packageManifest.version);
   assert.equal(marketplace.plugins[0].version, packageManifest.version);
@@ -28,6 +28,9 @@ test("release documentation describes the supervisor pool and recovery surface",
   assert.match(readme, /gpt-5\.6-terra/);
   assert.match(readme, /gpt-5\.6-luna/);
   assert.match(readme, /account already authenticated in Codex CLI/);
+  assert.match(readme, /Model and effort are automatic by default/);
+  assert.match(readme, /rejects an unresolved task/);
+  assert.match(readme, /only when you deliberately want to pin the entire pool/);
   assert.match(readme, /\/orch:resume/);
   assert.match(readme, /finalizing/);
   assert.match(readme, /fake Codex\s+processes/);

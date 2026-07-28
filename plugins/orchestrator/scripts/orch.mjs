@@ -62,7 +62,7 @@ Usage:
   orch ledger show
   orch ledger add <section> <text>
   orch run list [--json]
-  orch run create <lane> --objective <text> [--id <run-id>] [--max-workers <n>] [--model <sol|terra|luna>] [--effort <level>] [--json]
+  orch run create <lane> --objective <text> [--id <run-id>] [--max-workers <n>] [--model <auto|sol|terra|luna>] [--effort <auto|level>] [--json]
   orch run show <run-id> [--json]
   orch run plan <run-id> --plan-file <path> [--json]
   orch run ready <run-id> [--json]
@@ -320,6 +320,17 @@ function renderRunSummary(run) {
     counts[task.status] = (counts[task.status] ?? 0) + 1;
     return counts;
   }, {});
+  const legacyRouting = !Object.hasOwn(run.workerPolicy, "routingMode");
+  const modelRoute = legacyRouting
+    ? `legacy default ${run.workerPolicy.model}`
+    : run.workerPolicy.model
+      ? `pinned ${run.workerPolicy.model}`
+      : "supervisor auto";
+  const effortRoute = legacyRouting
+    ? `legacy default ${run.workerPolicy.reasoningEffort}`
+    : run.workerPolicy.reasoningEffort
+      ? `pinned ${run.workerPolicy.reasoningEffort}`
+      : "supervisor auto";
   return [
     `# Run ${run.id}`,
     "",
@@ -327,7 +338,7 @@ function renderRunSummary(run) {
     "",
     `- status: ${run.status}`,
     `- lane: ${run.lane}`,
-    `- workers: ${run.workerPolicy.maxWorkers} max; default ${run.workerPolicy.model} (${run.workerPolicy.reasoningEffort})`,
+    `- workers: ${run.workerPolicy.maxWorkers} max; model ${modelRoute}; effort ${effortRoute}`,
     `- plan revision: ${run.planRevision}`,
     `- tasks: ${Object.entries(taskCounts).map(([status, count]) => `${status}=${count}`).join(", ") || "none"}`
   ].join("\n");

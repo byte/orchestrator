@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.4.0
+
+- New runs default to enforced supervisor routing: Fable or Opus must assign every unpinned task
+  an exact model, effort, and concise routing reason during planning
+- Removed the hidden Sol/high fallback from new runs; unresolved automatic routes are rejected
+  before the plan can be saved
+- `--model sol|terra|luna` and `--effort <level>` are now explicit run pins, and conflicting task
+  routes are rejected instead of overriding the user's choice
+- State version 4 prevents older builds from misreading automatic routes, while version 3 runs
+  keep their original fallback-and-task-override behavior when resumed
+
 ## 0.3.0
 
 - Runs accept `--model sol|terra|luna`, with Sol remaining the backwards-compatible default

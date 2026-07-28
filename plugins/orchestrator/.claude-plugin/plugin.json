@@ -1,7 +1,7 @@
 {
   "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
   "name": "orchestrator",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Have Claude plan, route, manage, recover, and verify a GPT-5.6 Codex worker pool.",
   "author": {
     "name": "Colin Charles"

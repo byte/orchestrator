@@ -5,13 +5,13 @@
   },
   "metadata": {
     "description": "A durable Claude supervisor for a routed GPT-5.6 Codex worker pool.",
-    "version": "0.3.0"
+    "version": "0.4.0"
   },
   "plugins": [
     {
       "name": "orchestrator",
       "description": "Have Claude plan, route, manage, recover, and verify a GPT-5.6 Codex worker pool.",
-      "version": "0.3.0",
+      "version": "0.4.0",
       "author": {
         "name": "Colin Charles"
       },

@@ -10,7 +10,7 @@ import {
   cancelTask,
   checkpointStatus,
   claimTask,
-  createRun,
+  createRun as createRunState,
   eventsFile,
   finalizeRun,
   loadRun,
@@ -29,6 +29,14 @@ import { checkpointPlan, cleanup, git, makeRepo, runCli, write } from "./helpers
 
 const repos = [];
 
+function createRun(cwd, options) {
+  return createRunState(cwd, {
+    workerModel: "sol",
+    reasoningEffort: "high",
+    ...options
+  });
+}
+
 function repo() {
   const root = makeRepo();
   repos.push(root);
@@ -42,16 +50,18 @@ after(() => {
   }
 });
 
-test("new runs pin GPT-5.6 Sol and start in planning", () => {
+test("new runs default to enforced supervisor routing and start in planning", () => {
   const root = repo();
-  const run = createRun(root, {
+  const run = createRunState(root, {
     id: "run-one",
     lane: "api",
     objective: "Ship pagination"
   });
   assert.equal(run.status, "planning");
   assert.equal(run.workerPolicy.model, DEFAULT_WORKER_MODEL);
-  assert.equal(run.workerPolicy.model, "gpt-5.6-sol");
+  assert.equal(run.workerPolicy.model, null);
+  assert.equal(run.workerPolicy.reasoningEffort, null);
+  assert.equal(run.workerPolicy.routingMode, "auto");
   assert.equal(run.workerPolicy.maxWorkers, 3);
   assert.deepEqual(run.tasks, {});
 });
@@ -251,6 +261,7 @@ test("worker binding, reporting, supervisor verification, and dependencies form 
       threadId: "thread-1",
       model: "gpt-5.6-sol",
       reasoningEffort: "high",
+      routingReason: null,
       runnerPid: null,
       runnerStatusFile: null,
       worktreePath: null,
@@ -278,22 +289,23 @@ test("worker binding, reporting, supervisor verification, and dependencies form 
 
 test("runs and tasks route across the GPT-5.6 family with exact persisted audit data", () => {
   const root = repo();
-  const run = createRun(root, {
+  const run = createRunState(root, {
     id: "run-tiered",
     lane: "api",
     objective: "Route work by complexity",
-    maxWorkers: 3,
-    workerModel: "terra",
-    reasoningEffort: "medium"
+    maxWorkers: 3
   });
-  assert.equal(run.workerPolicy.model, "gpt-5.6-terra");
+  assert.equal(run.workerPolicy.routingMode, "auto");
 
   const planned = replacePlan(root, "run-tiered", [
     {
       id: "balanced",
       title: "Balanced task",
       objective: "Handle everyday implementation",
-      scope: ["src/balanced/**"]
+      scope: ["src/balanced/**"],
+      model: "terra",
+      effort: "medium",
+      routingReason: "Balanced everyday implementation fits Terra."
     },
     {
       id: "frontier",
@@ -301,7 +313,8 @@ test("runs and tasks route across the GPT-5.6 family with exact persisted audit 
       objective: "Solve the difficult subsystem",
       scope: ["src/frontier/**"],
       model: "sol",
-      effort: "high"
+      effort: "high",
+      routingReason: "Open-ended subsystem work needs frontier capability."
     },
     {
       id: "volume",
@@ -309,7 +322,8 @@ test("runs and tasks route across the GPT-5.6 family with exact persisted audit 
       objective: "Apply a clear repetitive transform",
       scope: ["src/volume/**"],
       model: "gpt-5.6-luna",
-      effort: "low"
+      effort: "low",
+      routingReason: "The bounded repetitive transform favors efficient throughput."
     }
   ]);
   assert.deepEqual(resolveTaskWorker(planned, planned.tasks.balanced), {
@@ -318,6 +332,7 @@ test("runs and tasks route across the GPT-5.6 family with exact persisted audit 
   });
   assert.equal(planned.tasks.frontier.model, "gpt-5.6-sol");
   assert.equal(planned.tasks.volume.model, "gpt-5.6-luna");
+  assert.match(planned.tasks.volume.routingReason, /efficient throughput/);
 
   checkpointPlan(root, "run-tiered");
   const balanced = claimTask(root, "run-tiered", "balanced", { constraints: [] });
@@ -375,11 +390,10 @@ test("worker routing rejects unsupported models and invalid model-effort combina
     /cannot use reasoning effort "ultra" with gpt-5\.6-luna/
   );
 
-  createRun(root, {
+  createRunState(root, {
     id: "run-inherited-ultra",
     lane: "api",
     objective: "Validate task overrides",
-    workerModel: "sol",
     reasoningEffort: "ultra"
   });
   assert.throws(
@@ -390,11 +404,94 @@ test("worker routing rejects unsupported models and invalid model-effort combina
           title: "Invalid Luna route",
           objective: "Attempt unsupported effort",
           scope: ["src/**"],
-          model: "luna"
+          model: "luna",
+          routingReason: "Use the efficient tier for a mechanical task."
         }
       ]),
     /Task "too-much" cannot use reasoning effort "ultra" with gpt-5\.6-luna/
   );
+});
+
+test("automatic routing rejects unresolved tasks and explicit run pins reject conflicts", () => {
+  const root = repo();
+  createRunState(root, {
+    id: "run-auto-guard",
+    lane: "api",
+    objective: "Require deliberate routes"
+  });
+  assert.throws(
+    () =>
+      replacePlan(root, "run-auto-guard", [
+        {
+          id: "unrouted",
+          title: "Unrouted task",
+          objective: "Do not guess",
+          scope: ["src/**"]
+        }
+      ]),
+    /requires a model because this run uses automatic model routing/
+  );
+  assert.throws(
+    () =>
+      replacePlan(root, "run-auto-guard", [
+        {
+          id: "no-reason",
+          title: "Missing rationale",
+          objective: "Route without explaining why",
+          scope: ["src/**"],
+          model: "terra",
+          effort: "medium"
+        }
+      ]),
+    /requires routingReason/
+  );
+
+  createRunState(root, {
+    id: "run-pinned",
+    lane: "api",
+    objective: "Force a homogeneous pool",
+    workerModel: "terra",
+    reasoningEffort: "high"
+  });
+  assert.throws(
+    () =>
+      replacePlan(root, "run-pinned", [
+        {
+          id: "effort-conflict",
+          title: "Conflicting effort",
+          objective: "Try to override the user",
+          scope: ["src/**"],
+          effort: "low"
+        }
+      ]),
+    /run explicitly pins "high"/
+  );
+  assert.throws(
+    () =>
+      replacePlan(root, "run-pinned", [
+        {
+          id: "conflict",
+          title: "Conflicting route",
+          objective: "Try to override the user",
+          scope: ["src/**"],
+          model: "sol"
+        }
+      ]),
+    /run explicitly pins gpt-5\.6-terra/
+  );
+  const pinned = replacePlan(root, "run-pinned", [
+    {
+      id: "inherits",
+      title: "Pinned route",
+      objective: "Use the explicit run override",
+      scope: ["src/**"]
+    }
+  ]);
+  assert.deepEqual(resolveTaskWorker(pinned, pinned.tasks.inherits), {
+    model: "gpt-5.6-terra",
+    reasoningEffort: "high"
+  });
+  assert.equal(pinned.tasks.inherits.routingReason, null);
 });
 
 test("tasks from pre-routing state inherit the run default and can be replanned unchanged", () => {
@@ -416,9 +513,11 @@ test("tasks from pre-routing state inherit the run default and can be replanned 
 
   const file = runFile(root, "run-legacy");
   const legacyState = JSON.parse(fs.readFileSync(file, "utf8"));
-  legacyState.version = 2;
+  legacyState.version = 3;
+  delete legacyState.workerPolicy.routingMode;
   delete legacyState.tasks.legacy.model;
   delete legacyState.tasks.legacy.reasoningEffort;
+  delete legacyState.tasks.legacy.routingReason;
   fs.writeFileSync(file, `${JSON.stringify(legacyState, null, 2)}\n`);
 
   checkpointPlan(root, "run-legacy");

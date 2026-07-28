@@ -342,15 +342,55 @@ test("run commands persist a plan, ready queue, checkpoint, and restart briefing
       "Add cursor pagination",
       "--max-workers",
       "4",
-      "--model",
-      "terra",
-      "--effort",
-      "xhigh",
       "--json"
     ]).stdout
   );
-  assert.equal(created.workerPolicy.model, "gpt-5.6-terra");
+  assert.equal(created.workerPolicy.routingMode, "auto");
+  assert.equal(created.workerPolicy.model, null);
+  assert.equal(created.workerPolicy.reasoningEffort, null);
   assert.equal(created.workerPolicy.maxWorkers, 4);
+
+  const pinned = JSON.parse(
+    runCli(root, [
+      "run",
+      "create",
+      "api",
+      "--id",
+      "run-cli-pinned",
+      "--objective",
+      "Honor an explicit route",
+      "--model",
+      "terra",
+      "--effort",
+      "high",
+      "--json"
+    ]).stdout
+  );
+  assert.equal(pinned.workerPolicy.routingMode, "pinned");
+  assert.equal(pinned.workerPolicy.model, "gpt-5.6-terra");
+  assert.equal(pinned.workerPolicy.reasoningEffort, "high");
+  const conflictingPlan = writeResult(
+    JSON.stringify({
+      tasks: [
+        {
+          id: "conflict",
+          title: "Conflicting task",
+          objective: "Try to override the run pin",
+          scope: ["src/api/**"],
+          model: "sol"
+        }
+      ]
+    })
+  );
+  const rejectedPin = runCli(root, [
+    "run",
+    "plan",
+    "run-cli-pinned",
+    "--plan-file",
+    conflictingPlan
+  ]);
+  assert.equal(rejectedPin.code, 1);
+  assert.match(rejectedPin.stderr, /run explicitly pins gpt-5\.6-terra/);
 
   const planPath = writeResult(
     JSON.stringify({
@@ -361,7 +401,8 @@ test("run commands persist a plan, ready queue, checkpoint, and restart briefing
           objective: "Add the cursor logic",
           acceptance: ["targeted tests pass"],
           model: "luna",
-          effort: "low"
+          effort: "low",
+          routingReason: "The implementation is a bounded mechanical change."
         },
         {
           id: "review",
@@ -369,7 +410,10 @@ test("run commands persist a plan, ready queue, checkpoint, and restart briefing
           objective: "Review the implementation",
           kind: "verify",
           dependsOn: ["implementation"],
-          acceptance: ["no P1 findings"]
+          acceptance: ["no P1 findings"],
+          model: "terra",
+          effort: "xhigh",
+          routingReason: "Independent review needs balanced capability and deeper reasoning."
         }
       ]
     })
@@ -446,6 +490,7 @@ test("run commands persist a plan, ready queue, checkpoint, and restart briefing
   assert.equal(active[0].jobId, "job-cli");
   assert.equal(active[0].model, "gpt-5.6-luna");
   assert.equal(active[0].reasoningEffort, "low");
+  assert.match(active[0].routingReason, /bounded mechanical change/);
   const resumed = JSON.parse(
     runCli(root, ["run", "resume", "run-cli", "--json"]).stdout
   );

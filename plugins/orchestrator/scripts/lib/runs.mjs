@@ -13,8 +13,9 @@ import {
   withFileLock
 } from "./state.mjs";
 
-export const DEFAULT_WORKER_MODEL = "gpt-5.6-sol";
-export const DEFAULT_REASONING_EFFORT = "high";
+export const DEFAULT_WORKER_MODEL = null;
+export const DEFAULT_REASONING_EFFORT = null;
+export const DEFAULT_ROUTING_MODE = "auto";
 export const DEFAULT_MAX_WORKERS = 3;
 export const WORKER_MODELS = Object.freeze({
   "gpt-5.6-sol": Object.freeze({
@@ -138,8 +139,8 @@ function positiveInteger(value, label, fallback) {
   return parsed;
 }
 
-export function normalizeWorkerModel(value = DEFAULT_WORKER_MODEL) {
-  const requested = String(value ?? DEFAULT_WORKER_MODEL).trim().toLowerCase();
+export function normalizeWorkerModel(value) {
+  const requested = String(value ?? "").trim().toLowerCase();
   for (const [model, policy] of Object.entries(WORKER_MODELS)) {
     if (policy.aliases.includes(requested)) {
       return model;
@@ -150,8 +151,8 @@ export function normalizeWorkerModel(value = DEFAULT_WORKER_MODEL) {
   );
 }
 
-function normalizeReasoningEffort(value = DEFAULT_REASONING_EFFORT) {
-  const effort = String(value ?? DEFAULT_REASONING_EFFORT).trim().toLowerCase();
+function normalizeReasoningEffort(value) {
+  const effort = String(value ?? "").trim().toLowerCase();
   if (!REASONING_EFFORTS.has(effort)) {
     throw new Error(
       `Unsupported reasoning effort "${value}". Use one of: ${[...REASONING_EFFORTS].join(", ")}.`
@@ -170,12 +171,30 @@ function validateWorkerRoute(model, reasoningEffort, label = "Worker") {
 }
 
 export function resolveTaskWorker(run, task) {
-  const model = normalizeWorkerModel(task.model ?? run.workerPolicy.model);
-  const reasoningEffort = normalizeReasoningEffort(
-    task.reasoningEffort ?? run.workerPolicy.reasoningEffort
-  );
+  const selectedModel = task.model ?? run.workerPolicy.model;
+  const selectedEffort = task.reasoningEffort ?? run.workerPolicy.reasoningEffort;
+  if (!selectedModel || !selectedEffort) {
+    throw new Error(
+      `Task "${task.id}" does not have a fully resolved worker route. ` +
+        "Auto-routed tasks require both model and effort in the saved plan."
+    );
+  }
+  const model = normalizeWorkerModel(selectedModel);
+  const reasoningEffort = normalizeReasoningEffort(selectedEffort);
   validateWorkerRoute(model, reasoningEffort, `Task "${task.id}"`);
   return { model, reasoningEffort };
+}
+
+function optionalWorkerModel(value) {
+  const requested = String(value ?? "").trim().toLowerCase();
+  return !requested || requested === "auto" ? null : normalizeWorkerModel(requested);
+}
+
+function optionalReasoningEffort(value) {
+  const requested = String(value ?? "").trim().toLowerCase();
+  return !requested || requested === "auto"
+    ? null
+    : normalizeReasoningEffort(requested);
 }
 
 export function createRun(
@@ -194,9 +213,11 @@ export function createRun(
   if (!body) {
     throw new Error("A run objective is required.");
   }
-  const model = normalizeWorkerModel(workerModel);
-  const effort = normalizeReasoningEffort(reasoningEffort);
-  validateWorkerRoute(model, effort, "Run default");
+  const model = optionalWorkerModel(workerModel);
+  const effort = optionalReasoningEffort(reasoningEffort);
+  if (model && effort) {
+    validateWorkerRoute(model, effort, "Run override");
+  }
   const filePath = runFile(cwd, runId);
   return withFileLock(filePath, () => {
     if (fs.existsSync(filePath)) {
@@ -210,6 +231,7 @@ export function createRun(
       objective: body,
       status: "planning",
       workerPolicy: {
+        routingMode: model ? "pinned" : DEFAULT_ROUTING_MODE,
         model,
         reasoningEffort: effort,
         maxWorkers: positiveInteger(maxWorkers, "max-workers", DEFAULT_MAX_WORKERS)
@@ -277,11 +299,53 @@ function normalizeTask(raw, defaultScope, workerPolicy) {
     String(requestedEffort).trim() === ""
       ? null
       : normalizeReasoningEffort(requestedEffort);
-  validateWorkerRoute(
-    model ?? normalizeWorkerModel(workerPolicy.model),
-    reasoningEffort ?? normalizeReasoningEffort(workerPolicy.reasoningEffort),
-    `Task "${id}"`
-  );
+  const legacyPolicy = !Object.hasOwn(workerPolicy, "routingMode");
+  if (
+    !legacyPolicy &&
+    workerPolicy.routingMode === "pinned" &&
+    model &&
+    model !== workerPolicy.model
+  ) {
+    throw new Error(
+      `Task "${id}" selects ${model}, but this run explicitly pins ${workerPolicy.model}.`
+    );
+  }
+  if (
+    !legacyPolicy &&
+    workerPolicy.reasoningEffort &&
+    reasoningEffort &&
+    reasoningEffort !== workerPolicy.reasoningEffort
+  ) {
+    throw new Error(
+      `Task "${id}" selects reasoning effort "${reasoningEffort}", but this run explicitly pins "${workerPolicy.reasoningEffort}".`
+    );
+  }
+  const resolvedModel = model ?? workerPolicy.model;
+  const resolvedEffort = reasoningEffort ?? workerPolicy.reasoningEffort;
+  if (!resolvedModel) {
+    throw new Error(
+      `Task "${id}" requires a model because this run uses automatic model routing. ` +
+        "Choose sol, terra, or luna based on the task's complexity and needs."
+    );
+  }
+  if (!resolvedEffort) {
+    throw new Error(
+      `Task "${id}" requires an effort because this run uses automatic effort routing.`
+    );
+  }
+  const exactModel = normalizeWorkerModel(resolvedModel);
+  const exactEffort = normalizeReasoningEffort(resolvedEffort);
+  validateWorkerRoute(exactModel, exactEffort, `Task "${id}"`);
+  const routingReason = String(raw.routingReason ?? "").trim();
+  if (
+    !legacyPolicy &&
+    (!workerPolicy.model || !workerPolicy.reasoningEffort) &&
+    !routingReason
+  ) {
+    throw new Error(
+      `Task "${id}" requires routingReason because its model or effort is supervisor-routed.`
+    );
+  }
   return {
     id,
     title,
@@ -293,8 +357,9 @@ function normalizeTask(raw, defaultScope, workerPolicy) {
     ),
     constraints: stringList(raw.constraints, `Task "${id}" constraints`),
     acceptance: stringList(raw.acceptance, `Task "${id}" acceptance`),
-    model,
-    reasoningEffort,
+    model: exactModel,
+    reasoningEffort: exactEffort,
+    routingReason: routingReason || null,
     status: "pending",
     attempts: [],
     result: null,
@@ -334,7 +399,8 @@ function validateGraph(tasks) {
   }
 }
 
-function taskDefinition(task) {
+function taskDefinition(run, task) {
+  const route = resolveTaskWorker(run, task);
   return {
     id: task.id,
     title: task.title,
@@ -344,8 +410,9 @@ function taskDefinition(task) {
     dependsOn: task.dependsOn,
     constraints: task.constraints,
     acceptance: task.acceptance,
-    model: task.model ?? null,
-    reasoningEffort: task.reasoningEffort ?? null
+    model: route.model,
+    reasoningEffort: route.reasoningEffort,
+    routingReason: task.routingReason ?? null
   };
 }
 
@@ -372,8 +439,8 @@ export function replacePlan(cwd, runId, rawTasks, { defaultScope = [] } = {}) {
       const existing = run.tasks[task.id];
       if (existing?.status === "completed") {
         if (
-          JSON.stringify(taskDefinition(existing)) !==
-          JSON.stringify(taskDefinition(task))
+          JSON.stringify(taskDefinition(run, existing)) !==
+          JSON.stringify(taskDefinition(run, task))
         ) {
           throw new Error(`Completed task "${task.id}" cannot be redefined.`);
         }
@@ -406,6 +473,7 @@ export function replacePlan(cwd, runId, rawTasks, { defaultScope = [] } = {}) {
         id: task.id,
         kind: task.kind,
         dependsOn: task.dependsOn,
+        routingReason: task.routingReason,
         ...resolveTaskWorker(run, task)
       }))
     });
@@ -1115,6 +1183,7 @@ export function recoveryReport(run) {
         model: attempt.model ?? resolveTaskWorker(run, task).model,
         reasoningEffort:
           attempt.reasoningEffort ?? resolveTaskWorker(run, task).reasoningEffort,
+        routingReason: task.routingReason ?? null,
         runnerPid: attempt.runner?.pid ?? null,
         runnerStatusFile: attempt.runner?.statusFile ?? null,
         worktreePath: attempt.worktree?.path ?? null,
@@ -1220,6 +1289,13 @@ export function renderSupervisorBriefing(cwd, run, lane) {
   const ledger = ledgerForBriefing(cwd);
   const checkpoint = checkpointStatus(run);
   const latest = checkpoint.latest;
+  const legacyRouting = !Object.hasOwn(run.workerPolicy, "routingMode");
+  const modelPolicy = legacyRouting
+    ? `${run.workerPolicy.model} — legacy default; saved task overrides remain valid`
+    : run.workerPolicy.model ?? "none — supervisor must route each task";
+  const effortPolicy = legacyRouting
+    ? `${run.workerPolicy.reasoningEffort} — legacy default; saved task overrides remain valid`
+    : run.workerPolicy.reasoningEffort ?? "none — supervisor must route each task";
   const tasks = Object.values(run.tasks)
     .map((task) => {
       const dependencies = task.dependsOn.length ? task.dependsOn.join(", ") : "none";
@@ -1245,6 +1321,7 @@ export function renderSupervisorBriefing(cwd, run, lane) {
 - status: ${task.status}
 - kind: ${task.kind}
 - worker route: ${route.model} (${route.reasoningEffort})
+- routing reason: ${task.routingReason || "legacy or explicitly pinned run"}
 - depends on: ${dependencies}
 - scope: ${task.scope.length ? task.scope.join(", ") : "read-only / no write scope"}
 - objective: ${task.objective}
@@ -1281,8 +1358,9 @@ ${run.objective}
 
 - status: ${run.status}
 - lane: ${run.lane}
-- default worker model: ${run.workerPolicy.model}
-- default worker reasoning: ${run.workerPolicy.reasoningEffort}
+- model routing: ${run.workerPolicy.routingMode ?? "legacy-default"}
+- model policy: ${modelPolicy}
+- effort policy: ${effortPolicy}
 - maximum concurrent workers: ${run.workerPolicy.maxWorkers}
 - plan revision: ${run.planRevision}
 - supervisor branch: ${run.repository.branch}

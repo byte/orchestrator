@@ -19,7 +19,7 @@ what should happen, what is acceptable, what gets integrated, and when the whole
 ## What it provides
 
 - A task DAG planned and owned by the supervising Claude model
-- A configurable mixed pool of exact GPT-5.6 Sol, Terra, and Luna workers, with Sol as the default
+- A supervisor-routed mixed pool of exact GPT-5.6 Sol, Terra, and Luna workers
 - One detached `codex exec` process and isolated Git worktree per task
 - Read-only sandboxes for analysis/review tasks and workspace-write sandboxes for implementation
 - JSON-schema-enforced worker reports with files, tests, decisions, assumptions, blockers, and
@@ -73,7 +73,7 @@ Create a lane with a real write boundary and definition of done:
 Give the supervisor an outcome:
 
 ```text
-/orch:run api --max-workers 3 --model terra --effort high add cursor pagination to the users API
+/orch:run api --max-workers 3 add cursor pagination to the users API
 ```
 
 Claude inspects the repository, proposes a dependency-aware plan, records a checkpoint capturing
@@ -82,11 +82,15 @@ needed. Independent ready tasks launch into separate worktrees. The supervisor r
 polls their durable handles, reviews their structured evidence, integrates passing write tasks,
 and replans or retries when evidence invalidates the current route.
 
-`--model sol|terra|luna` selects the run default. Claude can override a planned task with optional
-`model` and `effort` fields: Sol for the hardest open-ended work, Terra for balanced general work,
-and Luna for clear high-volume work. The runtime normalizes aliases to exact model slugs, validates
-model-effort compatibility, and saves the resolved route on every attempt so resume and audit do
-not silently change it.
+Model and effort are automatic by default. During planning, Fable or Opus must assign every task an
+exact `model`, `effort`, and concise `routingReason`: Sol for the hardest open-ended work, Terra for
+balanced general work, and Luna for clear high-volume work. The runtime rejects an unresolved task
+instead of silently falling back to Sol.
+
+Use `--model sol|terra|luna` only when you deliberately want to pin the entire pool to one model.
+Use `--effort <level>` only when you want to pin effort across the run. A conflicting task route is
+rejected. Exact resolved routes are saved on the plan and every attempt so resume and audit cannot
+silently change them.
 
 Resume the same manager after interruption or compaction:
 
@@ -165,6 +169,8 @@ writes are atomic, and shared state updates use file locks.
 
 - Workers use only `gpt-5.6-sol`, `gpt-5.6-terra`, or `gpt-5.6-luna`; each resolved model and
   effort is persisted before launch, and substitution is never silent.
+- Automatic routing is a plan-time supervisor decision, not a hidden runtime fallback. Every
+  unpinned task must include an exact model, effort, and routing reason before dispatch.
 - A worker cannot widen its assigned scope or self-assign global work.
 - The supervisor checkout must be clean for launch, integration, and finalization.
 - The supervisor branch and recorded integration head must not drift outside the run.

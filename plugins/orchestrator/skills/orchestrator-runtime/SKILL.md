@@ -19,6 +19,9 @@ All support `--json` where structured output is useful.
 - Use `run launch`; it starts detached Codex CLI workers on the task's saved `gpt-5.6-sol`,
   `gpt-5.6-terra`, or `gpt-5.6-luna` route with the saved effort, output schema, least sandbox,
   and isolated worktree. Never substitute a different route during recovery or retry.
+- New runs auto-route by default. The supervisor must save an exact model, effort, and concise
+  routing reason on each planned task unless the user explicitly pinned that dimension. The
+  runtime rejects unresolved automatic routes and conflicts with explicit pins.
 - Use `run resume` after interruption or compaction. It polls workers and reconstructs the
   briefing from durable state. Never continue from conversation memory alone.
 - Use `run checkpoint` after approving a plan and at every wave boundary. `run launch` refuses to

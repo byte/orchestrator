@@ -1,6 +1,6 @@
 ---
-description: Plan and manage a routed GPT-5.6 Codex worker pool from the Claude Code main thread
-argument-hint: "<lane> [--max-workers <n>] [--model <sol|terra|luna>] [--effort <level>] <objective>"
+description: Automatically route and manage a GPT-5.6 Codex worker pool from the Claude Code main thread
+argument-hint: "<lane> [--max-workers <n>] [--model <auto|sol|terra|luna>] [--effort <auto|level>] <objective>"
 allowed-tools: Read, Grep, Glob, Write, Bash(node:*), AskUserQuestion
 ---
 
@@ -16,7 +16,8 @@ $ARGUMENTS
 ## 1. Parse and inspect
 
 The first positional token is the lane. `--max-workers`, `--model`, and `--effort` configure the
-pool; everything else is the objective. The model defaults to `sol`.
+pool; everything else is the objective. Model and effort both default to `auto`, which means you
+must select them per task during planning. Treat explicit values as user pins, not suggestions.
 
 Inspect the relevant repository guidance and implementation before planning. Keep this inspection
 in the main thread so the plan benefits from the user's conversation context.
@@ -30,12 +31,11 @@ materially change the result or require new authority.
 node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" run create <lane> \
   --objective "<objective>" \
   --max-workers <n> \
-  --model <sol|terra|luna> \
-  --effort <level> \
   --json
 ```
 
-The run stores an exact default model slug. Keep the returned run id.
+Append `--model <sol|terra|luna>` or `--effort <level>` only when the user explicitly supplied
+that override. Omitted dimensions remain supervisor-routed. Keep the returned run id.
 
 ## 3. Plan
 
@@ -49,8 +49,10 @@ Produce a small task DAG. Each task must have:
 - `dependsOn`: task ids that must be supervisor-verified first
 - `constraints`
 - `acceptance`: evidence-based completion criteria
-- `model`: optional `sol`, `terra`, `luna`, or exact `gpt-5.6-*` slug
-- `effort`: optional per-task reasoning effort
+- `model`: `sol`, `terra`, `luna`, or an exact `gpt-5.6-*` slug unless the run pins a model
+- `effort`: the selected per-task reasoning effort unless the run pins an effort
+- `routingReason`: one concise explanation of why the selected route fits the task whenever either
+  dimension is supervisor-routed
 
 Route by the demands of each bounded task:
 
@@ -59,9 +61,16 @@ Route by the demands of each bounded task:
 - use `terra` for strong general coding, review, and everyday work where balance matters
 - use `luna` for clear, repeatable, high-volume transformations and extraction
 
-An omitted task model or effort inherits the run default. Override a task only deliberately; do
-not use a weaker route merely to maximize concurrency. `luna` does not support `ultra`, and the
-runtime rejects unknown models or unsupported model-effort combinations.
+Select effort independently: use `low` for routine or latency-sensitive work, `medium` for balanced
+everyday work, `high` or `xhigh` only when deeper reasoning should materially improve the result,
+and `max` only for the hardest quality-first task. Prefer the lowest effort that should reliably
+meet the acceptance criteria.
+
+In automatic mode, omitted task routing is an invalid plan: the runtime will not silently fall
+back to Sol or guess an effort. If the user explicitly pins a model, every task uses that model and
+a conflicting task model is rejected. The same rule applies to an explicit effort pin. Do not use
+a weaker route merely to maximize concurrency. `luna` does not support `ultra`, and the runtime
+rejects unknown models or unsupported model-effort combinations.
 
 Prefer 3–5 substantial parallel tasks over many tiny tasks. Separate implementation from
 independent verification when risk warrants it. Two tasks must not own the same write surface in
@@ -239,6 +248,8 @@ created, and any residual risk. Distinguish built, verified, and unverified work
   subagent or to a worker.
 - Execution workers use only `gpt-5.6-sol`, `gpt-5.6-terra`, or `gpt-5.6-luna`, exactly as
   resolved and persisted by the run plan. Never silently substitute another model or effort.
+- Model and effort selection are the supervisor's planning responsibility unless the user
+  explicitly pins either dimension. Automatic routing must never mean a hidden runtime fallback.
 - Codex workers never self-assign global work or expand their scope.
 - Every worker runs in its own isolated worktree.
 - Never bypass the run state because the manual path seems faster.

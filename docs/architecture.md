@@ -19,10 +19,15 @@ also receives that task's summary, decisions, assumptions, changed files, and su
 evidence, so it builds on settled choices instead of re-deriving or contradicting them. A worker
 may not spawn a subordinate pool, widen scope, integrate other work, or alter orchestration state.
 
-The run stores a default worker route, while each task may override `model` and `effort`. Short
-aliases normalize to exact `gpt-5.6-sol`, `gpt-5.6-terra`, or `gpt-5.6-luna` slugs. The runtime
-validates the effective combination when planning and persists it again on the attempt before
-dispatch, making retries and recovery auditable without silently changing models.
+New runs auto-route by default. During planning, the Claude supervisor assigns each task a model,
+effort, and routing reason. Short aliases normalize to exact `gpt-5.6-sol`, `gpt-5.6-terra`, or
+`gpt-5.6-luna` slugs. An unresolved automatic route is rejected rather than falling back to Sol.
+
+Users may explicitly pin a run-level model, effort, or both. A pinned dimension is inherited by
+every task and conflicting task input is rejected. The resolved combination is validated when
+planning and persisted again on the attempt before dispatch, making retries and recovery auditable
+without silently changing models. Version 3 runs retain their original fallback-and-override
+semantics when resumed.
 
 ## Run and task state machines
 
@@ -52,8 +57,8 @@ together.
 
 `run launch` performs these steps:
 
-1. Lock and claim a ready task while enforcing `maxWorkers` and requiring a checkpoint that
-   covers the current plan revision.
+1. Lock and claim a ready task while enforcing `maxWorkers`, requiring a fully resolved exact
+   model and effort, and requiring a checkpoint that covers the current plan revision.
 2. Require a committed, clean supervisor checkout on the run's branch and integration head.
 3. Create `.orchestrator/local/worktrees/<run>/<task-attempt>` and a dedicated task branch.
 4. Write the prompt, JSON schema, worker specification, output paths, and status path.
@@ -128,6 +133,7 @@ a block.
 - current run and task status
 - process, status-file, thread, and worktree handles
 - the exact model and effort selected for each active attempt
+- the supervisor's saved routing reason for every automatically routed task
 - worker summaries, checks, blockers, confidence, and attempts
 - supervisor evidence and integrated commits
 - repository base and integration head
@@ -152,6 +158,8 @@ memory.
 | Supervisor branch drift | Launch/integration/finalization refused | Reconcile external commit deliberately |
 | Claude interruption | Workers and state remain on disk | `/orch:resume <run-id>` |
 | Plan revised without a checkpoint | Dispatch refused | Record a checkpoint for the new revision |
+| Automatic task omits model, effort, or routing reason | Plan refused | Supervisor classifies the task and saves an exact justified route |
+| Task conflicts with an explicit run pin | Plan refused | Honor the user override or create a separate run |
 | User cancellation | Child and wrapper receive termination; state cancelled | Inspect retained artifacts, retry only explicitly |
 
 ## Portability and retention
