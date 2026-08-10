@@ -3,7 +3,23 @@ import path from "node:path";
 
 import { resolveWorkspaceRoot } from "./workspace.mjs";
 
-export const STATE_VERSION = 5;
+export const RUN_STATE_VERSION = 5;
+
+// `RUN_STATE_VERSION` belongs to durable run state. Lanes and local thread pointers
+// have their own stable schemas because their shape did not change when run
+// state advanced. Keep the legacy `version` at 1 so older releases can still
+// read files written by this release; newer releases use the explicit marker
+// and schema version for fail-closed evolution.
+export const LANES_STATE_SCHEMA = "orchestrator.lanes";
+export const LOCAL_STATE_SCHEMA = "orchestrator.local-threads";
+export const SHARED_STATE_SCHEMA_VERSION = 1;
+export const SHARED_STATE_COMPATIBILITY_VERSION = 1;
+
+// Releases before the per-file markers wrote the run-state version into these
+// files. Version 5 was the last such shared value, so accept those legacy files
+// and migrate them on the next mutation. An unmarked higher value remains a
+// future-state signal and is rejected.
+const MAX_UNMARKED_SHARED_STATE_VERSION = 5;
 
 const ORCH_DIR = ".orchestrator";
 const LOCAL_DIR = "local";
@@ -48,7 +64,58 @@ export function isInitialized(cwd) {
   ].every((filePath) => fs.existsSync(filePath));
 }
 
-function readJson(filePath, fallback) {
+function sharedStateEnvelope(schema, payload) {
+  return {
+    version: SHARED_STATE_COMPATIBILITY_VERSION,
+    schema,
+    schemaVersion: SHARED_STATE_SCHEMA_VERSION,
+    ...payload
+  };
+}
+
+function validateSharedStateSchema(filePath, parsed, expectedSchema) {
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(`${filePath} must contain a state object.`);
+  }
+  const hasSchema = Object.hasOwn(parsed ?? {}, "schema");
+  const hasSchemaVersion = Object.hasOwn(parsed ?? {}, "schemaVersion");
+  if (hasSchema || hasSchemaVersion) {
+    if (!hasSchema || !hasSchemaVersion) {
+      throw new Error(`${filePath} has an incomplete state schema marker.`);
+    }
+    if (parsed.schema !== expectedSchema) {
+      throw new Error(
+        `${filePath} has state schema ${String(parsed.schema)}; expected ${expectedSchema}.`
+      );
+    }
+    if (parsed.schemaVersion !== SHARED_STATE_SCHEMA_VERSION) {
+      throw new Error(
+        `${filePath} was written with ${expectedSchema} schema version ` +
+          `${String(parsed.schemaVersion)}; this build supports ` +
+          `${SHARED_STATE_SCHEMA_VERSION}. Upgrade the plugin.`
+      );
+    }
+    if (parsed.version !== SHARED_STATE_COMPATIBILITY_VERSION) {
+      throw new Error(
+        `${filePath} has invalid legacy compatibility version ${String(parsed.version)}.`
+      );
+    }
+    return;
+  }
+
+  const version = Number(parsed?.version ?? 0);
+  if (!Number.isInteger(version) || version < 0) {
+    throw new Error(`${filePath} has invalid legacy state version ${String(parsed?.version)}.`);
+  }
+  if (version > MAX_UNMARKED_SHARED_STATE_VERSION) {
+    throw new Error(
+      `${filePath} was written by a newer orchestrator (legacy state version ${version}, ` +
+        `this build supports through ${MAX_UNMARKED_SHARED_STATE_VERSION}). Upgrade the plugin.`
+    );
+  }
+}
+
+function readJson(filePath, fallback, expectedSchema) {
   if (!fs.existsSync(filePath)) {
     return fallback;
   }
@@ -58,12 +125,7 @@ function readJson(filePath, fallback) {
   } catch (error) {
     throw new Error(`${filePath} is not valid JSON: ${error.message}`);
   }
-  const version = Number(parsed?.version ?? 0);
-  if (version > STATE_VERSION) {
-    throw new Error(
-      `${filePath} was written by a newer orchestrator (state version ${version}, this build supports ${STATE_VERSION}). Upgrade the plugin.`
-    );
-  }
+  validateSharedStateSchema(filePath, parsed, expectedSchema);
   return parsed;
 }
 
@@ -157,7 +219,7 @@ export function initWorkspace(cwd) {
   }
 
   if (!fs.existsSync(lanesFile(root))) {
-    writeJson(lanesFile(root), { version: STATE_VERSION, lanes: {} });
+    writeJson(lanesFile(root), sharedStateEnvelope(LANES_STATE_SCHEMA, { lanes: {} }));
     created.push(lanesFile(root));
   }
 
@@ -167,7 +229,10 @@ export function initWorkspace(cwd) {
   }
 
   if (!fs.existsSync(threadsFile(root))) {
-    writeJson(threadsFile(root), { version: STATE_VERSION, threads: {}, snapshots: {} });
+    writeJson(
+      threadsFile(root),
+      sharedStateEnvelope(LOCAL_STATE_SCHEMA, { threads: {}, snapshots: {} })
+    );
     created.push(threadsFile(root));
   }
 
@@ -191,18 +256,24 @@ Keep entries short and specific. Delete what stops being true.
 }
 
 export function loadLanesState(cwd) {
-  const state = readJson(lanesFile(cwd), { version: STATE_VERSION, lanes: {} });
+  const state = readJson(
+    lanesFile(cwd),
+    sharedStateEnvelope(LANES_STATE_SCHEMA, { lanes: {} }),
+    LANES_STATE_SCHEMA
+  );
   return {
-    version: STATE_VERSION,
+    version: SHARED_STATE_COMPATIBILITY_VERSION,
+    schema: LANES_STATE_SCHEMA,
+    schemaVersion: SHARED_STATE_SCHEMA_VERSION,
     lanes: state.lanes && typeof state.lanes === "object" ? state.lanes : {}
   };
 }
 
 export function saveLanesState(cwd, state) {
-  return writeJson(lanesFile(cwd), {
-    version: STATE_VERSION,
-    lanes: state.lanes ?? {}
-  });
+  return writeJson(
+    lanesFile(cwd),
+    sharedStateEnvelope(LANES_STATE_SCHEMA, { lanes: state.lanes ?? {} })
+  );
 }
 
 export function updateLanesState(cwd, mutate) {
@@ -216,20 +287,28 @@ export function updateLanesState(cwd, mutate) {
 }
 
 export function loadLocalState(cwd) {
-  const state = readJson(threadsFile(cwd), { version: STATE_VERSION, threads: {}, snapshots: {} });
+  const state = readJson(
+    threadsFile(cwd),
+    sharedStateEnvelope(LOCAL_STATE_SCHEMA, { threads: {}, snapshots: {} }),
+    LOCAL_STATE_SCHEMA
+  );
   return {
-    version: STATE_VERSION,
+    version: SHARED_STATE_COMPATIBILITY_VERSION,
+    schema: LOCAL_STATE_SCHEMA,
+    schemaVersion: SHARED_STATE_SCHEMA_VERSION,
     threads: state.threads && typeof state.threads === "object" ? state.threads : {},
     snapshots: state.snapshots && typeof state.snapshots === "object" ? state.snapshots : {}
   };
 }
 
 export function saveLocalState(cwd, state) {
-  return writeJson(threadsFile(cwd), {
-    version: STATE_VERSION,
-    threads: state.threads ?? {},
-    snapshots: state.snapshots ?? {}
-  });
+  return writeJson(
+    threadsFile(cwd),
+    sharedStateEnvelope(LOCAL_STATE_SCHEMA, {
+      threads: state.threads ?? {},
+      snapshots: state.snapshots ?? {}
+    })
+  );
 }
 
 export function updateLocalState(cwd, mutate) {

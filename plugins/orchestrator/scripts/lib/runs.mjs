@@ -18,7 +18,7 @@ import {
   validateOutcomeRecord
 } from "./outcomes.mjs";
 import {
-  STATE_VERSION,
+  RUN_STATE_VERSION,
   atomicWrite,
   localDir,
   nowIso,
@@ -265,9 +265,9 @@ function readRunFile(filePath, { recoverGuidance = false } = {}) {
   } catch (error) {
     throw new Error(`${filePath} is not valid JSON: ${error.message}`);
   }
-  if (Number(parsed?.version ?? 0) > STATE_VERSION) {
+  if (Number(parsed?.version ?? 0) > RUN_STATE_VERSION) {
     throw new Error(
-      `${filePath} was written by a newer orchestrator (state version ${parsed.version}, this build supports ${STATE_VERSION}).`
+      `${filePath} was written by a newer orchestrator (state version ${parsed.version}, this build supports ${RUN_STATE_VERSION}).`
     );
   }
   for (const task of Object.values(parsed?.tasks ?? {})) {
@@ -314,7 +314,7 @@ function appendEvent(cwd, runId, event) {
 }
 
 function writeRun(cwd, run) {
-  run.version = STATE_VERSION;
+  run.version = RUN_STATE_VERSION;
   run.guidance ??= disabledGuidanceState();
   run.updatedAt = nowIso();
   atomicWrite(runFile(cwd, run.id), `${JSON.stringify(run, null, 2)}\n`);
@@ -454,7 +454,7 @@ export function createRun(
     }
     const createdAt = nowIso();
     const run = {
-      version: STATE_VERSION,
+      version: RUN_STATE_VERSION,
       id: runId,
       lane: String(lane),
       objective: body,
