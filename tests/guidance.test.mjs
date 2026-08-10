@@ -12,6 +12,7 @@ import {
   GUIDANCE_STATUS,
   createFailureSignature,
   createProvisionalGuidancePolicy,
+  deriveReviewedGuidanceSources,
   estimateBriefingTokens,
   resolveGuidancePolicy,
   selectGuidance,
@@ -64,6 +65,40 @@ function clone(value) {
   return structuredClone(value);
 }
 
+function learningOutcome(overrides = {}) {
+  return {
+    terminalOutcome: "worker_blocked",
+    action: "clarify",
+    reasonCode: "missing_context",
+    provenance: "automatic",
+    signals: ["worker_blocker_reported"],
+    ...overrides
+  };
+}
+
+function reviewedLabel(overrides = {}) {
+  return {
+    labelId: ids.labelA,
+    labeledAt: "2026-08-10T01:00:00.000Z",
+    outcome: learningOutcome({ provenance: "supervisor", signals: [], ...overrides.outcome }),
+    ...overrides,
+    outcome: learningOutcome({ provenance: "supervisor", signals: [], ...overrides.outcome })
+  };
+}
+
+function learningExample(overrides = {}) {
+  return {
+    sampleId: overrides.sampleId ?? `sample-${"d".repeat(32)}`,
+    features: {
+      laneRef: `lane-${"e".repeat(32)}`,
+      taskKind: "write",
+      ...(overrides.features ?? {})
+    },
+    outcome: learningOutcome(overrides.outcome),
+    labels: overrides.labels ?? []
+  };
+}
+
 test("guidance constants are frozen, versioned, and intentionally provisional", () => {
   assert.equal(GUIDANCE_SCHEMA_VERSION, 1);
   assert.equal(GUIDANCE_SELECTION_VERSION, 1);
@@ -101,6 +136,98 @@ test("failure signatures contain only canonical structured outcome enums", () =>
     }),
     /unexpected: failureText/
   );
+});
+
+test("reviewed labels are the effective source and exclude automatic attempt signals", () => {
+  const laneRef = `lane-${"e".repeat(32)}`;
+  const earlier = reviewedLabel();
+  const later = reviewedLabel({
+    labelId: ids.labelB,
+    labeledAt: "2026-08-10T02:00:00.000Z",
+    outcome: { provenance: "user" }
+  });
+  const [derived] = deriveReviewedGuidanceSources([
+    learningExample({ labels: [later, earlier] })
+  ], laneRef);
+
+  assert.deepEqual(derived, {
+    sourceType: "curated_label",
+    sourceId: ids.labelB,
+    provenance: "user",
+    lane: laneRef,
+    taskKind: "write",
+    terminalOutcome: "worker_blocked",
+    action: "clarify",
+    reasonCode: "missing_context",
+    signals: []
+  });
+  assert.doesNotMatch(JSON.stringify(derived), /worker_blocker_reported/);
+});
+
+test("conflicting reviewed labels fail closed instead of choosing a winner", () => {
+  const laneRef = `lane-${"e".repeat(32)}`;
+  const sources = deriveReviewedGuidanceSources([learningExample({
+    labels: [
+      reviewedLabel(),
+      reviewedLabel({
+        labelId: ids.labelB,
+        labeledAt: "2026-08-10T02:00:00.000Z",
+        outcome: {
+          terminalOutcome: "verification_failed",
+          action: "replan",
+          reasonCode: "test_failure",
+          provenance: "user"
+        }
+      })
+    ]
+  })], laneRef);
+  assert.deepEqual(sources, []);
+});
+
+test("source compilation isolates lanes, filters provenance, and excludes execute", () => {
+  const laneRef = `lane-${"e".repeat(32)}`;
+  const otherLane = `lane-${"f".repeat(32)}`;
+  const structured = learningExample({
+    sampleId: `sample-${"1".repeat(32)}`,
+    outcome: { provenance: "supervisor" }
+  });
+  const ignored = [
+    learningExample({
+      sampleId: `sample-${"2".repeat(32)}`,
+      labels: [reviewedLabel({ outcome: { provenance: "imported" } })]
+    }),
+    learningExample({
+      sampleId: `sample-${"3".repeat(32)}`,
+      features: { laneRef: otherLane }
+    }),
+    learningExample({
+      sampleId: `sample-${"4".repeat(32)}`,
+      outcome: {
+        terminalOutcome: "accepted",
+        action: "execute",
+        reasonCode: "supervisor_verified",
+        provenance: "supervisor",
+        signals: []
+      }
+    })
+  ];
+  const sources = deriveReviewedGuidanceSources([structured, ...ignored], laneRef);
+  assert.equal(sources.length, 1);
+  assert.equal(sources[0].sourceType, "structured_outcome");
+  assert.equal(sources[0].provenance, "supervisor");
+  assert.equal(sources[0].lane, laneRef);
+  assert.equal(sources[0].action, "clarify");
+});
+
+test("canonical composite ordering uses code units rather than NUL-ignoring collation", () => {
+  const built = policy("code-unit-order-v1", [
+    source({ sourceId: ids.labelA, lane: "a" }),
+    source({ sourceId: ids.labelB, lane: "A", provenance: "user" })
+  ]);
+  // ICU collation orders these composite `lane\0taskKind` keys differently
+  // and can ignore the NUL delimiter. Raw JS relational ordering is stable.
+  assert.deepEqual(built.entries.map((entry) => entry.match.lane), ["A", "a"]);
+  assert.equal(validateGuidancePolicy(built), built);
 });
 
 test("all five eligible actions derive reviewed behavior from valid labels", () => {

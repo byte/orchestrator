@@ -7,8 +7,8 @@ import { parseArgs, splitList } from "./lib/args.mjs";
 import { briefingLedger, renderBriefing } from "./lib/briefing.mjs";
 import { captureGitSnapshot, changesSinceSnapshot } from "./lib/git.mjs";
 import {
-  GUIDANCE_ACTIONS,
-  createProvisionalGuidancePolicy
+  createProvisionalGuidancePolicy,
+  deriveReviewedGuidanceSources
 } from "./lib/guidance.mjs";
 import { addLedgerEntry, readLedger } from "./lib/ledger.mjs";
 import { addLane, bindThread, listLanes, removeLane, requireLane, unbindThread } from "./lib/lanes.mjs";
@@ -489,64 +489,6 @@ function commandLedger(argv, cwd) {
   throw new Error(`Unknown ledger action "${action}".`);
 }
 
-function guidanceOutcomeKey(outcome) {
-  return JSON.stringify({
-    terminalOutcome: outcome.terminalOutcome,
-    action: outcome.action,
-    reasonCode: outcome.reasonCode,
-    signals: [...outcome.signals].sort()
-  });
-}
-
-function guidanceSources(examples, laneRef) {
-  const sources = [];
-  for (const example of examples) {
-    if (example.features.laneRef !== laneRef) {
-      continue;
-    }
-    const reviewedLabels = example.labels
-      .filter((label) => ["supervisor", "user"].includes(label.outcome.provenance))
-      .sort((left, right) =>
-        left.labeledAt.localeCompare(right.labeledAt) ||
-        left.labelId.localeCompare(right.labelId)
-      );
-    let sourceType;
-    let sourceId;
-    let outcome;
-    if (reviewedLabels.length) {
-      const distinct = new Set(reviewedLabels.map((label) => guidanceOutcomeKey(label.outcome)));
-      if (distinct.size !== 1) {
-        continue;
-      }
-      const selected = reviewedLabels.at(-1);
-      sourceType = "curated_label";
-      sourceId = selected.labelId;
-      outcome = selected.outcome;
-    } else if (["supervisor", "user"].includes(example.outcome.provenance)) {
-      sourceType = "structured_outcome";
-      sourceId = `outcome-${example.sampleId.slice("sample-".length)}`;
-      outcome = example.outcome;
-    } else {
-      continue;
-    }
-    if (!GUIDANCE_ACTIONS.includes(outcome.action)) {
-      continue;
-    }
-    sources.push({
-      sourceType,
-      sourceId,
-      provenance: outcome.provenance,
-      lane: laneRef,
-      taskKind: example.features.taskKind,
-      terminalOutcome: outcome.terminalOutcome,
-      action: outcome.action,
-      reasonCode: outcome.reasonCode,
-      signals: [...outcome.signals]
-    });
-  }
-  return sources;
-}
-
 function renderRunSummary(run) {
   const taskCounts = Object.values(run.tasks).reduce((counts, task) => {
     counts[task.status] = (counts[task.status] ?? 0) + 1;
@@ -635,7 +577,7 @@ function commandRun(argv, cwd) {
         const run = loadRun(cwd, runId);
         const laneRef = opaqueLearningLaneRef(cwd, run.lane);
         const sources = laneRef
-          ? guidanceSources(listLearningExamples(cwd), laneRef)
+          ? deriveReviewedGuidanceSources(listLearningExamples(cwd), laneRef)
           : [];
         if (!sources.length) {
           throw new Error(

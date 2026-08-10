@@ -70,6 +70,84 @@ export function createFailureSignature(input) {
 }
 
 /**
+ * Compile the only learning records eligible to seed provisional guidance.
+ * Reviewed labels take precedence over the source attempt classification.
+ * Signals are copied only from that effective reviewed outcome; automatic
+ * attempt signals are never inherited into a reviewed label.
+ */
+export function deriveReviewedGuidanceSources(examples, laneRef) {
+  if (!Array.isArray(examples)) {
+    throw new Error("Guidance learning examples must be an array.");
+  }
+  assertLane(laneRef, false);
+  const sources = [];
+  for (const example of examples) {
+    if (!isPlainObject(example) || !isPlainObject(example.features) ||
+        !isPlainObject(example.outcome) || !Array.isArray(example.labels)) {
+      throw new Error("Guidance learning example has invalid structure.");
+    }
+    if (example.features.laneRef !== laneRef) {
+      continue;
+    }
+
+    const reviewedLabels = example.labels
+      .filter((label) =>
+        isPlainObject(label) && isPlainObject(label.outcome) &&
+        ["supervisor", "user"].includes(label.outcome.provenance)
+      )
+      .sort((left, right) =>
+        compareCodeUnits(left.labeledAt, right.labeledAt) ||
+        compareCodeUnits(left.labelId, right.labelId)
+      );
+
+    let sourceType;
+    let sourceId;
+    let effectiveOutcome;
+    if (reviewedLabels.length) {
+      const distinct = new Set(reviewedLabels.map((label) =>
+        guidanceOutcomeKey(label.outcome)
+      ));
+      if (distinct.size !== 1) {
+        continue;
+      }
+      const selected = reviewedLabels.at(-1);
+      sourceType = "curated_label";
+      sourceId = selected.labelId;
+      effectiveOutcome = selected.outcome;
+    } else if (["supervisor", "user"].includes(example.outcome.provenance)) {
+      sourceType = "structured_outcome";
+      sourceId = `outcome-${String(example.sampleId ?? "").slice("sample-".length)}`;
+      effectiveOutcome = example.outcome;
+    } else {
+      continue;
+    }
+
+    const outcome = normalizeOutcomeEnums({
+      terminalOutcome: effectiveOutcome.terminalOutcome,
+      action: effectiveOutcome.action,
+      reasonCode: effectiveOutcome.reasonCode,
+      signals: effectiveOutcome.signals
+    }, "Effective guidance outcome");
+    if (!guidanceActions.has(outcome.action)) {
+      continue;
+    }
+    const candidate = {
+      sourceType,
+      sourceId,
+      provenance: effectiveOutcome.provenance,
+      lane: laneRef,
+      taskKind: example.features.taskKind,
+      ...outcome
+    };
+    // Reuse the policy boundary validator so direct callers cannot bypass the
+    // opaque-id, task-kind, enum, or provenance contracts.
+    normalizeSource(candidate);
+    sources.push(candidate);
+  }
+  return sources;
+}
+
+/**
  * Derive a deterministic provisional policy from curated labels or an
  * explicitly structured outcome. No caller-supplied instruction text enters
  * the policy: every action maps to a reviewed, static supervisor behavior.
@@ -172,7 +250,7 @@ export function validateGuidancePolicy(policy) {
     }
     ids.add(entry.guidanceId);
     const sortKey = entrySortKey(entry);
-    if (previousSortKey !== null && sortKey.localeCompare(previousSortKey) < 0) {
+    if (previousSortKey !== null && compareCodeUnits(sortKey, previousSortKey) < 0) {
       throw new Error("Guidance policy entries must be in canonical order.");
     }
     previousSortKey = sortKey;
@@ -512,7 +590,7 @@ function validateEntry(entry) {
     if (seen.has(key)) {
       throw new Error("Guidance entry contains duplicate provenance.");
     }
-    if (previous !== null && key.localeCompare(previous) < 0) {
+    if (previous !== null && compareCodeUnits(key, previous) < 0) {
       throw new Error("Guidance entry provenance must be in canonical order.");
     }
     previous = key;
@@ -561,6 +639,15 @@ function parseFailureSignature(value) {
     throw new Error("Guidance failure signature is not canonical.");
   }
   return outcome;
+}
+
+function guidanceOutcomeKey(outcome) {
+  return createFailureSignature({
+    terminalOutcome: outcome.terminalOutcome,
+    action: outcome.action,
+    reasonCode: outcome.reasonCode,
+    signals: outcome.signals
+  });
 }
 
 function normalizeBudget(input) {
@@ -657,7 +744,7 @@ function entrySpecificity(entry) {
 }
 
 function compareEntries(left, right) {
-  return entrySortKey(left).localeCompare(entrySortKey(right));
+  return compareCodeUnits(entrySortKey(left), entrySortKey(right));
 }
 
 function entrySortKey(entry) {
@@ -671,11 +758,17 @@ function entrySortKey(entry) {
 }
 
 function compareProvenance(left, right) {
-  return provenanceSortKey(left).localeCompare(provenanceSortKey(right));
+  return compareCodeUnits(provenanceSortKey(left), provenanceSortKey(right));
 }
 
 function provenanceSortKey(value) {
   return `${value.sourceType}\u0000${value.provenance}\u0000${value.sourceId}`;
+}
+
+function compareCodeUnits(left, right) {
+  const first = String(left);
+  const second = String(right);
+  return first < second ? -1 : first > second ? 1 : 0;
 }
 
 function assertPolicyVersion(value) {
