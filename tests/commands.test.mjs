@@ -46,7 +46,14 @@ test("the run command requires evidence gates and bounded retries", () => {
   assert.match(command, /evaluate every acceptance criterion/);
   assert.match(command, /Retry transient worker failures once/);
   assert.match(command, /run checkpoint <run-id>/);
-  assert.match(command, /refuses to dispatch\s+until a checkpoint covers the current plan revision/);
+  assert.match(
+    command,
+    /refuses to dispatch\s+until a checkpoint covers the current plan and provisional-guidance revisions/
+  );
+  assert.match(command, /run guidance <run-id>/);
+  assert.match(command, /bounded advisory block/);
+  assert.match(command, /--mode off/);
+  assert.match(command, /--rollback/);
   assert.match(command, /Every worker runs in its own isolated worktree/);
 });
 
@@ -56,7 +63,9 @@ test("the resume command restores durable state and keeps Claude in authority", 
     "utf8"
   );
   assert.match(command, /run resume <run-id> --json/);
-  assert.match(command, /Treat it as authoritative over\s+conversation memory/);
+  assert.match(command, /Treat it as authoritative over conversation\s+memory/);
+  assert.match(command, /persisted attempt\s+selections/);
+  assert.match(command, /never reselect it from the current learning\s+store during recovery/);
   assert.match(
     command,
     /The Claude model running this main thread remains the planner, scheduler, reviewer, replanner,\s+integrator/

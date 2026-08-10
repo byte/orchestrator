@@ -15,6 +15,7 @@ import {
   learningExportsDir,
   learningIdentityFile,
   listLearningExamples,
+  opaqueLearningLaneRef,
   purgeLearningExamples
 } from "../plugins/orchestrator/scripts/lib/learning.mjs";
 import {
@@ -132,6 +133,7 @@ test("learning state is lazy and read-only commands do not create it", () => {
   const root = repo();
   assert.equal(fs.existsSync(learningDir(root)), false);
   assert.deepEqual(listLearningExamples(root), []);
+  assert.equal(opaqueLearningLaneRef(root, "api"), null);
   assert.equal(fs.existsSync(learningDir(root)), false);
   assert.throws(() => inspectLearningExample(root, "sample-00000000000000000000000000000000"),
     /Unknown learning sample/);
@@ -179,6 +181,7 @@ test("collection is metadata-only, private, deterministic, and idempotent", () =
   assert.match(example.sampleId, /^sample-[a-f0-9]{32}$/);
   assert.match(example.fingerprint, /^fp-[a-f0-9]{32}$/);
   assert.match(example.source.runRef, /^run-[a-f0-9]{32}$/);
+  assert.equal(opaqueLearningLaneRef(root, "customer-jane"), example.features.laneRef);
   assert.equal(example.outcome.terminalOutcome, "accepted");
   assert.equal(example.features.routeSource, "run_pin");
   assert.deepEqual(example.diagnostics, [{

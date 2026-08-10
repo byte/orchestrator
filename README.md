@@ -31,6 +31,8 @@ what should happen, what is acceptable, what gets integrated, and when the whole
 - Durable run JSON, append-only events, worker handles, Codex thread IDs, checkpoints, and evidence
 - A private, local-only learning store derived from allowlisted run metadata, with managed exports
   and complete derived-data purge controls
+- Opt-in provisional guidance compiled only from reviewed typed outcomes, with fixed templates,
+  bounded briefing injection, durable replay, and one-command disable or rollback
 - A committed ledger for stable project facts that should survive across machines
 - Deliberate retry, cancellation, replanning, conflict abort, and cleanup paths
 
@@ -169,6 +171,21 @@ text fields only when both `--consent user|supervisor` and
 Exports stay under the private learning directory so purge can find and remove every managed
 copy. There is no upload or network destination.
 
+Reviewed non-success outcomes can be compiled into provisional per-run guidance:
+
+```text
+orch run guidance <run-id> --mode provisional [--policy-version <id>]
+orch run guidance <run-id> --mode off
+orch run guidance <run-id> --rollback
+```
+
+Enabling guidance requires a supervisor- or user-reviewed outcome for the run's lane. It makes the
+current checkpoint stale, so the supervisor must review and checkpoint the policy before dispatch.
+Only a retry whose typed prior outcome exactly matches a reviewed failure signature receives an
+item. The item is a fixed built-in template: objectives, evidence, worker prose, source text, and
+free-form instructions never enter the policy. Guidance is advisory and cannot change model or
+effort pins, task state, scope, constraints, safety rules, or supervisor authority.
+
 ## Context and memory
 
 State is split by portability:
@@ -196,8 +213,9 @@ worktree paths, and Codex threads are meaningful only on the machine that owns t
 combines the run record, latest checkpoint, worker evidence, integration history, lane definition,
 and ledger into the supervisor's reconstructed context.
 
-All versioned state is read defensively. A newer state version is refused instead of guessed at,
-writes are atomic, and shared state updates use file locks.
+All versioned state is read defensively. Run state version 5 adds guidance policy and attempt
+snapshot fields while version-3 and version-4 runs remain readable. A newer version is refused
+instead of guessed at, writes are atomic, and shared state updates use file locks.
 
 Learning records default to 365-day retention metadata; `--retention-days forever` records that
 they remain until an explicit purge. Retention never deletes raw run audit state. `learn purge`
@@ -217,6 +235,8 @@ derive a purged sample again until the raw run itself is removed through a separ
 - The supervisor branch and recorded integration head must not drift outside the run.
 - Write-task reports must match the actual committed file set exactly.
 - Worker prose is untrusted evidence, not instructions to the supervisor.
+- Provisional guidance uses only fixed templates selected from reviewed typed outcomes. It is
+  opt-in, checkpointed, bounded, replayed from the attempt snapshot, and fully advisory.
 - A task report is not a supervisor verdict, and completed tasks are not a completed run.
 - Dispatch is refused until a checkpoint covers the current plan revision, so supervisory reasoning
   survives compaction.

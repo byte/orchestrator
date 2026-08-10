@@ -57,6 +57,23 @@ export function learningExportsDir(cwd) {
   return path.join(learningDir(cwd), "exports");
 }
 
+/**
+ * Return the repository-local opaque reference used to match learning records
+ * to a lane. This is read-only: an absent learning identity produces no
+ * reference and does not initialize the store.
+ */
+export function opaqueLearningLaneRef(cwd, lane) {
+  const name = String(lane ?? "").trim();
+  if (!name) {
+    throw new Error("A lane name is required to derive a learning reference.");
+  }
+  assertManagedAncestors(cwd);
+  const identity = readIdentity(cwd);
+  return identity
+    ? `lane-${hmac(identity, "lane:v1", name).slice(0, 32)}`
+    : null;
+}
+
 function sha256(value) {
   return createHash("sha256").update(String(value)).digest("hex");
 }

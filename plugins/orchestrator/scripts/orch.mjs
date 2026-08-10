@@ -6,6 +6,10 @@ import { evaluateRun } from "./lib/acceptance.mjs";
 import { parseArgs, splitList } from "./lib/args.mjs";
 import { briefingLedger, renderBriefing } from "./lib/briefing.mjs";
 import { captureGitSnapshot, changesSinceSnapshot } from "./lib/git.mjs";
+import {
+  GUIDANCE_ACTIONS,
+  createProvisionalGuidancePolicy
+} from "./lib/guidance.mjs";
 import { addLedgerEntry, readLedger } from "./lib/ledger.mjs";
 import { addLane, bindThread, listLanes, removeLane, requireLane, unbindThread } from "./lib/lanes.mjs";
 import {
@@ -14,6 +18,7 @@ import {
   inspectLearningExample,
   labelLearningExample,
   listLearningExamples,
+  opaqueLearningLaneRef,
   purgeLearningExamples
 } from "./lib/learning.mjs";
 import { preflight } from "./lib/preflight.mjs";
@@ -25,6 +30,7 @@ import {
   cancelRun,
   cancelTask,
   claimTask,
+  configureRunGuidance,
   createRun,
   finalizeRun,
   listRuns,
@@ -84,6 +90,7 @@ Usage:
   orch run plan <run-id> --plan-file <path> [--json]
   orch run ready <run-id> [--json]
   orch run briefing <run-id>
+  orch run guidance <run-id> (--mode <provisional|off> [--policy-version <id>] | --rollback) [--json]
   orch run resume <run-id> [--json]
   orch run checkpoint <run-id> --summary <text> [--decision <text>]... [--risk <text>]... [--next <text>]...
   orch run claim <run-id> <task-id> [--json]
@@ -482,6 +489,64 @@ function commandLedger(argv, cwd) {
   throw new Error(`Unknown ledger action "${action}".`);
 }
 
+function guidanceOutcomeKey(outcome) {
+  return JSON.stringify({
+    terminalOutcome: outcome.terminalOutcome,
+    action: outcome.action,
+    reasonCode: outcome.reasonCode,
+    signals: [...outcome.signals].sort()
+  });
+}
+
+function guidanceSources(examples, laneRef) {
+  const sources = [];
+  for (const example of examples) {
+    if (example.features.laneRef !== laneRef) {
+      continue;
+    }
+    const reviewedLabels = example.labels
+      .filter((label) => ["supervisor", "user"].includes(label.outcome.provenance))
+      .sort((left, right) =>
+        left.labeledAt.localeCompare(right.labeledAt) ||
+        left.labelId.localeCompare(right.labelId)
+      );
+    let sourceType;
+    let sourceId;
+    let outcome;
+    if (reviewedLabels.length) {
+      const distinct = new Set(reviewedLabels.map((label) => guidanceOutcomeKey(label.outcome)));
+      if (distinct.size !== 1) {
+        continue;
+      }
+      const selected = reviewedLabels.at(-1);
+      sourceType = "curated_label";
+      sourceId = selected.labelId;
+      outcome = selected.outcome;
+    } else if (["supervisor", "user"].includes(example.outcome.provenance)) {
+      sourceType = "structured_outcome";
+      sourceId = `outcome-${example.sampleId.slice("sample-".length)}`;
+      outcome = example.outcome;
+    } else {
+      continue;
+    }
+    if (!GUIDANCE_ACTIONS.includes(outcome.action)) {
+      continue;
+    }
+    sources.push({
+      sourceType,
+      sourceId,
+      provenance: outcome.provenance,
+      lane: laneRef,
+      taskKind: example.features.taskKind,
+      terminalOutcome: outcome.terminalOutcome,
+      action: outcome.action,
+      reasonCode: outcome.reasonCode,
+      signals: [...outcome.signals]
+    });
+  }
+  return sources;
+}
+
 function renderRunSummary(run) {
   const taskCounts = Object.values(run.tasks).reduce((counts, task) => {
     counts[task.status] = (counts[task.status] ?? 0) + 1;
@@ -506,6 +571,7 @@ function renderRunSummary(run) {
     `- status: ${run.status}`,
     `- lane: ${run.lane}`,
     `- workers: ${run.workerPolicy.maxWorkers} max; model ${modelRoute}; effort ${effortRoute}`,
+    `- guidance: ${run.guidance?.mode ?? "legacy-disabled"}; revision ${run.guidance?.revision ?? 0}`,
     `- plan revision: ${run.planRevision}`,
     `- tasks: ${Object.entries(taskCounts).map(([status, count]) => `${status}=${count}`).join(", ") || "none"}`
   ].join("\n");
@@ -543,6 +609,62 @@ function commandRun(argv, cwd) {
       reasoningEffort: options.effort
     });
     return options.json ? emitJson(run) : emit(renderRunSummary(run));
+  }
+
+  if (action === "guidance") {
+    const { options, positionals } = parseArgs(rest, {
+      booleanOptions: ["json", "rollback"],
+      valueOptions: ["mode", "policy-version"]
+    });
+    const runId = positionals[0];
+    if (!runId || positionals.length !== 1) {
+      throw new Error("`orch run guidance` requires one run id.");
+    }
+    if (options.rollback && (options.mode || options["policy-version"])) {
+      throw new Error("Guidance rollback cannot be combined with mode or policy-version options.");
+    }
+    let updated;
+    if (options.rollback) {
+      updated = configureRunGuidance(cwd, runId, { rollback: true });
+    } else {
+      const mode = String(options.mode ?? "").trim().toLowerCase();
+      if (!mode) {
+        throw new Error("`orch run guidance` requires --mode provisional|off or --rollback.");
+      }
+      if (mode === "provisional") {
+        const run = loadRun(cwd, runId);
+        const laneRef = opaqueLearningLaneRef(cwd, run.lane);
+        const sources = laneRef
+          ? guidanceSources(listLearningExamples(cwd), laneRef)
+          : [];
+        if (!sources.length) {
+          throw new Error(
+            "No supervisor- or user-reviewed non-execute outcomes are available for this lane."
+          );
+        }
+        const policy = createProvisionalGuidancePolicy({
+          policyVersion: options["policy-version"] ?? "provisional-v1",
+          sources
+        });
+        updated = configureRunGuidance(cwd, runId, {
+          mode,
+          policy,
+          laneRef
+        });
+      } else {
+        if (options["policy-version"]) {
+          throw new Error("Guidance policy-version is only valid with provisional mode.");
+        }
+        updated = configureRunGuidance(cwd, runId, { mode });
+      }
+    }
+    return options.json
+      ? emitJson(updated.guidance)
+      : emit(
+          `Run ${runId} guidance: ${updated.guidance.mode}; revision ` +
+          `${updated.guidance.revision}; policy ` +
+          `${updated.guidance.policy?.policyVersion ?? "none"}.`
+        );
   }
 
   const { options, positionals } = parseArgs(rest, {

@@ -83,8 +83,8 @@ attempts only when they do not already have a terminal outcome.
 
 ## Derived learning store
 
-The learning store is a separate local schema; it does not change run state version 4. It is
-created lazily at `.orchestrator/local/learning/` on the first mutating `learn` command. The
+The learning store is a separate local schema from run state. It is created lazily at
+`.orchestrator/local/learning/` on the first mutating `learn` command. The
 directory is mode `0700`, its identity and JSONL files are mode `0600`, and every mutation uses a
 single live-owner-aware store lock plus atomic replacement. Read-only list and inspect operations
 do not create the store.
@@ -122,12 +122,46 @@ managed exports conservatively. It never deletes `.orchestrator/local/runs/`. `p
 preserves the private identity and empty store, and collection can recreate samples while their
 raw source runs still exist.
 
+## Provisional guidance
+
+Run state version 5 adds an optional, run-local provisional guidance policy and frozen task and
+attempt selections. Version-3 and version-4 runs remain readable and behave as guidance-disabled;
+their next mutation upgrades them without inventing historical guidance.
+
+Guidance is compiled only from metadata-only learning records whose effective outcome has explicit
+`supervisor` or `user` provenance. Automatic classifications, imported labels, conflicting label
+history, raw run artifacts, managed text exports, objectives, evidence, worker prose, source,
+ledger, and free-form instructions are ineligible. The compiler maps typed actions and reason
+codes to closed built-in templates and hashes the canonical policy. One explicit supervisor or
+user review is sufficient only for this opt-in provisional phase; it is not high-confidence
+evidence, a confirmed policy, or evidence that a later promotion gate has passed.
+
+The operator explicitly enables a policy per run. That change increments a guidance revision and
+makes the existing checkpoint stale. New tasks receive an enabled zero-item selection; a retry can
+select guidance only when its prior attempt's opaque lane, task kind, terminal outcome, action,
+and reason code match the frozen policy. Automatically observed signals are recorded for audit but
+do not control the match unless a future reviewed schema makes them explicit. Claiming the task
+copies the exact selection—including item
+IDs, policy version/hash, provenance, rendered text, and budget—onto the attempt. Worker launch
+renders that persisted block. Resume reports the saved version/hash/item IDs and returns the full
+snapshot in JSON; neither path queries a mutable learning store.
+
+Guidance changes only a bounded briefing block. Route resolution, user model/effort pins, task
+state, dependencies, scope, lane constraints, sandboxing, verification, integration, finalization,
+and supervisor authority remain structurally independent. `run guidance --mode off` restores the
+original no-guidance worker behavior; `--rollback` restores the previous exact policy snapshot.
+Policies referenced by frozen selections remain archived in run state, and selections must match
+an entry in that retained policy. The emergency off and rollback paths discard malformed active or
+unrelated history entries while retaining every valid policy needed to replay prior attempts.
+Policy changes are refused while work is active or awaiting verification.
+
 ## Task dispatch
 
 `run launch` performs these steps:
 
 1. Lock and claim a ready task while enforcing `maxWorkers`, requiring a fully resolved exact
-   model and effort, and requiring a checkpoint that covers the current plan revision.
+   model and effort, and requiring a checkpoint that covers the current plan and guidance
+   revisions.
 2. Require a committed, clean supervisor checkout on the run's branch and integration head.
 3. Create `.orchestrator/local/worktrees/<run>/<task-attempt>` and a dedicated task branch.
 4. Write the prompt, JSON schema, worker specification, output paths, and status path.
@@ -186,9 +220,11 @@ clears prior finalization.
 Run JSON records what happened; a checkpoint records why. Because the checkpoint is the only
 supervisory reasoning that survives compaction, dispatch is gated on it:
 
-- `run checkpoint` stamps each entry with the plan revision and completed-task count it describes.
+- `run checkpoint` stamps each entry with the plan revision, guidance revision, and completed-task
+  count it describes.
 - `run launch` refuses to claim a task unless the latest checkpoint covers the current plan
-  revision, so approving a plan or replanning forces the reasoning to be written down.
+  and guidance revisions, so planning, replanning, or a policy change forces the reasoning to be
+  written down.
 - `run ready` reports the checkpoint as stale once tasks have completed since it was written, and
   `run resume` marks a stale checkpoint at the top of its briefing section.
 
@@ -202,6 +238,7 @@ a block.
 - current run and task status
 - process, status-file, thread, and worktree handles
 - the exact model and effort selected for each active attempt
+- the frozen provisional guidance policy hash and item IDs selected for each attempt
 - the supervisor's saved routing reason for every automatically routed task
 - worker summaries, checks, blockers, confidence, and attempts
 - supervisor evidence and integrated commits

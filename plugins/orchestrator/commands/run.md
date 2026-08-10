@@ -98,7 +98,29 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" run checkpoint <run-id> \
 
 This is not optional bookkeeping. The run record preserves what happened; only the checkpoint
 preserves *why*, and it is what you get back after compaction. `run launch` refuses to dispatch
-until a checkpoint covers the current plan revision.
+until a checkpoint covers the current plan and provisional-guidance revisions.
+
+### Optional provisional guidance
+
+Guidance is off by default. If the local learning store contains a supervisor- or user-reviewed
+non-success outcome for this lane, the supervisor may explicitly enable fixed-template retry
+guidance:
+
+```bash
+node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" run guidance <run-id> \
+  --mode provisional \
+  --json
+```
+
+This can only add a bounded advisory block to a retry briefing. It cannot change model or effort,
+scope, constraints, task state, policy, or supervisor authority, and it never copies objectives,
+evidence, source, or worker prose. Enabling, disabling, or rolling back guidance makes the current
+checkpoint stale; review the policy version and hash, then checkpoint before dispatch. Use
+`--mode off` as the kill switch and `--rollback` to restore the previous exact policy snapshot.
+Leave guidance off when no reviewed typed outcome exists; do not fabricate a source from a worker
+self-report. A single explicit supervisor or user review is enough to enable this provisional
+mode, but it is not a high-confidence or promoted policy; the supervisor must still review the
+policy hash and checkpoint every changed selection before dispatch.
 
 For normal in-scope implementation work, approve your own plan and continue. Stop for the user only
 when the plan requires destructive action, an external write, or material scope expansion.
@@ -138,8 +160,9 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" run resume <run-id> --json
 ```
 
 This polls detached workers before returning the complete supervisor briefing, active handles,
-results, checkpoints, and memory. Polling collects finished structured output into the task
-automatically. A worker report is not completion. It is evidence awaiting supervisor verification.
+results, checkpoints, provisional-guidance revisions and attempt snapshots, and memory. Polling
+collects finished structured output into the task automatically. A worker report is not
+completion. It is evidence awaiting supervisor verification.
 
 ## 6. Verify
 

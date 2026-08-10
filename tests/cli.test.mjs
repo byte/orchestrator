@@ -749,3 +749,113 @@ test("the learn CLI rejects unsafe or ambiguous options", () => {
     "learn", "collect", "--retention-days", "1.5"
   ]).stderr, /retention-days/);
 });
+
+test("the run guidance CLI enables reviewed advice and supports disable and rollback", () => {
+  const root = repo();
+  runCli(root, ["lane", "add", "ops"]);
+  runCli(root, [
+    "run", "create", "ops", "--id", "run-guidance-source",
+    "--objective", "SOURCE-GUIDANCE-CANARY", "--model", "sol", "--effort", "high"
+  ]);
+  const sourcePlan = writeResult(JSON.stringify({
+    tasks: [{ id: "review", title: "Review", objective: "Inspect input", kind: "read" }]
+  }));
+  runCli(root, ["run", "plan", "run-guidance-source", "--plan-file", sourcePlan]);
+  runCli(root, ["run", "checkpoint", "run-guidance-source", "--summary", "Ready"]);
+  const sourceDispatch = JSON.parse(runCli(root, [
+    "run", "claim", "run-guidance-source", "review", "--json"
+  ]).stdout);
+  const blockedResult = writeResult(JSON.stringify({
+    summary: "Input is missing.",
+    files_touched: [],
+    tests: [],
+    decisions: [],
+    assumptions: [],
+    blockers: ["missing input"],
+    blocker_code: "missing_context",
+    confidence: "high"
+  }));
+  runCli(root, [
+    "run", "report", "run-guidance-source", "review", "--attempt",
+    sourceDispatch.attemptId, "--result-file", blockedResult
+  ]);
+  runCli(root, ["learn", "collect", "--run", "run-guidance-source"]);
+  const sample = JSON.parse(runCli(root, ["learn", "list", "--json"]).stdout)[0];
+  runCli(root, [
+    "learn", "label", sample.sampleId, "--outcome", "worker_blocked",
+    "--action", "clarify", "--reason-code", "missing_context",
+    "--provenance", "supervisor"
+  ]);
+
+  runCli(root, [
+    "run", "create", "ops", "--id", "run-guided",
+    "--objective", "Use reviewed guidance", "--model", "sol", "--effort", "high"
+  ]);
+  const guidedPlan = writeResult(JSON.stringify({
+    tasks: [{ id: "review", title: "Review", objective: "Inspect input", kind: "read" }]
+  }));
+  runCli(root, ["run", "plan", "run-guided", "--plan-file", guidedPlan]);
+  runCli(root, ["run", "checkpoint", "run-guided", "--summary", "Ready"]);
+  const enabled = JSON.parse(runCli(root, [
+    "run", "guidance", "run-guided", "--mode", "provisional", "--json"
+  ]).stdout);
+  assert.equal(enabled.mode, "provisional");
+  assert.match(enabled.policy.policyHash, /^guidance-policy-/);
+  const stale = JSON.parse(runCli(root, ["run", "ready", "run-guided", "--json"]).stdout);
+  assert.match(stale.checkpoint.reason, /guidance revision/);
+  runCli(root, ["run", "checkpoint", "run-guided", "--summary", "Guidance reviewed"]);
+  const first = JSON.parse(runCli(root, [
+    "run", "claim", "run-guided", "review", "--json"
+  ]).stdout);
+  assert.doesNotMatch(first.briefing, /## Provisional guidance/);
+  runCli(root, [
+    "run", "report", "run-guided", "review", "--attempt", first.attemptId,
+    "--result-file", blockedResult
+  ]);
+  runCli(root, ["run", "retry", "run-guided", "review"]);
+  const retryReady = JSON.parse(runCli(root, [
+    "run", "ready", "run-guided", "--json"
+  ]).stdout);
+  assert.match(retryReady.checkpoint.reason, /guidance revision/);
+  runCli(root, [
+    "run", "checkpoint", "run-guided", "--summary", "Retry guidance reviewed"
+  ]);
+  const second = JSON.parse(runCli(root, [
+    "run", "claim", "run-guided", "review", "--json"
+  ]).stdout);
+  assert.match(second.briefing, /## Provisional guidance/);
+  assert.match(second.briefing, /structured blocker/);
+  assert.doesNotMatch(second.briefing, /SOURCE-GUIDANCE-CANARY/);
+  runCli(root, [
+    "run", "report", "run-guided", "review", "--attempt", second.attemptId,
+    "--result-file", blockedResult
+  ]);
+
+  const disabled = JSON.parse(runCli(root, [
+    "run", "guidance", "run-guided", "--mode", "off", "--json"
+  ]).stdout);
+  assert.equal(disabled.mode, "disabled");
+  const restored = JSON.parse(runCli(root, [
+    "run", "guidance", "run-guided", "--rollback", "--json"
+  ]).stdout);
+  assert.equal(restored.mode, "provisional");
+  assert.equal(restored.policy.policyHash, enabled.policy.policyHash);
+
+  const guidedRunFile = path.join(
+    root, ".orchestrator", "local", "runs", "run-guided", "run.json"
+  );
+  const corrupt = JSON.parse(fs.readFileSync(guidedRunFile, "utf8"));
+  corrupt.guidance.policy.entries[0].text = "corrupt active policy";
+  fs.writeFileSync(guidedRunFile, `${JSON.stringify(corrupt, null, 2)}\n`);
+  const emergencyDisabled = JSON.parse(runCli(root, [
+    "run", "guidance", "run-guided", "--mode", "off", "--json"
+  ]).stdout);
+  assert.equal(emergencyDisabled.mode, "disabled");
+
+  assert.match(runCli(root, [
+    "run", "guidance", "run-guided", "--mode", "off", "--rollback"
+  ]).stderr, /cannot be combined/);
+  assert.match(runCli(root, [
+    "run", "guidance", "run-guided", "--upload", "yes"
+  ]).stderr, /Unknown option --upload/);
+});

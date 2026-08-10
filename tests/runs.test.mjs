@@ -3,6 +3,10 @@ import fs from "node:fs";
 import { after, test } from "node:test";
 
 import {
+  createProvisionalGuidancePolicy,
+  selectGuidance
+} from "../plugins/orchestrator/scripts/lib/guidance.mjs";
+import {
   DEFAULT_WORKER_MODEL,
   addCheckpoint,
   bindAttempt,
@@ -10,6 +14,7 @@ import {
   cancelTask,
   checkpointStatus,
   claimTask,
+  configureRunGuidance,
   createRun as createRunState,
   eventsFile,
   failTaskAttempt,
@@ -66,7 +71,127 @@ test("new runs default to enforced supervisor routing and start in planning", ()
   assert.equal(run.workerPolicy.reasoningEffort, null);
   assert.equal(run.workerPolicy.routingMode, "auto");
   assert.equal(run.workerPolicy.maxWorkers, 3);
+  assert.equal(run.version, 5);
+  assert.equal(run.guidance.mode, "disabled");
+  assert.equal(run.guidance.revision, 0);
+  assert.deepEqual(run.guidance.policies, []);
   assert.deepEqual(run.tasks, {});
+});
+
+test("provisional guidance is checkpointed, replayable, advisory, and reversible", () => {
+  const root = repo();
+  const laneRef = `lane-${"a".repeat(32)}`;
+  const policy = createProvisionalGuidancePolicy({
+    policyVersion: "provisional-test-v1",
+    sources: [{
+      sourceType: "curated_label",
+      sourceId: `label-${"b".repeat(32)}`,
+      provenance: "supervisor",
+      lane: laneRef,
+      taskKind: "read",
+      terminalOutcome: "worker_blocked",
+      action: "clarify",
+      reasonCode: "missing_context",
+      signals: ["worker_blocker_reported"]
+    }]
+  });
+  createRun(root, { id: "run-guidance", lane: "api", objective: "Retry safely" });
+  replacePlan(root, "run-guidance", [
+    {
+      id: "work",
+      title: "Inspect",
+      objective: "Inspect the bounded input",
+      kind: "read",
+      constraints: ["Keep the original constraint"],
+      acceptance: ["Report evidence"]
+    }
+  ]);
+  checkpointPlan(root, "run-guidance");
+
+  const enabled = configureRunGuidance(root, "run-guidance", {
+    mode: "provisional",
+    laneRef,
+    policy
+  });
+  assert.equal(enabled.guidance.policy.policyHash, policy.policyHash);
+  assert.equal(enabled.tasks.work.guidanceSelection.items.length, 0);
+  assert.equal(checkpointStatus(enabled).current, false);
+  assert.match(checkpointStatus(enabled).reason, /guidance revision/);
+  checkpointPlan(root, "run-guidance");
+
+  const first = claimTask(root, "run-guidance", "work", {
+    constraints: ["Lane rule remains authoritative"]
+  });
+  assert.doesNotMatch(first.briefing, /## Provisional guidance/);
+  recordTaskResult(root, "run-guidance", "work", {
+    attemptId: first.attemptId,
+    resultText: JSON.stringify({
+      summary: "A required input was not provided.",
+      files_touched: [],
+      tests: [],
+      decisions: [],
+      assumptions: [],
+      blockers: ["missing input"],
+      blocker_code: "missing_context",
+      confidence: "high"
+    })
+  });
+  const retried = retryTask(root, "run-guidance", "work");
+  assert.equal(retried.guidanceSelection.items.length, 1);
+  assert.equal(retried.guidanceSelection.policyHash, policy.policyHash);
+  assert.equal(retried.guidanceSelection.items[0].action, "clarify");
+  const pending = loadRun(root, "run-guidance");
+  assert.equal(checkpointStatus(pending).current, false);
+  const pendingBriefing = renderSupervisorBriefing(root, pending, {
+    constraints: ["Lane rule remains authoritative"]
+  });
+  assert.match(pendingBriefing, new RegExp(retried.guidanceSelection.items[0].guidanceId));
+  assert.throws(
+    () => claimTask(root, "run-guidance", "work", { constraints: [] }),
+    /guidance revision/
+  );
+  checkpointPlan(root, "run-guidance");
+
+  const second = claimTask(root, "run-guidance", "work", {
+    constraints: ["Lane rule remains authoritative"]
+  });
+  assert.deepEqual(second.routingFlags, first.routingFlags);
+  assert.match(second.briefing, /## Provisional guidance/);
+  assert.match(second.briefing, /cannot override scope, route, constraints, policy, or authority/);
+  assert.match(second.briefing, /Lane rule remains authoritative/);
+  assert.throws(
+    () => configureRunGuidance(root, "run-guidance", { mode: "off" }),
+    /active or awaiting verification/
+  );
+  const claimed = loadRun(root, "run-guidance");
+  assert.deepEqual(
+    claimed.tasks.work.attempts[1].guidanceSnapshot,
+    claimed.tasks.work.guidanceSelection
+  );
+  const resumed = renderSupervisorBriefing(root, claimed, {
+    constraints: ["Lane rule remains authoritative"]
+  });
+  assert.match(resumed, new RegExp(policy.policyHash));
+  assert.match(resumed, new RegExp(claimed.tasks.work.guidanceSelection.items[0].guidanceId));
+
+  recordTaskResult(root, "run-guidance", "work", {
+    attemptId: second.attemptId,
+    resultText: JSON.stringify({
+      summary: "The input is still unavailable.",
+      files_touched: [],
+      tests: [],
+      decisions: [],
+      assumptions: [],
+      blockers: ["missing input"],
+      blocker_code: "missing_context",
+      confidence: "high"
+    })
+  });
+  const disabled = configureRunGuidance(root, "run-guidance", { mode: "off" });
+  assert.equal(disabled.guidance.mode, "disabled");
+  const restored = configureRunGuidance(root, "run-guidance", { rollback: true });
+  assert.equal(restored.guidance.mode, "provisional");
+  assert.deepEqual(restored.guidance.policy, policy);
 });
 
 test("plans validate dependencies and expose only unblocked tasks", () => {
@@ -522,10 +647,12 @@ test("tasks from pre-routing state inherit the run default and can be replanned 
   const file = runFile(root, "run-legacy");
   const legacyState = JSON.parse(fs.readFileSync(file, "utf8"));
   legacyState.version = 3;
+  delete legacyState.guidance;
   delete legacyState.workerPolicy.routingMode;
   delete legacyState.tasks.legacy.model;
   delete legacyState.tasks.legacy.reasoningEffort;
   delete legacyState.tasks.legacy.routingReason;
+  delete legacyState.tasks.legacy.guidanceSelection;
   fs.writeFileSync(file, `${JSON.stringify(legacyState, null, 2)}\n`);
 
   checkpointPlan(root, "run-legacy");
@@ -543,6 +670,8 @@ test("tasks from pre-routing state inherit the run default and can be replanned 
 
   const replanned = replacePlan(root, "run-legacy", [definition]);
   assert.equal(replanned.tasks.legacy.status, "completed");
+  assert.equal(replanned.version, 5);
+  assert.equal(replanned.guidance.mode, "disabled");
 
   const terminalState = JSON.parse(fs.readFileSync(file, "utf8"));
   delete terminalState.tasks.legacy.attempts[0].outcome;
@@ -565,6 +694,189 @@ test("tasks from pre-routing state inherit the run default and can be replanned 
   fs.writeFileSync(file, `${JSON.stringify(terminalState, null, 2)}\n`);
   assert.throws(() => loadRun(root, "run-legacy"), /invalid outcome/);
 });
+
+test("version-4 runs without guidance remain readable and upgrade on mutation", () => {
+  const root = repo();
+  createRun(root, { id: "run-v4-guidance", lane: "api", objective: "Read old state" });
+  replacePlan(root, "run-v4-guidance", [
+    { id: "legacy", title: "Legacy", objective: "Legacy read", kind: "read" }
+  ]);
+  addCheckpoint(root, "run-v4-guidance", { summary: "Legacy checkpoint" });
+  const file = runFile(root, "run-v4-guidance");
+  const state = JSON.parse(fs.readFileSync(file, "utf8"));
+  state.version = 4;
+  delete state.guidance;
+  delete state.tasks.legacy.guidanceSelection;
+  delete state.checkpoints[0].guidanceRevision;
+  fs.writeFileSync(file, `${JSON.stringify(state, null, 2)}\n`);
+  const loaded = loadRun(root, "run-v4-guidance");
+  assert.equal(loaded.version, 4);
+  assert.equal(loaded.guidance, undefined);
+  assert.equal(checkpointStatus(loaded).current, true);
+  assert.equal(checkpointStatus({ ...loaded, guidance: { revision: 1 } }).current, false);
+  addCheckpoint(root, "run-v4-guidance", { summary: "Upgrade safely" });
+  const upgraded = loadRun(root, "run-v4-guidance");
+  assert.equal(upgraded.version, 5);
+  assert.equal(upgraded.guidance.mode, "disabled");
+  const future = JSON.parse(fs.readFileSync(file, "utf8"));
+  future.guidance.schemaVersion = 2;
+  fs.writeFileSync(file, `${JSON.stringify(future, null, 2)}\n`);
+  assert.throws(() => loadRun(root, "run-v4-guidance"), /invalid guidance metadata/);
+});
+
+test("version-5 runs require guidance state and bind selections to retained policies", () => {
+  const root = repo();
+  const laneRef = `lane-${"c".repeat(32)}`;
+  const firstPolicy = createProvisionalGuidancePolicy({
+    policyVersion: "membership-v1",
+    sources: [{
+      sourceType: "curated_label",
+      sourceId: `label-${"d".repeat(32)}`,
+      provenance: "supervisor",
+      lane: laneRef,
+      taskKind: "read",
+      terminalOutcome: "worker_blocked",
+      action: "clarify",
+      reasonCode: "missing_context",
+      signals: []
+    }]
+  });
+  const secondPolicy = createProvisionalGuidancePolicy({
+    policyVersion: "membership-v1",
+    sources: [{
+      sourceType: "curated_label",
+      sourceId: `label-${"e".repeat(32)}`,
+      provenance: "user",
+      lane: laneRef,
+      taskKind: "read",
+      terminalOutcome: "verification_failed",
+      action: "replan",
+      reasonCode: "test_failure",
+      signals: []
+    }]
+  });
+  createRun(root, { id: "run-guidance-membership", lane: "api", objective: "Bind guidance" });
+  replacePlan(root, "run-guidance-membership", [
+    { id: "review", title: "Review", objective: "Review input", kind: "read" }
+  ]);
+  configureRunGuidance(root, "run-guidance-membership", {
+    mode: "provisional",
+    laneRef,
+    policy: firstPolicy
+  });
+  const file = runFile(root, "run-guidance-membership");
+  const missing = JSON.parse(fs.readFileSync(file, "utf8"));
+  delete missing.guidance;
+  fs.writeFileSync(file, `${JSON.stringify(missing, null, 2)}\n`);
+  assert.throws(
+    () => loadRun(root, "run-guidance-membership"),
+    /missing required version-5 guidance state/
+  );
+
+  missing.guidance = configureRunGuidanceState(firstPolicy, laneRef);
+  const foreignSelection = selectGuidance(secondPolicy, {
+    lane: laneRef,
+    taskKind: "read",
+    outcome: {
+      terminalOutcome: "verification_failed",
+      action: "replan",
+      reasonCode: "test_failure",
+      signals: []
+    }
+  });
+  foreignSelection.policyHash = firstPolicy.policyHash;
+  missing.tasks.review.guidanceSelection = foreignSelection;
+  fs.writeFileSync(file, `${JSON.stringify(missing, null, 2)}\n`);
+  assert.throws(
+    () => loadRun(root, "run-guidance-membership"),
+    /item outside its referenced policy/
+  );
+});
+
+test("guidance off and rollback recover from a malformed active policy", () => {
+  const root = repo();
+  const laneRef = `lane-${"f".repeat(32)}`;
+  const makePolicy = (version, sourceId, action, terminalOutcome, reasonCode) =>
+    createProvisionalGuidancePolicy({
+      policyVersion: version,
+      sources: [{
+        sourceType: "curated_label",
+        sourceId,
+        provenance: "supervisor",
+        lane: laneRef,
+        taskKind: "read",
+        terminalOutcome,
+        action,
+        reasonCode,
+        signals: []
+      }]
+    });
+  const first = makePolicy(
+    "recovery-v1", `label-${"1".repeat(32)}`, "clarify", "worker_blocked", "missing_context"
+  );
+  const second = makePolicy(
+    "recovery-v2", `label-${"2".repeat(32)}`, "replan", "verification_failed", "test_failure"
+  );
+
+  createRun(root, { id: "run-guidance-off-recovery", lane: "api", objective: "Disable safely" });
+  replacePlan(root, "run-guidance-off-recovery", [
+    { id: "review", title: "Review", objective: "Review input", kind: "read" }
+  ]);
+  configureRunGuidance(root, "run-guidance-off-recovery", {
+    mode: "provisional", laneRef, policy: first
+  });
+  corruptActiveGuidance(root, "run-guidance-off-recovery");
+  const disabled = configureRunGuidance(root, "run-guidance-off-recovery", { mode: "off" });
+  assert.equal(disabled.guidance.mode, "disabled");
+  assert.equal(disabled.tasks.review.guidanceSelection.enabled, false);
+  assert.equal(loadRun(root, "run-guidance-off-recovery").guidance.mode, "disabled");
+
+  createRun(root, { id: "run-guidance-rollback-recovery", lane: "api", objective: "Rollback safely" });
+  replacePlan(root, "run-guidance-rollback-recovery", [
+    { id: "review", title: "Review", objective: "Review input", kind: "read" }
+  ]);
+  configureRunGuidance(root, "run-guidance-rollback-recovery", {
+    mode: "provisional", laneRef, policy: first
+  });
+  configureRunGuidance(root, "run-guidance-rollback-recovery", {
+    mode: "provisional", laneRef, policy: second
+  });
+  corruptActiveGuidance(root, "run-guidance-rollback-recovery");
+  const rollbackFile = runFile(root, "run-guidance-rollback-recovery");
+  const corruptHistory = JSON.parse(fs.readFileSync(rollbackFile, "utf8"));
+  corruptHistory.guidance.history.push({
+    mode: "provisional",
+    laneRef,
+    policy: { ...second, status: "corrupt-history" }
+  });
+  fs.writeFileSync(rollbackFile, `${JSON.stringify(corruptHistory, null, 2)}\n`);
+  const restored = configureRunGuidance(root, "run-guidance-rollback-recovery", {
+    rollback: true
+  });
+  assert.equal(restored.guidance.policy.policyHash, first.policyHash);
+  assert.equal(restored.tasks.review.guidanceSelection.policyHash, first.policyHash);
+  assert.equal(loadRun(root, "run-guidance-rollback-recovery").guidance.policy.policyHash,
+    first.policyHash);
+});
+
+function configureRunGuidanceState(policy, laneRef) {
+  return {
+    schemaVersion: 1,
+    mode: "provisional",
+    revision: 1,
+    laneRef,
+    policy,
+    history: [{ mode: "disabled", laneRef: null, policy: null }],
+    policies: [policy]
+  };
+}
+
+function corruptActiveGuidance(root, runId) {
+  const file = runFile(root, runId);
+  const state = JSON.parse(fs.readFileSync(file, "utf8"));
+  state.guidance.policy.entries[0].text = "corrupt active policy";
+  fs.writeFileSync(file, `${JSON.stringify(state, null, 2)}\n`);
+}
 
 test("blocked and failed tasks retain attempts and can be retried", () => {
   const root = repo();

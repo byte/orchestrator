@@ -2,9 +2,9 @@
 
 This is the execution tracker for
 [the implementation plan](./continual-learning-implementation-plan.md). Complete
-milestones in order unless a dependency is explicitly marked otherwise. Each
-major milestone must leave the repository shippable and pass its exit gate
-before work begins on the next milestone.
+milestones in dependency order. Milestone 4A is the explicit early exception
+and may ship before data-gated Milestone 3. Each major milestone must leave the
+repository shippable and pass its exit gate before dependent work begins.
 
 ## Working rules
 
@@ -139,6 +139,10 @@ Depends on: Milestone 1.
 
 Depends on: Milestone 2.
 
+Status: data-gated until the learning store contains approximately 200
+genuinely reviewed terminal attempts. Fixtures, automatic-only labels, and
+worker self-reports do not satisfy this threshold.
+
 ### Rubrics and annotations
 
 - [ ] **M3.1** Add `lib/rubrics.mjs` with a versioned rubric schema.
@@ -184,83 +188,113 @@ Depends on: Milestone 2.
 - [ ] **M3 gate** Produce a reproducible evaluation report from a frozen,
   leakage-checked manifest.
 
-## Milestone 4 — Independent judge groups
+## Milestone 4 — Refusal and just-in-time guidance
 
-Depends on: Milestone 3.
+Milestone 4A depends on completed Milestones 1–2 but is exempt from the
+reviewed-data threshold and may ship before Milestone 3.
+Milestone 4B is data-gated and depends on Milestone 3.
+
+### Phase A — Lightweight provisional guidance
+
+- [x] **M4A.1** Add `lib/guidance.mjs` with versioned guidance-policy and
+  guidance-selection schemas.
+- [x] **M4A.2** Map `clarify`, `replan`, `escalate`, `refuse`, and `abstain` to
+  deterministic advisory behavior.
+- [x] **M4A.3** Derive eligibility only from typed Milestone-1 outcome fields
+  with explicit supervisor or user provenance. One such explicit review is
+  sufficient only for this opt-in provisional phase; it is not promotion
+  evidence.
+- [x] **M4A.4** Match provisional guidance by opaque lane, task kind, and typed
+  prior-attempt outcome/action/reason signature without requiring rubrics or
+  datasets.
+- [x] **M4A.5** Keep guidance advisory: it may change briefing text but cannot
+  mutate task state, dispatch routes, or authority decisions.
+- [x] **M4A.6** Render only fixed, compact instructions under character, token,
+  and item budgets.
+- [x] **M4A.7** Prohibit objectives, prompts, production examples, evidence,
+  worker/tool output, source text, ledger text, and free-form instructions.
+- [x] **M4A.8** Persist item IDs, policy version/hash, provenance, provisional
+  status, and exact attempt snapshots for resume.
+- [x] **M4A.9** Add an explicit run-level off switch and exact rollback.
+- [x] **M4A.10** Preserve model/effort pins, lane constraints, safety rules,
+  scope, and supervisor authority.
+- [x] **M4A.11** Add selection, non-match, action-mapping, deterministic
+  rendering, and strict-schema tests.
+- [x] **M4A.12** Add canary and budget tests proving raw text cannot enter
+  guidance or exceed the briefing bounds.
+- [x] **M4A.13** Test disable, rollback, corrupt-policy recovery, policy-selection
+  membership, version-4 compatibility, checkpoint invalidation, and exact
+  resume reconstruction.
+- [x] **M4A.14** Run targeted guidance, briefing, run, CLI, and learning tests.
+- [x] **M4A.15** Run `npm test`.
+- [x] **M4A gate** Confirm provisional guidance is bounded, reversible,
+  replayable, advisory only, and based solely on reviewed typed outcomes.
+
+### Milestone 4A evidence
+
+- Built: versioned fixed-template policies, opaque metadata-only source
+  selection, bounded retry briefing blocks, state-version-5 policy archives,
+  exact task/attempt snapshots, and explicit CLI enable, disable, and rollback.
+- Safety and recovery: every changed selection invalidates the current
+  checkpoint; routes, pins, scope, constraints, lifecycle, and authority stay
+  independent; selections must belong to a retained policy; malformed active
+  or unrelated history cannot block the emergency off or valid rollback path.
+- Backward compatibility: version-3 and version-4 runs remain readable and
+  upgrade to explicit disabled guidance on mutation; version-5 files missing
+  guidance or carrying future/malformed guidance fail closed.
+- Targeted gate: `node --test --test-reporter=spec tests/guidance.test.mjs
+  tests/briefing.test.mjs tests/runs.test.mjs tests/cli.test.mjs
+  tests/learning.test.mjs` passed 101 tests with 0 failures on 2026-08-10.
+- Full repository gate: `npm test` passed 156 tests with 0 failures on
+  2026-08-10.
+
+### Phase B — Validated guidance
+
+Do not start before Milestone 3 and the reviewed-data threshold.
+
+- [ ] **M4B.1** Add optional rubric-aware guidance matching.
+- [ ] **M4B.2** Compare enabled and disabled behavior on the frozen holdout.
+- [ ] **M4B.3** Measure false refusal, unnecessary escalation, success, and
+  verification-escape rates.
+- [ ] **M4B.4** Promote guidance from provisional to confirmed only when the
+  frozen evaluation improves without a quality or safety regression.
+- [ ] **M4B gate** Produce reproducible promotion evidence tied to policy,
+  rubric, dataset, and holdout hashes.
+
+## Milestone 5 — Independent judge evaluation
+
+Depends on: Milestone 3 and the reviewed-data threshold.
 
 ### Judge protocol
 
-- [ ] **M4.1** Add `lib/judges.mjs` and the versioned judge-result schema.
-- [ ] **M4.2** Record judge identity, model, effort, rubric hash, prompt hash,
+- [ ] **M5.1** Add `lib/judges.mjs` and a versioned N-member judge schema.
+- [ ] **M5.2** Record judge identity, resolved route, rubric/prompt hashes,
   evidence references, criterion scores, verdict, category, action, and
   confidence.
-- [ ] **M4.3** Add first-class `judgeGroup` state to runs.
-- [ ] **M4.4** Launch blinded Sol, Terra, and Luna judges independently.
-- [ ] **M4.5** Prevent judges from reading one another's votes.
-- [ ] **M4.6** Render candidate data as typed, delimited, untrusted input.
+- [ ] **M5.3** Start with one configured independent judge plus supervisor
+  adjudication; do not hard-code a model family or three-member panel.
+- [ ] **M5.4** Render evaluation input as typed, delimited, untrusted input.
+- [ ] **M5.5** Preserve every vote and make interrupted evaluation resumable.
 
-### Consensus and recovery
+### Consensus, CLI, and gate
 
-- [ ] **M4.7** Implement deterministic unanimous category/action consensus.
-- [ ] **M4.8** Make any safety-gate failure block automatic acceptance.
-- [ ] **M4.9** Route abstention, disagreement, and malformed votes to supervisor
+- [ ] **M5.6** Implement deterministic N=1 and N>1 aggregation with
+  non-compensatory safety gates.
+- [ ] **M5.7** Route abstention, disagreement, and malformed votes to supervisor
   adjudication.
-- [ ] **M4.10** Preserve every individual vote after aggregation.
-- [ ] **M4.11** Make panel collection idempotent across polling and resume.
-- [ ] **M4.12** Reconstruct pending judges, completed votes, and adjudication
-  state in the resume briefing.
+- [ ] **M5.8** Implement `orch run judge start|status|resolve`.
+- [ ] **M5.9** Add N=1/N=3, prompt-injection, interruption, and resume tests.
+- [ ] **M5.10** Run targeted judge, worker, run, and CLI tests.
+- [ ] **M5.11** Run `npm test`.
+- [ ] **M5 gate** Confirm judges cannot bypass supervisor authority and all
+  abstention or disagreement safely defers.
 
-### CLI, tests, and gate
-
-- [ ] **M4.13** Implement `orch run judge start|status|resolve`.
-- [ ] **M4.14** Add consensus, abstention, disagreement, and malformed-vote
-  tests.
-- [ ] **M4.15** Add prompt-injection tests for judge and arbiter inputs.
-- [ ] **M4.16** Add interruption and resume tests without double-counting.
-- [ ] **M4.17** Run targeted judge, worker, run, and CLI tests.
-- [ ] **M4.18** Run `npm test`.
-- [ ] **M4 gate** Confirm no judge panel can bypass supervisor authority and all
-  disagreement safely abstains.
-
-## Milestone 5 — Pre-integration candidate evaluation
-
-Depends on: Milestone 4.
-
-### Candidate lifecycle
-
-- [ ] **M5.1** Add `lib/experiments.mjs`.
-- [ ] **M5.2** Add `proposed`, `running`, `candidate_ready`, `evaluating`,
-  `accepted`, and `rejected` candidate states.
-- [ ] **M5.3** Add `reviewOf` relationships that do not require prior
-  integration.
-- [ ] **M5.4** Freeze candidate commits while evaluation is active.
-- [ ] **M5.5** Record repository SHA, briefing, rubric, dataset, route, runner,
-  and Codex CLI versions.
-
-### Comparison and promotion
-
-- [ ] **M5.6** Run baseline and candidate against identical frozen cases.
-- [ ] **M5.7** Persist per-criterion deltas and regressions.
-- [ ] **M5.8** Require explicit supervisor promotion.
-- [ ] **M5.9** Reuse existing scope, declaration, cleanliness, commit, and
-  integration gates for the selected candidate.
-- [ ] **M5.10** Ensure rejected candidates never alter supervisor `HEAD`.
-- [ ] **M5.11** Preserve experiment evidence after worktree cleanup.
-
-### Tests and gate
-
-- [ ] **M5.12** Test immutable candidate review.
-- [ ] **M5.13** Test reproducible baseline/candidate comparison.
-- [ ] **M5.14** Test rejection without integration-head changes.
-- [ ] **M5.15** Test that only the selected candidate can integrate.
-- [ ] **M5.16** Run targeted experiment, worktree, worker, and run tests.
-- [ ] **M5.17** Run `npm test`.
-- [ ] **M5 gate** Demonstrate evaluation and rejection of a candidate without
-  changing the supervisor checkout.
+Pre-integration N-best candidate experiments remain a separate future
+initiative and are not a dependency of this plan.
 
 ## Milestone 6 — Shadow routing recommendations
 
-Depends on: Milestones 3 and 5 plus a sufficient reviewed sample set.
+Depends on: Milestone 3 and a sufficient reviewed sample set.
 
 ### Policy and features
 
@@ -297,49 +331,19 @@ Depends on: Milestones 3 and 5 plus a sufficient reviewed sample set.
 - [ ] **M6 gate** Keep the policy in shadow mode unless the frozen evaluation
   shows improved efficiency with no quality or safety regression.
 
-## Milestone 7 — Refusal and just-in-time guidance
-
-Depends on: Milestone 6 promotion evidence.
-
-### Runtime behavior
-
-- [ ] **M7.1** Add `lib/guidance.mjs`.
-- [ ] **M7.2** Map `clarify`, `replan`, `escalate`, `refuse`, and `abstain` to
-  explicit supervisor behavior.
-- [ ] **M7.3** Match guidance by lane, task kind, failure signature, and rubric.
-- [ ] **M7.4** Inject only evaluated, compact guidance into worker briefings.
-- [ ] **M7.5** Record policy version and provenance for every injected item.
-- [ ] **M7.6** Enforce a briefing token budget.
-- [ ] **M7.7** Prohibit raw production examples and untrusted worker prose from
-  guidance.
-- [ ] **M7.8** Add a complete policy disable and rollback path.
-
-### Evaluation and gate
-
-- [ ] **M7.9** Compare enabled and disabled behavior on the frozen holdout.
-- [ ] **M7.10** Measure false refusal, unnecessary escalation, success, and
-  verification escape rates.
-- [ ] **M7.11** Test that guidance cannot override user pins, lane constraints,
-  or safety rules.
-- [ ] **M7.12** Test exact guidance reconstruction after resume.
-- [ ] **M7.13** Run targeted guidance, briefing, run, and command tests.
-- [ ] **M7.14** Run `npm test`.
-- [ ] **M7 gate** Activate only guidance that improves holdout performance
-  without increasing refusal or safety errors.
-
-## Milestone 8 — Optional external training adapter
+## Milestone 7 — Optional external training adapter
 
 Depends on: Explicit user authorization and a concrete trainer and serving
 contract. This milestone is not part of the core release.
 
-- [ ] **M8.1** Define a trainer-neutral sanitized export interface.
-- [ ] **M8.2** Require explicit configuration and authorization for each export.
-- [ ] **M8.3** Record dataset, trainer, base model, recipe, and artifact
+- [ ] **M7.1** Define a trainer-neutral sanitized export interface.
+- [ ] **M7.2** Require explicit configuration and authorization for each export.
+- [ ] **M7.3** Record dataset, trainer, base model, recipe, and artifact
   provenance.
-- [ ] **M8.4** Exclude hidden reasoning traces.
-- [ ] **M8.5** Evaluate trained candidates through the same frozen evaluation
+- [ ] **M7.4** Exclude hidden reasoning traces.
+- [ ] **M7.5** Evaluate trained candidates through the same frozen evaluation
   and promotion gates.
-- [ ] **M8.6** Confirm core Orchestrator still has no hosted-service, telemetry,
+- [ ] **M7.6** Confirm core Orchestrator still has no hosted-service, telemetry,
   account, or background-upload dependency.
 
 ## Documentation and release checklist
@@ -364,8 +368,6 @@ Complete the applicable items at every milestone:
 - [ ] Derived records are sanitized, traceable, bounded, and removable.
 - [ ] Golden evaluations are frozen, reproducible, and leakage-checked.
 - [ ] Judge disagreement and abstention cannot auto-promote work.
-- [ ] Candidate evaluation occurs before integration.
-- [ ] Rejected candidates do not change supervisor `HEAD`.
 - [ ] Routing remains advisory until promotion criteria pass.
 - [ ] Explicit user pins and supervisor authority remain intact.
 - [ ] Scope, worktree, checkpoint, integration, and finalization invariants do

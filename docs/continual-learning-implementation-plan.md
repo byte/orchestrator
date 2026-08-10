@@ -40,9 +40,9 @@ over months. That changes what is credible:
   labeled failures into versioned briefing guidance (milestone 4).
 
 Concretely: ship milestones 1–2 now, ship milestone 4's lightweight guidance
-path as soon as milestone 1 labels exist, and gate milestones 3 and 5–6 on an
-explicit data threshold (at least ~200 labeled terminal attempts, revisited
-then).
+path as soon as milestone 1 labels exist in the milestone 2 store, and gate
+milestones 3 and 5–6 on an explicit data threshold (at least ~200 labeled
+terminal attempts, revisited then).
 
 ## Delivery sequence
 
@@ -57,8 +57,9 @@ The work is divided into independently shippable milestones:
 7. Optionally integrate an external training system.
 
 Milestones 1–2 form the foundational release and should ship immediately.
-Milestone 4's lightweight path depends only on milestone 1. Milestones 3, 5,
-and 6 start only after the data threshold above is met.
+Milestone 4's lightweight path depends on milestones 1–2 but is exempt from
+the reviewed-data threshold. Milestones 3, 5, and 6 start only after that
+threshold is met.
 
 Pre-integration evaluation of multiple parallel candidate implementations
 (N-best sampling with baseline-vs-candidate comparison) is **out of scope** for
@@ -279,7 +280,7 @@ early.
 
 This milestone has two phases:
 
-- **Lightweight path (ships first, depends only on milestone 1):** the
+- **Lightweight path (ships first, depends on milestones 1–2):** the
   supervisor injects guidance derived from milestone-1 outcome labels alone.
   Every injected instruction is versioned, provenance-tagged, and reversible.
   No holdout comparison is required — validation is supervisor judgment plus
@@ -303,22 +304,27 @@ This milestone has two phases:
 - Give each injected instruction a policy version and provenance.
 - Enforce a briefing token budget.
 - Never inject raw production examples or untrusted worker prose.
-- Roll out initially only for high-confidence refusal and routing cases.
+- Keep the lightweight path advisory and retry-specific. It must not make route
+  recommendations or activate refusal behavior without independent policy
+  authority.
 
 ### Expected files
 
 - `plugins/orchestrator/scripts/lib/guidance.mjs` — new
+- `plugins/orchestrator/scripts/lib/learning.mjs`
 - `plugins/orchestrator/scripts/lib/runs.mjs`
-- `plugins/orchestrator/scripts/lib/briefing.mjs`
-- `plugins/orchestrator/commands/run.md`
+- `plugins/orchestrator/scripts/lib/state.mjs`
+- `plugins/orchestrator/scripts/orch.mjs`
 - `tests/guidance.test.mjs` — new
-- `tests/briefing.test.mjs`
+- `tests/runs.test.mjs`
+- `tests/cli.test.mjs`
 
 ### Verification
 
 - Only applicable guidance is injected.
 - Guidance cannot override user pins, lane constraints, or safety rules.
-- Disabling the policy restores the original briefing.
+- Disabling the policy removes the provisional worker-guidance block and
+  restores no-guidance worker behavior.
 - Resume reconstructs the exact guidance version used.
 - (Validated path only) Holdout performance improves without increasing false
   refusals.
@@ -530,6 +536,11 @@ preserved during implementation.
   gate passed 134 tests. Default records are metadata-only and keyed; managed
   text exports require explicit consent and acknowledgement; purge covers
   canonical samples, label history, and affected or corrupt managed exports.
+- Milestone 4A — provisional run guidance: implementation and verification are
+  complete on 2026-08-10. The exact focused and full-suite evidence is recorded
+  in the tasklist. Guidance remains explicitly opt-in, advisory, reversible,
+  and limited to fixed templates derived from reviewed typed outcomes.
 - Next gate: Milestone 3 remains data-gated until the store contains at least
-  about 200 reviewed terminal attempts. Do not fabricate that prerequisite from
-  fixtures or worker self-reports.
+  about 200 genuinely reviewed terminal attempts. Milestones 4B, 5, and 6 stay
+  blocked behind that evidence. Do not fabricate the prerequisite from fixtures
+  or worker self-reports.

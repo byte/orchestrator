@@ -4,6 +4,12 @@ import { randomUUID } from "node:crypto";
 
 import { parseResultBlock } from "./briefing.mjs";
 import { changedFiles, currentBranch, headSha } from "./git.mjs";
+import {
+  GUIDANCE_SCHEMA_VERSION,
+  selectGuidance,
+  validateGuidancePolicy,
+  validateGuidanceSelection
+} from "./guidance.mjs";
 import { ledgerForBriefing } from "./ledger.mjs";
 import {
   OUTCOME_SIGNALS,
@@ -72,7 +78,184 @@ function assertId(value, kind) {
   return id;
 }
 
-function readRunFile(filePath) {
+function disabledGuidanceState(revision = 0, history = [], policies = []) {
+  return {
+    schemaVersion: GUIDANCE_SCHEMA_VERSION,
+    mode: "disabled",
+    revision,
+    laneRef: null,
+    policy: null,
+    history,
+    policies
+  };
+}
+
+function guidanceSnapshot(config) {
+  return {
+    mode: config.mode,
+    laneRef: config.laneRef,
+    policy: config.policy ? structuredClone(config.policy) : null
+  };
+}
+
+function validateGuidanceSnapshot(snapshot, label) {
+  if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) {
+    throw new Error(`${label} must be an object.`);
+  }
+  const keys = Object.keys(snapshot).sort();
+  if (JSON.stringify(keys) !== JSON.stringify(["laneRef", "mode", "policy"])) {
+    throw new Error(`${label} has invalid fields.`);
+  }
+  if (!['disabled', 'provisional'].includes(snapshot.mode)) {
+    throw new Error(`${label} mode must be disabled or provisional.`);
+  }
+  if (snapshot.mode === "disabled") {
+    if (snapshot.laneRef !== null || snapshot.policy !== null) {
+      throw new Error(`${label} disabled state must not retain an active policy.`);
+    }
+    return snapshot;
+  }
+  if (!/^lane-[a-f0-9]{32}$/.test(snapshot.laneRef ?? "")) {
+    throw new Error(`${label} requires an opaque lane reference.`);
+  }
+  validateGuidancePolicy(snapshot.policy);
+  if (snapshot.policy.entries.some(
+    (entry) => entry.match.lane !== "*" && entry.match.lane !== snapshot.laneRef
+  )) {
+    throw new Error(`${label} policy contains guidance for a different lane.`);
+  }
+  return snapshot;
+}
+
+function validateRunGuidance(run, filePath) {
+  if (Number(run.version ?? 0) >= 5 && run.guidance === undefined) {
+    throw new Error(`${filePath} is missing required version-5 guidance state.`);
+  }
+  const policies = [];
+  if (run.guidance !== undefined) {
+    const config = run.guidance;
+    if (!config || typeof config !== "object" || Array.isArray(config)) {
+      throw new Error(`${filePath} contains invalid guidance state.`);
+    }
+    const keys = Object.keys(config).sort();
+    if (JSON.stringify(keys) !==
+        JSON.stringify(["history", "laneRef", "mode", "policies", "policy", "revision", "schemaVersion"])) {
+      throw new Error(`${filePath} contains guidance state with invalid fields.`);
+    }
+    if (config.schemaVersion !== GUIDANCE_SCHEMA_VERSION ||
+        !Number.isInteger(config.revision) || config.revision < 0 ||
+        !Array.isArray(config.history) || !Array.isArray(config.policies)) {
+      throw new Error(`${filePath} contains invalid guidance metadata.`);
+    }
+    validateGuidanceSnapshot(guidanceSnapshot(config), "Run guidance");
+    for (const snapshot of config.history) {
+      validateGuidanceSnapshot(snapshot, "Run guidance history");
+    }
+    const policyHashes = new Set();
+    for (const policy of config.policies) {
+      validateGuidancePolicy(policy);
+      if (policyHashes.has(policy.policyHash)) {
+        throw new Error(`${filePath} contains duplicate archived guidance policies.`);
+      }
+      policyHashes.add(policy.policyHash);
+      policies.push(policy);
+    }
+    if (config.policy && !policyHashes.has(config.policy.policyHash)) {
+      policies.push(config.policy);
+    }
+  }
+  for (const task of Object.values(run.tasks ?? {})) {
+    if (task.guidanceSelection !== undefined && task.guidanceSelection !== null) {
+      validateGuidanceSelection(task.guidanceSelection);
+      validateSelectionMembership(task.guidanceSelection, policies, "Task guidance selection");
+    }
+    for (const attempt of task.attempts ?? []) {
+      if (attempt.guidanceSnapshot !== undefined && attempt.guidanceSnapshot !== null) {
+        validateGuidanceSelection(attempt.guidanceSnapshot);
+        validateSelectionMembership(attempt.guidanceSnapshot, policies, "Attempt guidance snapshot");
+      }
+    }
+  }
+}
+
+function validateSelectionMembership(selection, policies, label) {
+  if (!selection.enabled) {
+    return selection;
+  }
+  const policy = policies.find(
+    (entry) => entry.policyVersion === selection.policyVersion &&
+      entry.policyHash === selection.policyHash
+  );
+  if (!policy) {
+    throw new Error(`${label} references a guidance policy that is not retained by the run.`);
+  }
+  const entries = new Map(policy.entries.map((entry) => [entry.guidanceId, entry]));
+  for (const item of selection.items) {
+    if (JSON.stringify(entries.get(item.guidanceId)) !== JSON.stringify(item)) {
+      throw new Error(`${label} contains an item outside its referenced policy.`);
+    }
+  }
+  return selection;
+}
+
+function validGuidanceRecoveryParts(config) {
+  const history = [];
+  for (const snapshot of Array.isArray(config?.history) ? config.history : []) {
+    try {
+      history.push(validateGuidanceSnapshot(snapshot, "Guidance recovery history"));
+    } catch {
+      // Emergency recovery deliberately drops malformed history entries. They
+      // cannot be activated safely, and retaining them would make the repaired
+      // run unreadable through the strict loader.
+    }
+  }
+
+  const policies = [];
+  const seen = new Set();
+  const candidates = [
+    config?.policy,
+    ...(Array.isArray(config?.policies) ? config.policies : []),
+    ...history.map((snapshot) => snapshot.policy)
+  ];
+  for (const policy of candidates) {
+    if (!policy) {
+      continue;
+    }
+    try {
+      validateGuidancePolicy(policy);
+    } catch {
+      continue;
+    }
+    if (!seen.has(policy.policyHash)) {
+      seen.add(policy.policyHash);
+      policies.push(structuredClone(policy));
+    }
+  }
+  return { history, policies };
+}
+
+function requireRetainedSelectionPolicies(run, policies) {
+  for (const task of Object.values(run.tasks ?? {})) {
+    if (task.guidanceSelection) {
+      validateSelectionMembership(
+        task.guidanceSelection,
+        policies,
+        `Task "${task.id}" guidance selection`
+      );
+    }
+    for (const attempt of task.attempts ?? []) {
+      if (attempt.guidanceSnapshot) {
+        validateSelectionMembership(
+          attempt.guidanceSnapshot,
+          policies,
+          `Attempt "${attempt.id}" guidance snapshot`
+        );
+      }
+    }
+  }
+}
+
+function readRunFile(filePath, { recoverGuidance = false } = {}) {
   if (!fs.existsSync(filePath)) {
     return null;
   }
@@ -98,6 +281,25 @@ function readRunFile(filePath) {
       }
     }
   }
+  if (recoverGuidance) {
+    if (Number(parsed?.version ?? 0) >= 5 &&
+        (!parsed.guidance || typeof parsed.guidance !== "object" ||
+          Array.isArray(parsed.guidance))) {
+      throw new Error(`${filePath} is missing required version-5 guidance state.`);
+    }
+    for (const task of Object.values(parsed?.tasks ?? {})) {
+      if (task.guidanceSelection !== undefined && task.guidanceSelection !== null) {
+        validateGuidanceSelection(task.guidanceSelection);
+      }
+      for (const attempt of task.attempts ?? []) {
+        if (attempt.guidanceSnapshot !== undefined && attempt.guidanceSnapshot !== null) {
+          validateGuidanceSelection(attempt.guidanceSnapshot);
+        }
+      }
+    }
+  } else {
+    validateRunGuidance(parsed, filePath);
+  }
   return parsed;
 }
 
@@ -113,6 +315,7 @@ function appendEvent(cwd, runId, event) {
 
 function writeRun(cwd, run) {
   run.version = STATE_VERSION;
+  run.guidance ??= disabledGuidanceState();
   run.updatedAt = nowIso();
   atomicWrite(runFile(cwd, run.id), `${JSON.stringify(run, null, 2)}\n`);
   return run;
@@ -121,6 +324,15 @@ function writeRun(cwd, run) {
 export function loadRun(cwd, runId) {
   const id = assertId(runId, "run");
   const run = readRunFile(runFile(cwd, id));
+  if (!run) {
+    throw new Error(`Unknown run "${id}".`);
+  }
+  return run;
+}
+
+function loadRunForGuidanceRecovery(cwd, runId) {
+  const id = assertId(runId, "run");
+  const run = readRunFile(runFile(cwd, id), { recoverGuidance: true });
   if (!run) {
     throw new Error(`Unknown run "${id}".`);
   }
@@ -260,6 +472,7 @@ export function createRun(
         integrationHead: headSha(cwd)
       },
       planRevision: 0,
+      guidance: disabledGuidanceState(),
       tasks: {},
       checkpoints: [],
       finalization: null,
@@ -378,6 +591,7 @@ function normalizeTask(raw, defaultScope, workerPolicy) {
     reasoningEffort: exactEffort,
     routingReason: routingReason || null,
     status: "pending",
+    guidanceSelection: null,
     attempts: [],
     result: null,
     createdAt: nowIso(),
@@ -479,6 +693,7 @@ export function replacePlan(cwd, runId, rawTasks, { defaultScope = [] } = {}) {
     }
     validateGraph(tasks);
     run.tasks = tasks;
+    refreshPendingGuidance(run);
     run.planRevision += 1;
     run.finalization = null;
     refreshRunStatus(run);
@@ -571,11 +786,14 @@ function completedTaskCount(run) {
 export function checkpointStatus(run) {
   const latest = run.checkpoints.at(-1) ?? null;
   const completed = completedTaskCount(run);
+  const guidanceRevision = run.guidance?.revision ?? 0;
   if (!latest) {
     return {
       latest: null,
       planRevision: run.planRevision,
       checkpointPlanRevision: null,
+      guidanceRevision,
+      checkpointGuidanceRevision: null,
       current: false,
       stale: true,
       completedSinceCheckpoint: completed,
@@ -585,18 +803,27 @@ export function checkpointStatus(run) {
   // Checkpoints written before this field existed are treated as covering the
   // revision they were observed under rather than being retroactively stale.
   const checkpointRevision = latest.planRevision ?? run.planRevision;
+  // A checkpoint written before guidance existed covered the legacy disabled
+  // revision (zero). Enabling guidance must therefore invalidate it.
+  const checkpointGuidanceRevision = latest.guidanceRevision ?? 0;
   const completedAtCheckpoint = latest.completedTasks ?? completed;
   const completedSince = Math.max(0, completed - completedAtCheckpoint);
-  const current = checkpointRevision === run.planRevision;
+  const planCurrent = checkpointRevision === run.planRevision;
+  const guidanceCurrent = checkpointGuidanceRevision === guidanceRevision;
+  const current = planCurrent && guidanceCurrent;
   return {
     latest,
     planRevision: run.planRevision,
     checkpointPlanRevision: checkpointRevision,
+    guidanceRevision,
+    checkpointGuidanceRevision,
     current,
     stale: !current || completedSince > 0,
     completedSinceCheckpoint: completedSince,
-    reason: !current
+    reason: !planCurrent
       ? `the latest checkpoint describes plan revision ${checkpointRevision}, but the run is on revision ${run.planRevision}`
+      : !guidanceCurrent
+        ? `the latest checkpoint describes guidance revision ${checkpointGuidanceRevision}, but the run is on revision ${guidanceRevision}`
       : completedSince > 0
         ? `${completedSince} task(s) completed since the latest checkpoint`
         : null
@@ -614,6 +841,49 @@ function requireTask(run, taskId) {
     throw new Error(`Unknown task "${id}" in run "${run.id}".`);
   }
   return task;
+}
+
+function activeGuidancePolicy(run) {
+  const guidance = run.guidance;
+  if (!guidance || guidance.mode === "disabled") {
+    return null;
+  }
+  validateGuidancePolicy(guidance.policy);
+  return guidance.policy;
+}
+
+function guidanceContext(run, task) {
+  const previousOutcome = task.attempts.at(-1)?.outcome;
+  if (!previousOutcome) {
+    return null;
+  }
+  return {
+    lane: run.guidance.laneRef,
+    taskKind: task.kind,
+    outcome: {
+      terminalOutcome: previousOutcome.terminalOutcome,
+      action: previousOutcome.action,
+      reasonCode: previousOutcome.reasonCode,
+      signals: [...previousOutcome.signals]
+    }
+  };
+}
+
+function refreshTaskGuidance(run, task) {
+  const policy = activeGuidancePolicy(run);
+  task.guidanceSelection = selectGuidance(
+    policy,
+    policy ? guidanceContext(run, task) : null
+  );
+  return task.guidanceSelection;
+}
+
+function refreshPendingGuidance(run) {
+  for (const task of Object.values(run.tasks)) {
+    if (task.status === "pending") {
+      refreshTaskGuidance(run, task);
+    }
+  }
 }
 
 function currentAttempt(task, attemptId = null) {
@@ -712,6 +982,10 @@ function renderWorkerLedger(cwd) {
 
 export function renderWorkerBriefing(cwd, run, task, lane) {
   const route = resolveTaskWorker(run, task);
+  const guidance = task.attempts.at(-1)?.guidanceSnapshot ?? task.guidanceSelection;
+  if (guidance) {
+    validateGuidanceSelection(guidance);
+  }
   // A one-line summary is not enough to build on: without the predecessor's
   // decisions and assumptions a downstream worker re-derives or contradicts them.
   const dependencyContext = task.dependsOn
@@ -762,7 +1036,7 @@ ${task.scope.length ? task.scope.map((entry) => `- \`${entry}\``).join("\n") : "
 
 ${renderList([...(lane.constraints ?? []), ...task.constraints])}
 
-## Acceptance criteria
+${guidance?.briefing ? `${guidance.briefing}\n\n` : ""}## Acceptance criteria
 
 ${renderList(task.acceptance)}
 
@@ -818,6 +1092,22 @@ export function claimTask(cwd, runId, taskId, lane) {
       );
     }
     const route = resolveTaskWorker(run, task);
+    const expectedGuidance = selectGuidance(
+      activeGuidancePolicy(run),
+      activeGuidancePolicy(run) ? guidanceContext(run, task) : null
+    );
+    if (task.guidanceSelection === null || task.guidanceSelection === undefined) {
+      if (run.guidance?.mode === "provisional") {
+        throw new Error(
+          `Task "${task.id}" has no frozen guidance selection; refresh the run guidance before dispatch.`
+        );
+      }
+      task.guidanceSelection = expectedGuidance;
+    } else if (JSON.stringify(task.guidanceSelection) !== JSON.stringify(expectedGuidance)) {
+      throw new Error(
+        `Task "${task.id}" guidance no longer matches the run policy; refresh it before dispatch.`
+      );
+    }
     const attempt = {
       id: `${task.id}-attempt-${task.attempts.length + 1}`,
       status: "dispatching",
@@ -830,6 +1120,7 @@ export function claimTask(cwd, runId, taskId, lane) {
       startedAt: null,
       finishedAt: null,
       outcome: null,
+      guidanceSnapshot: structuredClone(task.guidanceSelection),
       diagnostics: []
     };
     task.attempts.push(attempt);
@@ -842,7 +1133,10 @@ export function claimTask(cwd, runId, taskId, lane) {
       taskId: task.id,
       attemptId: attempt.id,
       model: route.model,
-      reasoningEffort: route.reasoningEffort
+      reasoningEffort: route.reasoningEffort,
+      guidancePolicyVersion: attempt.guidanceSnapshot.policyVersion,
+      guidancePolicyHash: attempt.guidanceSnapshot.policyHash,
+      guidanceItemIds: attempt.guidanceSnapshot.items.map((item) => item.guidanceId)
     });
     return {
       runId: id,
@@ -1406,6 +1700,94 @@ export function recordIntegrationDiagnostic(
   });
 }
 
+export function configureRunGuidance(
+  cwd,
+  runId,
+  { mode, policy = null, laneRef = null, rollback = false }
+) {
+  const id = assertId(runId, "run");
+  const filePath = runFile(cwd, id);
+  return withFileLock(filePath, () => {
+    const normalizedMode = String(mode ?? "").trim().toLowerCase();
+    const recoveryAllowed = rollback || normalizedMode === "off" || normalizedMode === "disabled";
+    let run;
+    let recoveredCorruptGuidance = false;
+    try {
+      run = loadRun(cwd, id);
+    } catch (error) {
+      if (!recoveryAllowed || !/guidance/iu.test(error.message)) {
+        throw error;
+      }
+      run = loadRunForGuidanceRecovery(cwd, id);
+      recoveredCorruptGuidance = true;
+    }
+    const active = Object.values(run.tasks).filter(
+      (task) => ACTIVE_TASK_STATUSES.has(task.status) || task.status === "reported"
+    );
+    if (active.length) {
+      throw new Error(
+        `Run "${id}" guidance cannot change while work is active or awaiting verification.`
+      );
+    }
+    const current = run.guidance ?? disabledGuidanceState();
+    const recovered = recoveredCorruptGuidance
+      ? validGuidanceRecoveryParts(current)
+      : null;
+    let history = recovered ? recovered.history : [...current.history];
+    const policies = recovered ? recovered.policies : [...current.policies];
+    const currentRevision = Number.isInteger(current.revision) && current.revision >= 0
+      ? current.revision
+      : 0;
+    let target;
+    if (rollback) {
+      if (history.length === 0) {
+        throw new Error(`Run "${id}" has no earlier guidance configuration to restore.`);
+      }
+      target = history.pop();
+      validateGuidanceSnapshot(target, "Guidance rollback target");
+    } else {
+      if (normalizedMode === "off" || normalizedMode === "disabled") {
+        target = guidanceSnapshot(disabledGuidanceState());
+      } else if (normalizedMode === "provisional") {
+        target = { mode: "provisional", laneRef, policy };
+        validateGuidanceSnapshot(target, "Guidance configuration");
+      } else {
+        throw new Error('Guidance mode must be "provisional" or "off".');
+      }
+      if (!recoveredCorruptGuidance &&
+          JSON.stringify(guidanceSnapshot(current)) === JSON.stringify(target)) {
+        return run;
+      }
+      if (!recoveredCorruptGuidance) {
+        history.push(guidanceSnapshot(current));
+      }
+    }
+    run.guidance = {
+      schemaVersion: GUIDANCE_SCHEMA_VERSION,
+      ...structuredClone(target),
+      revision: currentRevision + 1,
+      history,
+      policies: target.policy && !policies.some(
+        (entry) => entry.policyHash === target.policy.policyHash
+      )
+        ? [...policies, structuredClone(target.policy)]
+        : policies
+    };
+    refreshPendingGuidance(run);
+    requireRetainedSelectionPolicies(run, run.guidance.policies);
+    writeRun(cwd, run);
+    appendEvent(cwd, id, {
+      type: rollback ? "run.guidance_rolled_back" : "run.guidance_configured",
+      mode: run.guidance.mode,
+      revision: run.guidance.revision,
+      policyVersion: run.guidance.policy?.policyVersion ?? null,
+      policyHash: run.guidance.policy?.policyHash ?? null,
+      recoveredCorruptGuidance
+    });
+    return run;
+  });
+}
+
 export function retryTask(cwd, runId, taskId) {
   const id = assertId(runId, "run");
   const filePath = runFile(cwd, id);
@@ -1420,6 +1802,14 @@ export function retryTask(cwd, runId, taskId) {
     task.result = null;
     task.verification = null;
     task.disposition = null;
+    const previousGuidance = task.guidanceSelection
+      ? JSON.stringify(task.guidanceSelection)
+      : null;
+    refreshTaskGuidance(run, task);
+    if (previousGuidance !== JSON.stringify(task.guidanceSelection)) {
+      run.guidance ??= disabledGuidanceState();
+      run.guidance.revision += 1;
+    }
     task.updatedAt = nowIso();
     refreshRunStatus(run);
     writeRun(cwd, run);
@@ -1427,7 +1817,10 @@ export function retryTask(cwd, runId, taskId) {
       type: "task.retried",
       taskId: task.id,
       previousAttemptId: previousAttempt?.id ?? null,
-      previousOutcome: previousAttempt?.outcome ?? null
+      previousOutcome: previousAttempt?.outcome ?? null,
+      guidanceRevision: run.guidance?.revision ?? 0,
+      guidancePolicyVersion: task.guidanceSelection?.policyVersion ?? null,
+      guidanceItemIds: task.guidanceSelection?.items.map((item) => item.guidanceId) ?? []
     });
     return task;
   });
@@ -1622,6 +2015,7 @@ export function addCheckpoint(
     const checkpoint = {
       at: nowIso(),
       planRevision: run.planRevision,
+      guidanceRevision: run.guidance?.revision ?? 0,
       completedTasks: completedTaskCount(run),
       summary: text,
       decisions: stringList(decisions, "checkpoint decisions"),
@@ -1643,6 +2037,7 @@ export function renderSupervisorBriefing(cwd, run, lane) {
   const ledger = ledgerForBriefing(cwd);
   const checkpoint = checkpointStatus(run);
   const latest = checkpoint.latest;
+  const runGuidance = run.guidance ?? disabledGuidanceState();
   const legacyRouting = !Object.hasOwn(run.workerPolicy, "routingMode");
   const modelPolicy = legacyRouting
     ? `${run.workerPolicy.model} — legacy default; saved task overrides remain valid`
@@ -1673,12 +2068,21 @@ export function renderSupervisorBriefing(cwd, run, lane) {
       const attemptOutcomes = task.attempts.map(
         (entry) => `${entry.id}: ${outcomeSummary(entry)}`
       );
+      const guidance = task.status === "pending"
+        ? task.guidanceSelection
+        : attempt?.guidanceSnapshot ?? task.guidanceSelection;
+      const guidanceItems = guidance?.items?.map(
+        (item) => `${item.guidanceId}: ${item.action} (${item.match.failureSignature})`
+      ) ?? [];
       return `### ${task.id} — ${task.title}
 
 - status: ${task.status}
 - kind: ${task.kind}
 - worker route: ${route.model} (${route.reasoningEffort})
 - routing reason: ${task.routingReason || "legacy or explicitly pinned run"}
+- provisional guidance: ${guidance?.enabled ? `${guidance.policyVersion} / ${guidance.policyHash}` : "disabled"}
+- guidance items:
+${renderList(guidanceItems)}
 - depends on: ${dependencies}
 - scope: ${task.scope.length ? task.scope.join(", ") : "read-only / no write scope"}
 - objective: ${task.objective}
@@ -1722,6 +2126,9 @@ ${run.objective}
 - effort policy: ${effortPolicy}
 - maximum concurrent workers: ${run.workerPolicy.maxWorkers}
 - plan revision: ${run.planRevision}
+- guidance mode: ${runGuidance.mode}
+- guidance revision: ${runGuidance.revision}
+- guidance policy: ${runGuidance.policy ? `${runGuidance.policy.policyVersion} / ${runGuidance.policy.policyHash}` : "none"}
 - supervisor branch: ${run.repository.branch}
 - run base: ${run.repository.baseHead}
 - integrated head: ${run.repository.integrationHead}

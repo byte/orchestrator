@@ -3,7 +3,7 @@ import path from "node:path";
 
 import { resolveWorkspaceRoot } from "./workspace.mjs";
 
-export const STATE_VERSION = 4;
+export const STATE_VERSION = 5;
 
 const ORCH_DIR = ".orchestrator";
 const LOCAL_DIR = "local";

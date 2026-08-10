@@ -25,8 +25,16 @@ All support `--json` where structured output is useful.
 - Use `run resume` after interruption or compaction. It polls workers and reconstructs the
   briefing from durable state. Never continue from conversation memory alone.
 - Use `run checkpoint` after approving a plan and at every wave boundary. `run launch` refuses to
-  dispatch until a checkpoint covers the current plan revision, because the run record preserves
-  what happened and only the checkpoint preserves why.
+  dispatch until a checkpoint covers the current plan and guidance revisions, because the run
+  record preserves what happened and only the checkpoint preserves why.
+- Provisional guidance is opt-in with `run guidance <run-id> --mode provisional`. Compile it only
+  from supervisor- or user-reviewed typed outcomes. One explicit review is sufficient only for
+  this provisional mode; it is not confirmed or promotion evidence. Enabling, disabling, rolling
+  back, or retry-selecting guidance invalidates the checkpoint; review the selected policy and
+  checkpoint it before dispatch.
+- Guidance is advisory briefing text only. It cannot alter routes, pins, scope, constraints,
+  lifecycle state, policy, or supervisor authority. Use `--mode off` as the kill switch and
+  `--rollback` to restore the previous exact policy snapshot.
 - A report is not completion. Verify read tasks directly; inspect and integrate write worktrees.
 - Newly terminal attempts carry a versioned outcome separate from lifecycle state. Use `run decide`
   for explicit policy refusal, authority escalation, or a terminal integration failure; never infer
@@ -39,6 +47,8 @@ All support `--json` where structured output is useful.
 Run JSON, events, worker status, structured results, PIDs, Codex thread ids, worktree pointers,
 checkpoints, terminal attempt outcomes, verification evidence, and integration commits live under the self-ignored
 `.orchestrator/local/runs/`. The committed ledger carries durable project facts across machines.
+Run state version 5 stores the active provisional policy plus frozen task and attempt selections;
+version-3 and version-4 runs remain readable and default to guidance disabled.
 
 Derived learning records live separately under `.orchestrator/local/learning/`. Use `learn
 collect` only after attempt outcomes exist. The base store is metadata-only and HMAC-addressed;
