@@ -153,11 +153,18 @@ data.
 
   ```text
   .orchestrator/local/learning/
+    identity.json
     examples.jsonl
-    labels.jsonl
-    manifests/
-    exports/
+    exports/<export-id>/
+      examples.jsonl
+      manifest.json
   ```
+
+  Labels are embedded as validated history in the canonical example rather than
+  split into a second JSONL file. One store-wide lock can therefore update,
+  export, and purge sample membership and labels atomically without cross-file
+  orphan recovery. Export manifests are colocated with their managed snapshot;
+  purge validates the manifest against the actual records and digest.
 
 - Use atomic writes, file locking, and file mode `0600`.
 - Add deterministic deduplication and source provenance.
@@ -518,4 +525,11 @@ preserved during implementation.
   outcomes/run gate passed 39 tests, the outcomes/run/workers/CLI gate passed
   72 tests, and the full repository gate passed 109 tests. Version-3 and
   version-4 state remains readable without guessed backfills.
-- Next: Milestone 2 — privacy-safe learning store.
+- Milestone 2 — privacy-safe learning store: completed on 2026-08-10. The
+  learning/redaction/CLI/state gate passed 50 tests and the full repository
+  gate passed 134 tests. Default records are metadata-only and keyed; managed
+  text exports require explicit consent and acknowledgement; purge covers
+  canonical samples, label history, and affected or corrupt managed exports.
+- Next gate: Milestone 3 remains data-gated until the store contains at least
+  about 200 reviewed terminal attempts. Do not fabricate that prerequisite from
+  fixtures or worker self-reports.

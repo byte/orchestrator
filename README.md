@@ -29,6 +29,8 @@ what should happen, what is acceptable, what gets integrated, and when the whole
 - Scope, cleanliness, declaration, commit, and branch-drift gates before integration
 - Supervisor verification for every task and a separate combined final gate
 - Durable run JSON, append-only events, worker handles, Codex thread IDs, checkpoints, and evidence
+- A private, local-only learning store derived from allowlisted run metadata, with managed exports
+  and complete derived-data purge controls
 - A committed ledger for stable project facts that should survive across machines
 - Deliberate retry, cancellation, replanning, conflict abort, and cleanup paths
 
@@ -147,6 +149,26 @@ an unrecoverable integration failure, with `run decide`. The decision records a 
 `policy_refused`, `authority_escalated`, or `integration_failed` outcome; policy and authority
 decisions are never inferred from worker prose.
 
+The lower-level `learn` commands derive evaluation-ready metadata without copying prompts,
+objectives, source, diffs, worker output, evidence text, ledger text, stderr, tool output,
+environment variables, or absolute paths:
+
+```text
+orch learn collect [--run <id>] [--retention-days <n|forever>]
+orch learn list
+orch learn inspect <sample-id>
+orch learn label <sample-id> --outcome <value> --action <value> \
+  --reason-code <code> --provenance <supervisor|user|imported>
+orch learn export [--name <id>]
+orch learn purge --sample <id>
+```
+
+The base store is permanently metadata-only. A managed export can include one of the documented
+text fields only when both `--consent user|supervisor` and
+`--acknowledge-sensitive-export` are present; redaction runs before bounded text is written.
+Exports stay under the private learning directory so purge can find and remove every managed
+copy. There is no upload or network destination.
+
 ## Context and memory
 
 State is split by portability:
@@ -163,6 +185,10 @@ State is split by portability:
       events.jsonl                 # append-only supervisory event history
       workers/<task>/<attempt>/    # prompt, schema, JSONL output, status, final result
     worktrees/<run-id>/...         # isolated worker checkouts
+    learning/                      # private 0700 derived learning state
+      identity.json                # local HMAC key and opaque repository identity (0600)
+      examples.jsonl               # strict metadata-only samples and label history (0600)
+      exports/<export-id>/         # managed local snapshots and manifests (0700/0600)
 ```
 
 The ledger is intentionally small and stable. Per-run detail stays local because process IDs,
@@ -172,6 +198,13 @@ and ledger into the supervisor's reconstructed context.
 
 All versioned state is read defensively. A newer state version is refused instead of guessed at,
 writes are atomic, and shared state updates use file locks.
+
+Learning records default to 365-day retention metadata; `--retention-days forever` records that
+they remain until an explicit purge. Retention never deletes raw run audit state. `learn purge`
+removes matching samples, their embedded label history, and every affected managed export; corrupt
+or incomplete managed exports are removed conservatively. `--all` preserves the private identity
+and an empty store. Because raw runs are intentionally separate, a later `learn collect` can
+derive a purged sample again until the raw run itself is removed through a separate workflow.
 
 ## Safety invariants
 

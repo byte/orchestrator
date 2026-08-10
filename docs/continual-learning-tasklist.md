@@ -77,45 +77,63 @@ Depends on: Milestone 1.
 
 ### Storage and derivation
 
-- [ ] **M2.1** Add `lib/learning.mjs` and define the derived-example schema.
-- [ ] **M2.2** Create `.orchestrator/local/learning/` lazily on first use.
-- [ ] **M2.3** Implement deterministic sample IDs and deduplication.
-- [ ] **M2.4** Derive metadata-only examples from run JSON and typed events.
-- [ ] **M2.5** Hash repository identity and remove absolute paths.
-- [ ] **M2.6** Exclude prompts, objectives, source code, diffs, raw output,
+- [x] **M2.1** Add `lib/learning.mjs` and define the derived-example schema.
+- [x] **M2.2** Create `.orchestrator/local/learning/` lazily on first use.
+- [x] **M2.3** Implement deterministic sample IDs and deduplication.
+- [x] **M2.4** Derive metadata-only examples from run JSON and typed events.
+- [x] **M2.5** Hash repository identity and remove absolute paths.
+- [x] **M2.6** Exclude prompts, objectives, source code, diffs, raw output,
   ledger text, stderr, tool output, and environment variables by default.
-- [ ] **M2.7** Use atomic writes, locks, and mode `0600` for derived artifacts.
+- [x] **M2.7** Use atomic writes, locks, and mode `0600` for derived artifacts.
 
 ### Privacy and lifecycle
 
-- [ ] **M2.8** Add `lib/redaction.mjs` with secret and PII fixture coverage.
-- [ ] **M2.9** Require explicit opt-in before any textual field is included.
-- [ ] **M2.10** Record consent, provenance, schema version, and redaction version.
-- [ ] **M2.11** Add configurable retention metadata.
-- [ ] **M2.12** Implement targeted purge by source run, task, attempt, or sample.
-- [ ] **M2.13** Ensure raw audit records and derived learning records have
+- [x] **M2.8** Add `lib/redaction.mjs` with secret and PII fixture coverage.
+- [x] **M2.9** Require explicit opt-in before any textual field is included.
+- [x] **M2.10** Record consent, provenance, schema version, and redaction version.
+- [x] **M2.11** Add configurable retention metadata.
+- [x] **M2.12** Implement targeted purge by source run, task, attempt, or sample.
+- [x] **M2.13** Ensure raw audit records and derived learning records have
   separate retention behavior.
 
 ### CLI
 
-- [ ] **M2.14** Implement `orch learn collect`.
-- [ ] **M2.15** Implement `orch learn list` and `orch learn inspect`.
-- [ ] **M2.16** Implement `orch learn label` with provenance.
-- [ ] **M2.17** Implement local-only `orch learn export` with a manifest.
-- [ ] **M2.18** Implement `orch learn purge`.
-- [ ] **M2.19** Add CLI help and unknown-option validation.
+- [x] **M2.14** Implement `orch learn collect`.
+- [x] **M2.15** Implement `orch learn list` and `orch learn inspect`.
+- [x] **M2.16** Implement `orch learn label` with provenance.
+- [x] **M2.17** Implement local-only `orch learn export` with a manifest.
+- [x] **M2.18** Implement `orch learn purge`.
+- [x] **M2.19** Add CLI help and unknown-option validation.
 
 ### Tests and gate
 
-- [ ] **M2.20** Test idempotent collection and deterministic IDs.
-- [ ] **M2.21** Test default exclusion of every sensitive field.
-- [ ] **M2.22** Test secret and PII redaction before writes.
-- [ ] **M2.23** Test complete targeted purge.
-- [ ] **M2.24** Test export manifests and prove no network activity is required.
-- [ ] **M2.25** Run targeted learning, redaction, CLI, and state tests.
-- [ ] **M2.26** Run `npm test`.
-- [ ] **M2 gate** Confirm no raw text enters learning records without explicit
+- [x] **M2.20** Test idempotent collection and deterministic IDs.
+- [x] **M2.21** Test default exclusion of every sensitive field.
+- [x] **M2.22** Test secret and PII redaction before writes.
+- [x] **M2.23** Test complete targeted purge.
+- [x] **M2.24** Test export manifests and prove no network activity is required.
+- [x] **M2.25** Run targeted learning, redaction, CLI, and state tests.
+- [x] **M2.26** Run `npm test`.
+- [x] **M2 gate** Confirm no raw text enters learning records without explicit
   opt-in and all derived data is traceable and removable.
+
+### Milestone 2 evidence
+
+- Built: strict metadata-only examples with keyed source references,
+  deterministic IDs and fingerprints, byte-stable upserts, local label history,
+  managed export wrappers/manifests, configurable retention, and hierarchical
+  purge.
+- Privacy: base records use an explicit allowlist; text exists only in a managed
+  export with named fields, user or supervisor consent, an acknowledgement
+  receipt, and redaction before truncation and first write.
+- Resilience: one live-owner-aware store lock protects every mutation; files and
+  directories enforce `0600`/`0700`; symlink ancestors are refused; corrupt and
+  incomplete exports are removed conservatively during purge.
+- Targeted gate: `node --test --test-reporter=spec tests/learning.test.mjs
+  tests/redaction.test.mjs tests/cli.test.mjs` passed 50 tests with 0 failures
+  on 2026-08-10; the CLI suite includes state-version compatibility coverage.
+- Full repository gate: `npm test` passed 134 tests with 0 failures on
+  2026-08-10.
 
 ## Milestone 3 — Rubrics and golden evaluations
 

@@ -8,6 +8,14 @@ import { briefingLedger, renderBriefing } from "./lib/briefing.mjs";
 import { captureGitSnapshot, changesSinceSnapshot } from "./lib/git.mjs";
 import { addLedgerEntry, readLedger } from "./lib/ledger.mjs";
 import { addLane, bindThread, listLanes, removeLane, requireLane, unbindThread } from "./lib/lanes.mjs";
+import {
+  collectLearningExamples,
+  exportLearningExamples,
+  inspectLearningExample,
+  labelLearningExample,
+  listLearningExamples,
+  purgeLearningExamples
+} from "./lib/learning.mjs";
 import { preflight } from "./lib/preflight.mjs";
 import { renderAcceptance, renderLanes, renderPreflight } from "./lib/render.mjs";
 import {
@@ -64,6 +72,12 @@ Usage:
   orch accept <name> [--result-file <path>] [--json]
   orch ledger show
   orch ledger add <section> <text>
+  orch learn collect [--run <id>]... [--retention-days <n|forever>] [--json]
+  orch learn list [--run <id>]... [--outcome <value>]... [--sample <id>]... [--json]
+  orch learn inspect <sample-id> [--json]
+  orch learn label <sample-id> --outcome <value> --action <value> --reason-code <code> --provenance <supervisor|user|imported> [--json]
+  orch learn export [--name <id>] [--run <id>]... [--outcome <value>]... [--sample <id>]... [--include-text <field>]... [--consent <supervisor|user>] [--acknowledge-sensitive-export] [--json]
+  orch learn purge [--sample <id>]... [--run <id>]... [--task <id>]... [--attempt <id>]... [--expired|--all] [--json]
   orch run list [--json]
   orch run create <lane> --objective <text> [--id <run-id>] [--max-workers <n>] [--model <auto|sol|terra|luna>] [--effort <auto|level>] [--json]
   orch run show <run-id> [--json]
@@ -148,6 +162,155 @@ function commandInit(cwd) {
     lines.push("", "Dispatch will not work until the blocking checks above are fixed.");
   }
   emit(lines.join("\n"));
+}
+
+function retentionDays(value) {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  if (String(value).trim().toLowerCase() === "forever") {
+    return 0;
+  }
+  const days = Number(value);
+  if (!Number.isInteger(days) || days < 1 || days > 36500) {
+    throw new Error("--retention-days must be an integer from 1 through 36500, or forever.");
+  }
+  return days;
+}
+
+function commandLearn(argv, cwd) {
+  requireInitialized(cwd);
+  const [action = "list", ...rest] = argv;
+
+  if (action === "collect") {
+    const { options, positionals } = parseArgs(rest, {
+      booleanOptions: ["json"],
+      repeatableOptions: ["run"],
+      valueOptions: ["retention-days"]
+    });
+    if (positionals.length) {
+      throw new Error("`orch learn collect` does not accept positional arguments.");
+    }
+    const days = retentionDays(options["retention-days"]);
+    const result = collectLearningExamples(cwd, {
+      runIds: splitList(options.run),
+      ...(days === undefined ? {} : { retentionDays: days })
+    });
+    return options.json
+      ? emitJson(result)
+      : emit(
+          `Collected ${result.created} new and ${result.updated} updated samples; ` +
+          `${result.unchanged} unchanged, ${result.skippedWithoutOutcome} skipped, ` +
+          `${result.total} total.`
+        );
+  }
+
+  if (action === "list") {
+    const { options, positionals } = parseArgs(rest, {
+      booleanOptions: ["json"],
+      repeatableOptions: ["run", "outcome", "sample"]
+    });
+    if (positionals.length) {
+      throw new Error("`orch learn list` does not accept positional arguments.");
+    }
+    const examples = listLearningExamples(cwd, {
+      runIds: splitList(options.run),
+      outcomes: splitList(options.outcome),
+      sampleIds: splitList(options.sample)
+    });
+    return options.json
+      ? emitJson(examples)
+      : emit(
+          examples.length
+            ? examples.map((example) =>
+                `${example.sampleId}\t${example.outcome.terminalOutcome}\t` +
+                `${example.outcome.action}\t${example.features.model ?? "unrouted"}`
+              ).join("\n")
+            : "No learning samples."
+        );
+  }
+
+  if (action === "inspect") {
+    const { options, positionals } = parseArgs(rest, { booleanOptions: ["json"] });
+    if (positionals.length !== 1) {
+      throw new Error("`orch learn inspect` requires one sample id.");
+    }
+    const example = inspectLearningExample(cwd, positionals[0]);
+    return options.json ? emitJson(example) : emitJson(example);
+  }
+
+  if (action === "label") {
+    const { options, positionals } = parseArgs(rest, {
+      booleanOptions: ["json"],
+      valueOptions: ["outcome", "action", "reason-code", "provenance"]
+    });
+    if (positionals.length !== 1) {
+      throw new Error("`orch learn label` requires one sample id.");
+    }
+    for (const required of ["outcome", "action", "reason-code", "provenance"]) {
+      if (!options[required]) {
+        throw new Error(`\`orch learn label\` requires --${required}.`);
+      }
+    }
+    const result = labelLearningExample(cwd, positionals[0], {
+      terminalOutcome: options.outcome,
+      action: options.action,
+      reasonCode: options["reason-code"],
+      provenance: options.provenance
+    });
+    return options.json
+      ? emitJson(result)
+      : emit(`${result.created ? "Recorded" : "Retained existing"} label ${result.label.labelId}.`);
+  }
+
+  if (action === "export") {
+    const { options, positionals } = parseArgs(rest, {
+      booleanOptions: ["json", "acknowledge-sensitive-export"],
+      repeatableOptions: ["run", "outcome", "sample", "include-text"],
+      valueOptions: ["name", "consent"]
+    });
+    if (positionals.length) {
+      throw new Error("`orch learn export` does not accept positional arguments.");
+    }
+    const result = exportLearningExamples(cwd, {
+      name: options.name,
+      runIds: splitList(options.run),
+      outcomes: splitList(options.outcome),
+      sampleIds: splitList(options.sample),
+      includeTextFields: splitList(options["include-text"]),
+      consentProvenance: options.consent ?? null,
+      acknowledgeSensitiveExport: Boolean(options["acknowledge-sensitive-export"])
+    });
+    return options.json
+      ? emitJson(result)
+      : emit(`Created managed local export ${result.manifest.exportId} with ${result.manifest.sampleCount} samples.`);
+  }
+
+  if (action === "purge") {
+    const { options, positionals } = parseArgs(rest, {
+      booleanOptions: ["json", "expired", "all"],
+      repeatableOptions: ["sample", "run", "task", "attempt"]
+    });
+    if (positionals.length) {
+      throw new Error("`orch learn purge` does not accept positional arguments.");
+    }
+    const result = purgeLearningExamples(cwd, {
+      sampleIds: splitList(options.sample),
+      runIds: splitList(options.run),
+      taskIds: splitList(options.task),
+      attemptIds: splitList(options.attempt),
+      expired: Boolean(options.expired),
+      all: Boolean(options.all)
+    });
+    return options.json
+      ? emitJson(result)
+      : emit(
+          `Purged ${result.removedCount} samples, ${result.labelsRemoved} labels, and ` +
+          `${result.exportsRemoved.length} managed exports. Raw run audit data was not changed.`
+        );
+  }
+
+  throw new Error(`Unknown learn action "${action}".`);
 }
 
 function commandLane(argv, cwd) {
@@ -684,6 +847,8 @@ function main() {
         return commandAccept(argv, cwd);
       case "ledger":
         return commandLedger(argv, cwd);
+      case "learn":
+        return commandLearn(argv, cwd);
       case "run":
         return commandRun(argv, cwd);
       case "where":

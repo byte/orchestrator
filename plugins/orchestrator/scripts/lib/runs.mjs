@@ -1209,6 +1209,7 @@ export function recordIntegration(
     appendEvent(cwd, id, {
       type: "task.integrated",
       taskId: task.id,
+      attemptId: attempt.id,
       commits,
       integrationHead,
       evidence: task.verification.evidence,
@@ -1471,6 +1472,7 @@ export function cancelTask(
     appendEvent(cwd, id, {
       type: "task.cancelled",
       taskId: task.id,
+      attemptId: attempt?.id ?? null,
       reason: task.cancelReason,
       outcome
     });

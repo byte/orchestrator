@@ -659,3 +659,93 @@ test("the run CLI rejects premature integration and records typed worktree failu
   assert.equal(attempt.diagnostics.at(-1).type, "integration_failed");
   assert.equal(attempt.diagnostics.at(-1).reasonCode, "worktree_unavailable");
 });
+
+test("the learn CLI collects, inspects, labels, exports, and completely purges samples", () => {
+  const root = repo();
+  runCli(root, ["lane", "add", "ops"]);
+  runCli(root, [
+    "run", "create", "ops", "--id", "run-learn-cli", "--objective", "Learn safely",
+    "--model", "sol", "--effort", "high"
+  ]);
+  const planPath = writeResult(JSON.stringify({
+    tasks: [{ id: "review", title: "Review", objective: "Review request", kind: "read" }]
+  }));
+  runCli(root, ["run", "plan", "run-learn-cli", "--plan-file", planPath]);
+  runCli(root, ["run", "checkpoint", "run-learn-cli", "--summary", "Ready"]);
+  const dispatch = JSON.parse(
+    runCli(root, ["run", "claim", "run-learn-cli", "review", "--json"]).stdout
+  );
+  const resultPath = writeResult(
+    "Reviewed.\n\n## RESULT\nfiles_touched: none\ndecisions: none\nassumptions: none\nblockers: none\nconfidence: high\n"
+  );
+  runCli(root, [
+    "run", "report", "run-learn-cli", "review", "--attempt", dispatch.attemptId,
+    "--result-file", resultPath
+  ]);
+  runCli(root, [
+    "run", "verify", "run-learn-cli", "review", "--verdict", "pass",
+    "--evidence", "reviewed"
+  ]);
+
+  const collected = JSON.parse(runCli(root, [
+    "learn", "collect", "--run", "run-learn-cli", "--retention-days", "forever", "--json"
+  ]).stdout);
+  assert.equal(collected.created, 1);
+  const listed = JSON.parse(runCli(root, ["learn", "list", "--json"]).stdout);
+  assert.equal(listed.length, 1);
+  assert.equal(listed[0].outcome.terminalOutcome, "accepted");
+  assert.equal(JSON.parse(runCli(root, [
+    "learn", "inspect", listed[0].sampleId, "--json"
+  ]).stdout).sampleId, listed[0].sampleId);
+
+  const labeled = JSON.parse(runCli(root, [
+    "learn", "label", listed[0].sampleId,
+    "--outcome", "accepted",
+    "--action", "execute",
+    "--reason-code", "supervisor_verified",
+    "--provenance", "supervisor",
+    "--json"
+  ]).stdout);
+  assert.equal(labeled.created, true);
+  const exported = JSON.parse(runCli(root, [
+    "learn", "export", "--name", "cli-export", "--json"
+  ]).stdout);
+  assert.equal(exported.manifest.sampleCount, 1);
+  assert.equal(fs.existsSync(exported.manifestFile), true);
+
+  const purged = JSON.parse(runCli(root, [
+    "learn", "purge", "--sample", listed[0].sampleId, "--json"
+  ]).stdout);
+  assert.equal(purged.removedCount, 1);
+  assert.equal(purged.labelsRemoved, 1);
+  assert.deepEqual(purged.exportsRemoved, ["cli-export"]);
+  assert.deepEqual(JSON.parse(runCli(root, ["learn", "list", "--json"]).stdout), []);
+});
+
+test("the learn CLI rejects unsafe or ambiguous options", () => {
+  const root = repo();
+  for (const args of [
+    ["learn", "collect", "--upload", "yes"],
+    ["learn", "list", "--upload", "yes"],
+    ["learn", "inspect", "sample-00000000000000000000000000000000", "--upload", "yes"],
+    ["learn", "label", "sample-00000000000000000000000000000000", "--upload", "yes"],
+    ["learn", "export", "--upload", "yes"],
+    ["learn", "purge", "--upload", "yes"]
+  ]) {
+    assert.match(runCli(root, args).stderr, /Unknown option --upload/);
+  }
+  assert.match(runCli(root, ["learn", "telemetry"]).stderr, /Unknown learn action/);
+  assert.match(runCli(root, ["learn", "purge"]).stderr,
+    /requires a selector/);
+  assert.match(runCli(root, ["learn", "purge", "--task", "review"]).stderr,
+    /--task requires --run/);
+  assert.match(runCli(root, [
+    "learn", "export", "--include-text", "taskTitle", "--name", "unsafe"
+  ]).stderr, /No learning store|acknowledge-sensitive-export/);
+  assert.match(runCli(root, [
+    "learn", "export", "--consent", "user", "--name", "meaningless-consent"
+  ]).stderr, /require at least one --include-text/);
+  assert.match(runCli(root, [
+    "learn", "collect", "--retention-days", "1.5"
+  ]).stderr, /retention-days/);
+});

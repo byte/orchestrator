@@ -81,6 +81,47 @@ typed event and diagnostic signal while the task remains `reported`, leaving the
 attempt eligible for a later successful integration. Cancellation closes active or reported
 attempts only when they do not already have a terminal outcome.
 
+## Derived learning store
+
+The learning store is a separate local schema; it does not change run state version 4. It is
+created lazily at `.orchestrator/local/learning/` on the first mutating `learn` command. The
+directory is mode `0700`, its identity and JSONL files are mode `0600`, and every mutation uses a
+single live-owner-aware store lock plus atomic replacement. Read-only list and inspect operations
+do not create the store.
+
+Collection builds each sample field by field from an allowlist. Source run, task, attempt, lane,
+and repository identifiers become domain-separated HMAC references using a private persisted key.
+Samples retain structural counts, exact route enums, terminal outcome enums, diagnostic enums,
+durations, event corroboration, and verification/finalization verdict and evidence counts. Raw
+identifiers and low-entropy evidence hashes are omitted to prevent dictionary recovery.
+
+The collector never recursively sanitizes a run or event object. It excludes objectives, titles,
+scope and acceptance text, prompts, source, diffs, worker results, evidence prose, checkpoints,
+ledger content, worktree and runner data, stderr, tool output, environment variables, and paths.
+Outcome-less legacy attempts are counted and skipped rather than labeled by inference. A stable
+sample ID identifies the source attempt, while a separate fingerprint changes when safe derived
+facts such as finalization change; collection then updates the one sample instead of duplicating
+it.
+
+Labels are stored as provenance-tagged, validated outcome records inside the canonical sample.
+Keeping sample and label history in the same locked JSONL record makes label, purge, and export
+membership atomic without a cross-file orphan state. Conflicting labels remain audit history; a
+later rubric/adjudication milestone must abstain until it chooses an active ground truth.
+
+Managed exports use a separate versioned wrapper and carry a manifest with schema and redaction
+versions, opaque membership, filters, consent, provenance, counts, and a content digest. Base
+records remain metadata-only. Text exists only in an explicitly acknowledged managed export,
+only for named allowlisted fields, and only after secret, credential, PII, network-address, and
+path redaction. Exports have no URL destination and use no network capability.
+
+Retention belongs only to derived learning records. The default is 365 days; `forever` means
+retain until explicitly purged. Purge selectors can target a sample, run, task, attempt, expired
+records, or the whole derived store. Purge validates actual export contents against manifests and
+digests, removes affected exports before canonical records, and deletes corrupt or incomplete
+managed exports conservatively. It never deletes `.orchestrator/local/runs/`. `purge --all`
+preserves the private identity and empty store, and collection can recreate samples while their
+raw source runs still exist.
+
 ## Task dispatch
 
 `run launch` performs these steps:

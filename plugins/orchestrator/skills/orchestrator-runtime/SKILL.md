@@ -8,7 +8,7 @@ user-invocable: false
 
 Helper: `node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" <command>`
 
-Commands: `preflight`, `init`, `lane`, `brief`, `accept`, `ledger`, `run`.
+Commands: `preflight`, `init`, `lane`, `brief`, `accept`, `ledger`, `learn`, `run`.
 All support `--json` where structured output is useful.
 
 ## Pool execution rules
@@ -39,6 +39,13 @@ All support `--json` where structured output is useful.
 Run JSON, events, worker status, structured results, PIDs, Codex thread ids, worktree pointers,
 checkpoints, terminal attempt outcomes, verification evidence, and integration commits live under the self-ignored
 `.orchestrator/local/runs/`. The committed ledger carries durable project facts across machines.
+
+Derived learning records live separately under `.orchestrator/local/learning/`. Use `learn
+collect` only after attempt outcomes exist. The base store is metadata-only and HMAC-addressed;
+worker prose is never ground truth. `learn export` stays local and managed. Text export requires
+named fields, user or supervisor consent, and the explicit sensitive-export acknowledgement.
+`learn purge` removes matching samples, label history, and affected exports but never raw runs;
+recollection can therefore recreate purged derived data.
 
 ## Legacy single-task bridge
 
