@@ -22,8 +22,10 @@ import {
   listRuns,
   loadRun,
   readyTasks,
+  recordIntegrationDiagnostic,
   recordTaskResult,
   recordIntegration,
+  recordTaskDisposition,
   recoveryReport,
   renderSupervisorBriefing,
   replacePlan,
@@ -34,7 +36,8 @@ import { launchTaskWorker, pollRunWorkers, stopTaskWorker } from "./lib/workers.
 import {
   cleanupTaskWorktree,
   inspectTaskWorktree,
-  integrateTaskWorktree
+  integrateTaskWorktree,
+  WorktreeOperationError
 } from "./lib/worktrees.mjs";
 import {
   initWorkspace,
@@ -73,6 +76,7 @@ Usage:
   orch run bind <run-id> <task-id> --attempt <id> [--agent-id <id>] [--job-id <id>] [--thread-id <id>]
   orch run report <run-id> <task-id> --attempt <id> --result-file <path> [--json]
   orch run verify <run-id> <task-id> --verdict <pass|fail> [--evidence <text>]... [--json]
+  orch run decide <run-id> <task-id> --outcome <policy_refused|authority_escalated|integration_failed> --action <refuse|escalate|replan> --reason-code <code> [--evidence <text>]... [--json]
   orch run retry <run-id> <task-id> [--json]
   orch run cancel <run-id> [task-id] [--reason <text>] [--json]
   orch run recover <run-id> [--json]
@@ -390,7 +394,11 @@ function commandRun(argv, cwd) {
       "thread-id",
       "result-file",
       "verdict",
-      "reason"
+      "reason",
+      "outcome",
+      "action",
+      "reason-code",
+      "provenance"
     ]
   });
   const runId = positionals[0];
@@ -511,6 +519,25 @@ function commandRun(argv, cwd) {
       : emit(`Task ${taskId}: ${result.task.status}; run: ${result.runStatus}.`);
   }
 
+  if (action === "decide") {
+    const taskId = positionals[1];
+    if (!taskId || !options.outcome || !options.action || !options["reason-code"]) {
+      throw new Error(
+        "`orch run decide` requires a task id, --outcome, --action, and --reason-code."
+      );
+    }
+    const result = recordTaskDisposition(cwd, runId, taskId, {
+      terminalOutcome: options.outcome,
+      action: options.action,
+      reasonCode: options["reason-code"],
+      provenance: options.provenance ?? "supervisor",
+      evidence: splitList(options.evidence)
+    });
+    return options.json
+      ? emitJson(result)
+      : emit(`Task ${taskId}: ${result.task.status}; ${result.task.disposition.terminalOutcome}.`);
+  }
+
   if (action === "retry") {
     const taskId = positionals[1];
     if (!taskId) {
@@ -579,7 +606,24 @@ function commandRun(argv, cwd) {
     if (!task) {
       throw new Error(`Unknown task "${taskId}" in run "${runId}".`);
     }
-    const integrated = integrateTaskWorktree(cwd, run, task, task.attempts.at(-1));
+    if (task.status !== "reported") {
+      throw new Error(`Task "${task.id}" cannot be integrated from status "${task.status}".`);
+    }
+    let integrated;
+    try {
+      integrated = integrateTaskWorktree(cwd, run, task, task.attempts.at(-1));
+    } catch (error) {
+      if (error instanceof WorktreeOperationError) {
+        recordIntegrationDiagnostic(cwd, runId, taskId, {
+          kind: error.kind,
+          reasonCode: error.reasonCode,
+          signals: error.signals,
+          error: error.message,
+          details: error.details
+        });
+      }
+      throw error;
+    }
     const result = recordIntegration(cwd, runId, taskId, {
       evidence: splitList(options.evidence),
       ...integrated

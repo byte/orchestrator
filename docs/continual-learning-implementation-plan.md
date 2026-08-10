@@ -3,7 +3,7 @@
 ## Purpose
 
 This plan adapts the data-curation and evaluation loop described in Shopify's
-[Sidekick continual-learning article](https://shopify.engineering/sidekick-curation)
+[Sidekick continual-learning article](https://shopify.engineering/sidekicks-continual-learning-loop)
 to Orchestrator.
 
 Orchestrator can implement continual improvement around evaluation, routing,
@@ -510,3 +510,12 @@ npm test
 The checkout was on `main`. The pre-existing uncommitted change to
 `plugins/orchestrator/commands/run.md` was not created by this plan and must be
 preserved during implementation.
+
+## Implementation status
+
+- Milestone 0 — plan and tasklist: completed and committed as `57ceb89`.
+- Milestone 1 — normalized outcomes: completed on 2026-08-10. The focused
+  outcomes/run gate passed 39 tests, the outcomes/run/workers/CLI gate passed
+  72 tests, and the full repository gate passed 109 tests. Version-3 and
+  version-4 state remains readable without guessed backfills.
+- Next: Milestone 2 — privacy-safe learning store.

@@ -529,6 +529,10 @@ test("run commands persist a plan, ready queue, checkpoint, and restart briefing
     ]).stdout
   );
   assert.equal(verified.task.status, "completed");
+  assert.equal(
+    verified.task.attempts.at(-1).outcome.terminalOutcome,
+    "accepted"
+  );
   assert.deepEqual(verified.ready.map((task) => task.id), ["review"]);
 
   const reviewDispatch = JSON.parse(
@@ -578,4 +582,80 @@ test("run commands persist a plan, ready queue, checkpoint, and restart briefing
   );
   assert.equal(finalized.status, "completed");
   assert.equal(finalized.finalization.summary, "Combined checks passed.");
+});
+
+test("the run CLI records explicit policy and authority dispositions", () => {
+  const root = repo();
+  runCli(root, ["lane", "add", "ops"]);
+  runCli(root, [
+    "run", "create", "ops", "--id", "run-decide", "--objective", "Respect policy",
+    "--model", "sol", "--effort", "high"
+  ]);
+  const planPath = writeResult(JSON.stringify({
+    tasks: [{ id: "review", title: "Review", objective: "Review request", kind: "read" }]
+  }));
+  runCli(root, ["run", "plan", "run-decide", "--plan-file", planPath]);
+  runCli(root, ["run", "checkpoint", "run-decide", "--summary", "Ready"]);
+  const dispatch = JSON.parse(
+    runCli(root, ["run", "claim", "run-decide", "review", "--json"]).stdout
+  );
+  const resultPath = writeResult(
+    "Reviewed.\n\n## RESULT\nfiles_touched: none\ndecisions: none\nassumptions: none\nblockers: none\nconfidence: high\n"
+  );
+  runCli(root, [
+    "run", "report", "run-decide", "review", "--attempt", dispatch.attemptId,
+    "--result-file", resultPath
+  ]);
+  const decided = JSON.parse(runCli(root, [
+    "run", "decide", "run-decide", "review",
+    "--outcome", "policy_refused",
+    "--action", "refuse",
+    "--reason-code", "policy_boundary",
+    "--evidence", "policy applies",
+    "--json"
+  ]).stdout);
+  assert.equal(decided.task.status, "blocked");
+  assert.equal(decided.task.attempts.at(-1).outcome.terminalOutcome, "policy_refused");
+  assert.equal(decided.task.attempts.at(-1).outcome.provenance, "supervisor");
+});
+
+test("the run CLI rejects premature integration and records typed worktree failures", () => {
+  const root = repo();
+  runCli(root, ["lane", "add", "ops"]);
+  runCli(root, [
+    "run", "create", "ops", "--id", "run-integrate-guard",
+    "--objective", "Guard integration", "--model", "sol", "--effort", "high"
+  ]);
+  const planPath = writeResult(JSON.stringify({
+    tasks: [{ id: "review", title: "Review", objective: "Review request", kind: "read" }]
+  }));
+  runCli(root, ["run", "plan", "run-integrate-guard", "--plan-file", planPath]);
+
+  const premature = runCli(root, ["run", "integrate", "run-integrate-guard", "review"]);
+  assert.equal(premature.code, 1);
+  assert.match(premature.stderr, /cannot be integrated from status "pending"/);
+
+  runCli(root, ["run", "checkpoint", "run-integrate-guard", "--summary", "Ready"]);
+  const dispatch = JSON.parse(
+    runCli(root, ["run", "claim", "run-integrate-guard", "review", "--json"]).stdout
+  );
+  const resultPath = writeResult(
+    "Reviewed.\n\n## RESULT\nfiles_touched: none\ndecisions: none\nassumptions: none\nblockers: none\nconfidence: high\n"
+  );
+  runCli(root, [
+    "run", "report", "run-integrate-guard", "review", "--attempt", dispatch.attemptId,
+    "--result-file", resultPath
+  ]);
+
+  const failed = runCli(root, ["run", "integrate", "run-integrate-guard", "review"]);
+  assert.equal(failed.code, 1);
+  assert.match(failed.stderr, /worktree.*unavailable/i);
+  const shown = JSON.parse(
+    runCli(root, ["run", "show", "run-integrate-guard", "--json"]).stdout
+  );
+  const attempt = shown.tasks.review.attempts.at(-1);
+  assert.equal(shown.tasks.review.status, "reported");
+  assert.equal(attempt.outcome, null);
+  assert.equal(attempt.diagnostics.at(-1).type, "integration_failed");
+  assert.equal(attempt.diagnostics.at(-1).reasonCode, "worktree_unavailable");
 });

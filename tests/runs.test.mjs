@@ -12,9 +12,12 @@ import {
   claimTask,
   createRun as createRunState,
   eventsFile,
+  failTaskAttempt,
   finalizeRun,
   loadRun,
   readyTasks,
+  recordIntegrationDiagnostic,
+  recordTaskDisposition,
   recordTaskResult,
   recoveryReport,
   resolveTaskWorker,
@@ -283,6 +286,11 @@ test("worker binding, reporting, supervisor verification, and dependencies form 
     evidence: ["node --test passed"]
   });
   assert.equal(verified.task.status, "completed");
+  assert.equal(
+    verified.task.attempts.at(-1).outcome.terminalOutcome,
+    "accepted"
+  );
+  assert.equal(verified.task.attempts.at(-1).outcome.provenance, "supervisor");
   assert.equal(verified.runStatus, "ready");
   assert.deepEqual(verified.ready.map((task) => task.id), ["review"]);
 });
@@ -535,6 +543,27 @@ test("tasks from pre-routing state inherit the run default and can be replanned 
 
   const replanned = replacePlan(root, "run-legacy", [definition]);
   assert.equal(replanned.tasks.legacy.status, "completed");
+
+  const terminalState = JSON.parse(fs.readFileSync(file, "utf8"));
+  delete terminalState.tasks.legacy.attempts[0].outcome;
+  fs.writeFileSync(file, `${JSON.stringify(terminalState, null, 2)}\n`);
+  const loadedLegacyOutcome = loadRun(root, "run-legacy");
+  assert.equal(loadedLegacyOutcome.tasks.legacy.status, "completed");
+  assert.match(
+    renderSupervisorBriefing(root, loadedLegacyOutcome, { constraints: [] }),
+    /unclassified \(legacy state\)/
+  );
+
+  terminalState.tasks.legacy.attempts[0].outcome = {
+    version: 99,
+    terminalOutcome: "accepted",
+    action: "execute",
+    reasonCode: "supervisor_verified",
+    provenance: "supervisor",
+    signals: []
+  };
+  fs.writeFileSync(file, `${JSON.stringify(terminalState, null, 2)}\n`);
+  assert.throws(() => loadRun(root, "run-legacy"), /invalid outcome/);
 });
 
 test("blocked and failed tasks retain attempts and can be retried", () => {
@@ -551,6 +580,10 @@ test("blocked and failed tasks retain attempts and can be retried", () => {
   });
   assert.equal(blocked.task.status, "blocked");
   assert.equal(blocked.runStatus, "blocked");
+  assert.equal(
+    blocked.task.attempts.at(-1).outcome.terminalOutcome,
+    "worker_blocked"
+  );
 
   retryTask(root, "run-retry", "work");
   checkpointPlan(root, "run-retry");
@@ -561,6 +594,8 @@ test("blocked and failed tasks retain attempts and can be retried", () => {
     resultText: "No result contract"
   });
   assert.equal(failed.task.status, "failed");
+  assert.equal(failed.task.attempts[0].outcome.terminalOutcome, "worker_blocked");
+  assert.equal(failed.task.attempts[1].outcome.terminalOutcome, "contract_failed");
   assert.deepEqual(failed.task.result.missingFields, [
     "files_touched",
     "decisions",
@@ -568,6 +603,33 @@ test("blocked and failed tasks retain attempts and can be retried", () => {
     "blockers",
     "confidence"
   ]);
+});
+
+test("structured worker blocker codes select an auditable next action", () => {
+  const root = repo();
+  createRun(root, { id: "run-blocker-code", lane: "api", objective: "Classify blockers" });
+  replacePlan(root, "run-blocker-code", [
+    { id: "work", title: "Work", objective: "Inspect context", kind: "read" }
+  ]);
+  checkpointPlan(root, "run-blocker-code");
+  const dispatch = claimTask(root, "run-blocker-code", "work", { constraints: [] });
+  const blocked = recordTaskResult(root, "run-blocker-code", "work", {
+    attemptId: dispatch.attemptId,
+    resultText: JSON.stringify({
+      summary: "A required input was not provided.",
+      files_touched: [],
+      tests: [],
+      decisions: [],
+      assumptions: [],
+      blockers: ["missing API response fixture"],
+      blocker_code: "missing_context",
+      confidence: "high"
+    })
+  });
+  assert.equal(blocked.task.status, "blocked");
+  assert.equal(blocked.attempt.outcome.terminalOutcome, "worker_blocked");
+  assert.equal(blocked.attempt.outcome.action, "clarify");
+  assert.equal(blocked.attempt.outcome.reasonCode, "missing_context");
 });
 
 test("supervisor verification can fail a report and cancellation is durable", () => {
@@ -588,6 +650,18 @@ test("supervisor verification can fail a report and cancellation is durable", ()
     evidence: ["tests failed"]
   });
   assert.equal(rejected.task.status, "failed");
+  assert.equal(
+    rejected.task.attempts.at(-1).outcome.terminalOutcome,
+    "verification_failed"
+  );
+  assert.equal(
+    fs.readFileSync(eventsFile(root, "run-control"), "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line))
+      .at(-1).type,
+    "task.verification_failed"
+  );
   const cancelledTask = cancelTask(root, "run-control", "b", "superseded");
   assert.equal(cancelledTask.status, "cancelled");
 
@@ -596,6 +670,181 @@ test("supervisor verification can fail a report and cancellation is durable", ()
   assert.equal(run.status, "cancelled");
   assert.equal(run.tasks.a.status, "cancelled");
   assert.equal(run.cancelReason, "user stopped the run");
+  assert.equal(
+    run.tasks.a.attempts.at(-1).outcome.terminalOutcome,
+    "verification_failed",
+    "run cancellation does not overwrite an earlier terminal outcome"
+  );
+});
+
+test("reported attempts can be cancelled without overwriting earlier terminal outcomes", () => {
+  const root = repo();
+  createRun(root, { id: "run-cancel-outcome", lane: "api", objective: "Cancel safely" });
+  replacePlan(root, "run-cancel-outcome", [
+    { id: "work", title: "Work", objective: "Work", kind: "read" }
+  ]);
+  checkpointPlan(root, "run-cancel-outcome");
+  const dispatch = claimTask(root, "run-cancel-outcome", "work", { constraints: [] });
+  recordTaskResult(root, "run-cancel-outcome", "work", {
+    attemptId: dispatch.attemptId,
+    resultText: resultBlock({ files: "none" })
+  });
+  const cancelled = cancelTask(root, "run-cancel-outcome", "work", "no longer needed");
+  assert.equal(cancelled.attempts.at(-1).status, "cancelled");
+  assert.equal(cancelled.attempts.at(-1).outcome.terminalOutcome, "cancelled");
+
+  createRun(root, { id: "run-cancel-terminal", lane: "api", objective: "Preserve failure" });
+  replacePlan(root, "run-cancel-terminal", [
+    { id: "work", title: "Work", objective: "Work", kind: "read" }
+  ]);
+  checkpointPlan(root, "run-cancel-terminal");
+  const failedDispatch = claimTask(root, "run-cancel-terminal", "work", { constraints: [] });
+  recordTaskResult(root, "run-cancel-terminal", "work", {
+    attemptId: failedDispatch.attemptId,
+    resultText: "malformed"
+  });
+  const terminal = cancelTask(root, "run-cancel-terminal", "work", "close it");
+  assert.equal(terminal.attempts.at(-1).outcome.terminalOutcome, "contract_failed");
+});
+
+test("repeated failure collection is idempotent for the same classification", () => {
+  const root = repo();
+  createRun(root, { id: "run-idempotent-failure", lane: "api", objective: "Collect once" });
+  replacePlan(root, "run-idempotent-failure", [
+    { id: "work", title: "Work", objective: "Work", kind: "read" }
+  ]);
+  checkpointPlan(root, "run-idempotent-failure");
+  const dispatch = claimTask(root, "run-idempotent-failure", "work", { constraints: [] });
+  const first = failTaskAttempt(root, "run-idempotent-failure", "work", {
+    attemptId: dispatch.attemptId,
+    error: "runner exited"
+  });
+  const second = failTaskAttempt(root, "run-idempotent-failure", "work", {
+    attemptId: dispatch.attemptId,
+    error: "runner exited again"
+  });
+  assert.equal(first.attempts.at(-1).outcome.terminalOutcome, "execution_failed");
+  assert.equal(second.attempts.at(-1).outcome.terminalOutcome, "execution_failed");
+  const failures = fs
+    .readFileSync(eventsFile(root, "run-idempotent-failure"), "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line))
+    .filter((event) => event.type === "task.execution_failed");
+  assert.equal(failures.length, 1);
+});
+
+test("supervisor dispositions and integration diagnostics are structured and retryable", () => {
+  const root = repo();
+  createRun(root, { id: "run-disposition", lane: "api", objective: "Decide explicitly" });
+  replacePlan(root, "run-disposition", [
+    { id: "work", title: "Work", objective: "Work", kind: "read" }
+  ]);
+  checkpointPlan(root, "run-disposition");
+  const dispatch = claimTask(root, "run-disposition", "work", { constraints: [] });
+  recordTaskResult(root, "run-disposition", "work", {
+    attemptId: dispatch.attemptId,
+    resultText: resultBlock({ files: "none" })
+  });
+  const diagnostic = recordIntegrationDiagnostic(root, "run-disposition", "work", {
+    reasonCode: "scope_violation",
+    signals: ["integration_inspection_failed", "scope_violation"],
+    details: { outOfScope: ["docs/oops.md"] }
+  });
+  assert.equal(diagnostic.task.status, "reported");
+  assert.equal(diagnostic.task.attempts.at(-1).outcome, null);
+  assert.equal(diagnostic.diagnostic.reasonCode, "scope_violation");
+  const diagnosticEvents = fs
+    .readFileSync(eventsFile(root, "run-disposition"), "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  assert.equal(diagnosticEvents.at(-1).type, "task.integration_refused");
+
+  const failedDiagnostic = recordIntegrationDiagnostic(root, "run-disposition", "work", {
+    kind: "failed",
+    reasonCode: "integration_conflict",
+    signals: ["integration_conflict"]
+  });
+  assert.equal(failedDiagnostic.task.status, "reported");
+  assert.equal(failedDiagnostic.task.attempts.at(-1).outcome, null);
+  const failedDiagnosticEvents = fs
+    .readFileSync(eventsFile(root, "run-disposition"), "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  assert.equal(failedDiagnosticEvents.at(-1).type, "task.integration_failed");
+
+  const decided = recordTaskDisposition(root, "run-disposition", "work", {
+    terminalOutcome: "policy_refused",
+    action: "refuse",
+    reasonCode: "policy_boundary",
+    evidence: ["scope policy applies"]
+  });
+  assert.equal(decided.task.status, "blocked");
+  assert.equal(decided.task.attempts.at(-1).outcome.terminalOutcome, "policy_refused");
+  const retried = retryTask(root, "run-disposition", "work");
+  assert.equal(retried.disposition, null);
+  checkpointPlan(root, "run-disposition");
+  const retryDispatch = claimTask(root, "run-disposition", "work", { constraints: [] });
+  recordTaskResult(root, "run-disposition", "work", {
+    attemptId: retryDispatch.attemptId,
+    resultText: resultBlock({ files: "none" })
+  });
+  const accepted = verifyTask(root, "run-disposition", "work", {
+    verdict: "pass",
+    evidence: ["policy concern resolved"]
+  });
+  assert.equal(accepted.task.attempts[0].outcome.terminalOutcome, "policy_refused");
+  assert.equal(accepted.task.attempts[1].outcome.terminalOutcome, "accepted");
+  assert.equal(accepted.task.disposition, null);
+
+  createRun(root, { id: "run-escalate", lane: "api", objective: "Escalate explicitly" });
+  replacePlan(root, "run-escalate", [
+    { id: "work", title: "Work", objective: "Work", kind: "read" }
+  ]);
+  checkpointPlan(root, "run-escalate");
+  const escalateDispatch = claimTask(root, "run-escalate", "work", { constraints: [] });
+  recordTaskResult(root, "run-escalate", "work", {
+    attemptId: escalateDispatch.attemptId,
+    resultText: resultBlock({ files: "none" })
+  });
+  const escalated = recordTaskDisposition(root, "run-escalate", "work", {
+    terminalOutcome: "authority_escalated",
+    action: "escalate",
+    reasonCode: "missing_authority",
+    evidence: ["user approval required"]
+  });
+  assert.equal(escalated.task.attempts.at(-1).outcome.terminalOutcome, "authority_escalated");
+
+  createRun(root, { id: "run-integration-terminal", lane: "api", objective: "Stop conflict" });
+  replacePlan(root, "run-integration-terminal", [
+    { id: "work", title: "Work", objective: "Work", kind: "read" }
+  ]);
+  checkpointPlan(root, "run-integration-terminal");
+  const conflictDispatch = claimTask(root, "run-integration-terminal", "work", {
+    constraints: []
+  });
+  recordTaskResult(root, "run-integration-terminal", "work", {
+    attemptId: conflictDispatch.attemptId,
+    resultText: resultBlock({ files: "none" })
+  });
+  const integrationFailed = recordTaskDisposition(
+    root,
+    "run-integration-terminal",
+    "work",
+    {
+      terminalOutcome: "integration_failed",
+      action: "replan",
+      reasonCode: "integration_conflict",
+      evidence: ["conflict cannot be retried safely"]
+    }
+  );
+  assert.equal(integrationFailed.task.status, "failed");
+  assert.equal(
+    integrationFailed.task.attempts.at(-1).outcome.terminalOutcome,
+    "integration_failed"
+  );
 });
 
 test("replanning preserves verified work while replacing unfinished tasks", () => {
@@ -684,6 +933,7 @@ test("a completed task graph still requires a clean combined final verification 
   assert.match(briefing, /The integrated repository passes/);
   assert.match(briefing, /review evidence recorded/);
   assert.match(briefing, /node --test: passed/);
+  assert.match(briefing, /accepted \/ execute \/ supervisor_verified \(supervisor\)/);
 });
 
 test("final verification refuses incomplete, dirty, and externally advanced runs", () => {

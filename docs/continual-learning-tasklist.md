@@ -22,39 +22,54 @@ before work begins on the next milestone.
 
 ### Schema and classification
 
-- [ ] **M1.1** Add `lib/outcomes.mjs` with terminal outcome, action, reason-code,
+- [x] **M1.1** Add `lib/outcomes.mjs` with terminal outcome, action, reason-code,
   signal, and provenance enums.
-- [ ] **M1.2** Add validators that require one terminal outcome and reject
+- [x] **M1.2** Add validators that require one terminal outcome and reject
   conflicting classifications.
-- [ ] **M1.3** Define precedence rules for cases with multiple observable
+- [x] **M1.3** Define precedence rules for cases with multiple observable
   failures.
-- [ ] **M1.4** Add an optional versioned outcome record to attempts without
+- [x] **M1.4** Add an optional versioned outcome record to attempts without
   breaking existing run files.
-- [ ] **M1.5** Preserve outcome history when `retryTask` clears the current task
+- [x] **M1.5** Preserve outcome history when `retryTask` clears the current task
   result.
 
 ### Runtime integration
 
-- [ ] **M1.6** Classify successful supervisor verification as `accepted`.
-- [ ] **M1.7** Classify worker-declared blockers as `worker_blocked` with a
+- [x] **M1.6** Classify successful supervisor verification as `accepted`.
+- [x] **M1.7** Classify worker-declared blockers as `worker_blocked` with a
   structured reason code.
-- [ ] **M1.8** Distinguish process execution failures from malformed result
+- [x] **M1.8** Distinguish process execution failures from malformed result
   contracts.
-- [ ] **M1.9** Record supervisor verification failures explicitly.
-- [ ] **M1.10** Record integration refusal and integration failure events.
-- [ ] **M1.11** Record policy refusal, authority escalation, and cancellation
+- [x] **M1.9** Record supervisor verification failures explicitly.
+- [x] **M1.10** Record integration refusal and integration failure events.
+- [x] **M1.11** Record policy refusal, authority escalation, and cancellation
   without conflating them with implementation failure.
-- [ ] **M1.12** Surface attempt outcomes in the supervisor resume briefing.
+- [x] **M1.12** Surface attempt outcomes in the supervisor resume briefing.
 
 ### Tests and gate
 
-- [ ] **M1.13** Add unit tests for every terminal outcome and action.
-- [ ] **M1.14** Add retry-history and older-state compatibility tests.
-- [ ] **M1.15** Add negative tests for invalid and conflicting labels.
-- [ ] **M1.16** Run `node --test tests/outcomes.test.mjs tests/runs.test.mjs`.
-- [ ] **M1.17** Run `npm test`.
-- [ ] **M1 gate** Confirm lifecycle behavior is unchanged and all terminal
+- [x] **M1.13** Add unit tests for every terminal outcome and action.
+- [x] **M1.14** Add retry-history and older-state compatibility tests.
+- [x] **M1.15** Add negative tests for invalid and conflicting labels.
+- [x] **M1.16** Run `node --test tests/outcomes.test.mjs tests/runs.test.mjs`.
+- [x] **M1.17** Run `npm test`.
+- [x] **M1 gate** Confirm lifecycle behavior is unchanged and all newly recorded terminal
   attempts have exactly one auditable outcome.
+
+### Milestone 1 evidence
+
+- Built: versioned outcome taxonomy, compatible action/reason validation,
+  supervisor dispositions, retryable integration diagnostics, structured worker
+  blocker codes, and attempt-history briefing output.
+- Backward compatibility: version-3 and version-4 runs without outcomes remain
+  readable and render an explicit legacy-unclassified marker.
+- Targeted gate: `node --test tests/outcomes.test.mjs tests/runs.test.mjs`
+  passed 39 tests with 0 failures on 2026-08-10.
+- Cross-module gate: `node --test tests/outcomes.test.mjs tests/runs.test.mjs
+  tests/workers.test.mjs tests/cli.test.mjs` passed 72 tests with 0 failures on
+  2026-08-10.
+- Full repository gate: `npm test` passed 109 tests with 0 failures on
+  2026-08-10.
 
 ## Milestone 2 — Privacy-safe learning store
 

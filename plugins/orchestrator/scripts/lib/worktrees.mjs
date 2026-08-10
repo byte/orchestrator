@@ -16,6 +16,17 @@ function git(cwd, args) {
   }).trim();
 }
 
+export class WorktreeOperationError extends Error {
+  constructor(message, { reasonCode, kind = "refused", signals = [], details = {} } = {}) {
+    super(message);
+    this.name = "WorktreeOperationError";
+    this.reasonCode = reasonCode;
+    this.kind = kind;
+    this.signals = signals;
+    this.details = details;
+  }
+}
+
 function worktreePath(cwd, run, task, attempt) {
   return path.join(localDir(cwd), "worktrees", run.id, `${task.id}-${attempt.id}`);
 }
@@ -26,23 +37,29 @@ function branchName(run, task, attempt) {
 
 export function createTaskWorktree(cwd, run, task, attempt) {
   if (!run.repository?.baseHead) {
-    throw new Error("Worker isolation requires a repository with at least one commit.");
+    throw new WorktreeOperationError(
+      "Worker isolation requires a repository with at least one commit.",
+      { reasonCode: "worker_launch_failed", kind: "failed", signals: ["worker_launch_error"] }
+    );
   }
   if (currentBranch(cwd) !== run.repository.branch) {
-    throw new Error(
-      `Run "${run.id}" belongs to branch ${run.repository.branch}; current branch is ${currentBranch(cwd)}.`
+    throw new WorktreeOperationError(
+      `Run "${run.id}" belongs to branch ${run.repository.branch}; current branch is ${currentBranch(cwd)}.`,
+      { reasonCode: "wrong_branch", kind: "failed", signals: ["wrong_branch"] }
     );
   }
   const dirt = changedFiles(cwd);
   if (dirt.length) {
-    throw new Error(
-      `The main checkout must be clean before launching isolated workers: ${dirt.join(", ")}.`
+    throw new WorktreeOperationError(
+      `The main checkout must be clean before launching isolated workers: ${dirt.join(", ")}.`,
+      { reasonCode: "dirty_checkout", kind: "failed", signals: ["dirty_checkout"] }
     );
   }
   const baseHead = headSha(cwd);
   if (baseHead !== run.repository.integrationHead) {
-    throw new Error(
-      `The supervisor branch advanced outside run "${run.id}"; expected ${run.repository.integrationHead}, found ${baseHead}.`
+    throw new WorktreeOperationError(
+      `The supervisor branch advanced outside run "${run.id}"; expected ${run.repository.integrationHead}, found ${baseHead}.`,
+      { reasonCode: "branch_drift", kind: "failed", signals: ["branch_drift"] }
     );
   }
   const target = worktreePath(cwd, run, task, attempt);
@@ -60,7 +77,14 @@ function diffFiles(cwd, before, after) {
 export function inspectTaskWorktree(task, attempt) {
   const worktree = attempt.worktree;
   if (!worktree?.path || !fs.existsSync(worktree.path)) {
-    throw new Error(`Worktree for attempt "${attempt.id}" is unavailable.`);
+    throw new WorktreeOperationError(
+      `Worktree for attempt "${attempt.id}" is unavailable.`,
+      {
+        reasonCode: "worktree_unavailable",
+        kind: "failed",
+        signals: ["worktree_unavailable"]
+      }
+    );
   }
   const head = headSha(worktree.path);
   const commits = head === worktree.baseHead
@@ -102,19 +126,43 @@ export function inspectTaskWorktree(task, attempt) {
 export function integrateTaskWorktree(cwd, run, task, attempt) {
   const inspection = inspectTaskWorktree(task, attempt);
   if (!inspection.ready) {
-    throw new Error(`Worktree for task "${task.id}" did not pass integration inspection.`);
+    const scopeViolation = inspection.outOfScope.length > 0;
+    const dirty = !inspection.clean;
+    throw new WorktreeOperationError(
+      `Worktree for task "${task.id}" did not pass integration inspection.`,
+      {
+        reasonCode: scopeViolation
+          ? "scope_violation"
+          : dirty
+            ? "dirty_checkout"
+            : "integration_inspection_failed",
+        signals: [
+          "integration_inspection_failed",
+          ...(scopeViolation ? ["scope_violation"] : []),
+          ...(dirty ? ["dirty_checkout"] : [])
+        ],
+        details: inspection
+      }
+    );
   }
   if (currentBranch(cwd) !== run.repository.branch) {
-    throw new Error(`Cannot integrate on branch ${currentBranch(cwd)}; expected ${run.repository.branch}.`);
+    throw new WorktreeOperationError(
+      `Cannot integrate on branch ${currentBranch(cwd)}; expected ${run.repository.branch}.`,
+      { reasonCode: "wrong_branch", signals: ["wrong_branch"] }
+    );
   }
   const dirt = changedFiles(cwd);
   if (dirt.length) {
-    throw new Error(`The main checkout must be clean before integration: ${dirt.join(", ")}.`);
+    throw new WorktreeOperationError(
+      `The main checkout must be clean before integration: ${dirt.join(", ")}.`,
+      { reasonCode: "dirty_checkout", signals: ["dirty_checkout"] }
+    );
   }
   const supervisorHead = headSha(cwd);
   if (supervisorHead !== run.repository.integrationHead) {
-    throw new Error(
-      `The supervisor branch advanced outside run "${run.id}"; expected ${run.repository.integrationHead}, found ${supervisorHead}.`
+    throw new WorktreeOperationError(
+      `The supervisor branch advanced outside run "${run.id}"; expected ${run.repository.integrationHead}, found ${supervisorHead}.`,
+      { reasonCode: "branch_drift", signals: ["branch_drift"] }
     );
   }
   try {
@@ -125,7 +173,14 @@ export function integrateTaskWorktree(cwd, run, task, attempt) {
     } catch {
       // Preserve the original cherry-pick error; the caller reports manual recovery.
     }
-    throw new Error(`Integration conflict for task "${task.id}": ${error.stderr || error.message}`);
+    throw new WorktreeOperationError(
+      `Integration conflict for task "${task.id}": ${error.stderr || error.message}`,
+      {
+        reasonCode: "integration_conflict",
+        kind: "failed",
+        signals: ["integration_conflict"]
+      }
+    );
   }
   return {
     inspection,

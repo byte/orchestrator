@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   attachExecution,
+  cancelTask,
   claimTask,
   failTaskAttempt,
   loadRun,
@@ -37,6 +38,18 @@ export const WORKER_RESULT_SCHEMA = {
     decisions: { type: "array", items: { type: "string" } },
     assumptions: { type: "array", items: { type: "string" } },
     blockers: { type: "array", items: { type: "string" } },
+    blocker_code: {
+      type: "string",
+      enum: [
+        "missing_context",
+        "scope_required",
+        "ambiguous_objective",
+        "missing_authority",
+        "policy_boundary",
+        "model_unavailable",
+        "other"
+      ]
+    },
     confidence: { type: "string", enum: ["high", "medium", "low"] }
   },
   required: [
@@ -129,9 +142,14 @@ export function launchTaskWorker(
     });
     return { ...dispatch, worktree, runner };
   } catch (error) {
+    const policyRefusal = error.kind === "refused";
     failTaskAttempt(cwd, runId, taskId, {
       attemptId: dispatch.attemptId,
-      error: error.message
+      error: error.message,
+      terminalOutcome: policyRefusal ? "policy_refused" : "execution_failed",
+      action: policyRefusal ? "refuse" : "execute",
+      reasonCode: error.reasonCode ?? "worker_launch_failed",
+      signals: error.signals ?? ["worker_launch_error"]
     });
     throw error;
   }
@@ -159,6 +177,23 @@ export function pollRunWorkers(cwd, runId) {
       updates.push({ taskId: task.id, ...status });
       continue;
     }
+    if (status.status === "cancelled") {
+      const cancelled = cancelTask(
+        cwd,
+        runId,
+        task.id,
+        status.error || "Worker runner was cancelled.",
+        { provenance: "automatic" }
+      );
+      updates.push({
+        taskId: task.id,
+        attemptId: attempt.id,
+        status: cancelled.status,
+        threadId: status.threadId,
+        exitCode: status.exitCode
+      });
+      continue;
+    }
     if (status.status === "completed" && fs.existsSync(attempt.runner.lastMessageFile)) {
       const recorded = recordTaskResult(cwd, runId, task.id, {
         attemptId: attempt.id,
@@ -174,9 +209,14 @@ export function pollRunWorkers(cwd, runId) {
       continue;
     }
     const error = status.error || tail(attempt.runner.errorFile) || `Codex exited ${status.exitCode}.`;
+    const missingResult = status.status === "completed";
     const failed = failTaskAttempt(cwd, runId, task.id, {
       attemptId: attempt.id,
-      error
+      error,
+      terminalOutcome: missingResult ? "contract_failed" : "execution_failed",
+      action: missingResult ? "replan" : "execute",
+      reasonCode: missingResult ? "missing_result" : "worker_process_failed",
+      signals: missingResult ? ["missing_result"] : ["worker_process_error"]
     });
     updates.push({
       taskId: task.id,

@@ -43,6 +43,16 @@ const writeFixture = path.join(
   "fixtures",
   "fake-codex-write.mjs"
 );
+const noResultFixture = path.join(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "fixtures",
+  "fake-codex-no-result.mjs"
+);
+const failedFixture = path.join(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "fixtures",
+  "fake-codex-fail.mjs"
+);
 
 function repo() {
   const root = makeRepo();
@@ -122,6 +132,7 @@ test("write worktrees require committed, clean, declared, in-scope changes befor
     ...integrated
   });
   assert.equal(result.task.status, "completed");
+  assert.equal(result.task.attempts.at(-1).outcome.terminalOutcome, "accepted");
   assert.equal(fs.readFileSync(path.join(root, "src/module.js"), "utf8"), "export const value = 1;\n");
   assert.equal(cleanupTaskWorktree(root, task.attempts.at(-1)), true);
 });
@@ -171,6 +182,10 @@ test("worker launch rejects supervisor branch drift outside the run", () => {
     /advanced outside run/
   );
   assert.equal(loadRun(root, "run-drift").tasks.build.status, "failed");
+  assert.equal(
+    loadRun(root, "run-drift").tasks.build.attempts.at(-1).outcome.terminalOutcome,
+    "execution_failed"
+  );
 });
 
 test("detached workers persist status, thread id, and structured results", async () => {
@@ -203,6 +218,47 @@ test("detached workers persist status, thread id, and structured results", async
   assert.equal(task.attempts.at(-1).threadId, "thread-fake");
   assert.equal(task.attempts.at(-1).runner.status, "completed");
   assert.ok(task.attempts.at(-1).runner.childPid > 0);
+});
+
+test("worker collection distinguishes missing contracts from execution failures", async () => {
+  const root = repo();
+  plan(root, "run-no-result");
+  checkpointPlan(root, "run-no-result");
+  launchTaskWorker(root, "run-no-result", "build", { constraints: [] }, {
+    codexCommand: [process.execPath, noResultFixture]
+  });
+  let noResult;
+  for (let index = 0; index < 100; index += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    noResult = pollRunWorkers(root, "run-no-result")[0];
+    if (noResult && !["running", "dispatching"].includes(noResult.status)) {
+      break;
+    }
+  }
+  assert.equal(noResult.status, "failed");
+  assert.equal(
+    loadRun(root, "run-no-result").tasks.build.attempts.at(-1).outcome.terminalOutcome,
+    "contract_failed"
+  );
+
+  plan(root, "run-process-fail");
+  checkpointPlan(root, "run-process-fail");
+  launchTaskWorker(root, "run-process-fail", "build", { constraints: [] }, {
+    codexCommand: [process.execPath, failedFixture]
+  });
+  let processFailure;
+  for (let index = 0; index < 100; index += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    processFailure = pollRunWorkers(root, "run-process-fail")[0];
+    if (processFailure && !["running", "dispatching"].includes(processFailure.status)) {
+      break;
+    }
+  }
+  assert.equal(processFailure.status, "failed");
+  assert.equal(
+    loadRun(root, "run-process-fail").tasks.build.attempts.at(-1).outcome.terminalOutcome,
+    "execution_failed"
+  );
 });
 
 test("the pool runs independent ready tasks in separate detached worktrees", async () => {
@@ -290,6 +346,7 @@ test("a detached write worker completes the full launch, inspect, integrate, fin
     ...integrated
   });
   assert.equal(recorded.runStatus, "finalizing");
+  assert.equal(recorded.task.attempts.at(-1).outcome.terminalOutcome, "accepted");
   assert.equal(
     fs.readFileSync(path.join(root, "src", "generated.js"), "utf8"),
     "export const generated = true;\n"
@@ -324,4 +381,8 @@ test("detached workers can be stopped without losing their durable handle", asyn
   const status = JSON.parse(fs.readFileSync(attempt.runner.statusFile, "utf8"));
   assert.equal(status.status, "cancelled");
   assert.equal(status.pid, attempt.runner.pid);
+  const update = pollRunWorkers(root, "run-stop")[0];
+  assert.equal(update.status, "cancelled");
+  const cancelled = loadRun(root, "run-stop").tasks.build.attempts.at(-1);
+  assert.equal(cancelled.outcome.terminalOutcome, "cancelled");
 });

@@ -6,6 +6,12 @@ import { parseResultBlock } from "./briefing.mjs";
 import { changedFiles, currentBranch, headSha } from "./git.mjs";
 import { ledgerForBriefing } from "./ledger.mjs";
 import {
+  OUTCOME_SIGNALS,
+  REASON_CODES,
+  normalizeOutcomeRecord,
+  validateOutcomeRecord
+} from "./outcomes.mjs";
+import {
   STATE_VERSION,
   atomicWrite,
   localDir,
@@ -80,6 +86,17 @@ function readRunFile(filePath) {
     throw new Error(
       `${filePath} was written by a newer orchestrator (state version ${parsed.version}, this build supports ${STATE_VERSION}).`
     );
+  }
+  for (const task of Object.values(parsed?.tasks ?? {})) {
+    for (const attempt of task?.attempts ?? []) {
+      if (attempt?.outcome) {
+        try {
+          validateOutcomeRecord(attempt.outcome);
+        } catch (error) {
+          throw new Error(`${filePath} contains an invalid outcome for ${attempt.id}: ${error.message}`);
+        }
+      }
+    }
   }
   return parsed;
 }
@@ -609,6 +626,80 @@ function currentAttempt(task, attemptId = null) {
   return attempt;
 }
 
+function outcomeInput(
+  terminalOutcome,
+  action,
+  reasonCode,
+  {
+    provenance = "automatic",
+    signals = [],
+    evidence = [],
+    metadata = {}
+  } = {}
+) {
+  return normalizeOutcomeRecord({
+    terminalOutcome,
+    action,
+    reasonCode,
+    provenance,
+    signals,
+    evidence,
+    metadata: {
+      classifiedAt: nowIso(),
+      ...metadata
+    }
+  });
+}
+
+function assignAttemptOutcome(attempt, input) {
+  const next = normalizeOutcomeRecord(input);
+  if (!attempt.outcome) {
+    attempt.outcome = next;
+    return next;
+  }
+  if (JSON.stringify(attempt.outcome) === JSON.stringify(next)) {
+    return attempt.outcome;
+  }
+  throw new Error(
+    `Attempt "${attempt.id}" already has terminal outcome "${attempt.outcome.terminalOutcome}".`
+  );
+}
+
+function sameOutcomeClassification(left, right) {
+  return ["version", "terminalOutcome", "action", "reasonCode", "provenance"]
+    .every((field) => left?.[field] === right?.[field]) &&
+    JSON.stringify(left?.signals ?? []) === JSON.stringify(right?.signals ?? []);
+}
+
+function outcomeSummary(attempt) {
+  if (attempt.outcome) {
+    return `${attempt.outcome.terminalOutcome} / ${attempt.outcome.action} / ${attempt.outcome.reasonCode} (${attempt.outcome.provenance})`;
+  }
+  if (["completed", "failed", "blocked", "cancelled"].includes(attempt.status)) {
+    return "unclassified (legacy state)";
+  }
+  return "pending";
+}
+
+function appendAttemptDiagnostic(attempt, diagnostic) {
+  if (!REASON_CODES.includes(diagnostic.reasonCode)) {
+    throw new Error(`Invalid diagnostic reason code: ${String(diagnostic.reasonCode)}.`);
+  }
+  const signals = [...new Set(diagnostic.signals ?? [])];
+  for (const signal of signals) {
+    if (!OUTCOME_SIGNALS.includes(signal)) {
+      throw new Error(`Invalid diagnostic signal: ${String(signal)}.`);
+    }
+  }
+  attempt.diagnostics ??= [];
+  attempt.diagnostics.push({
+    at: nowIso(),
+    ...diagnostic,
+    signals
+  });
+  return attempt.diagnostics.at(-1);
+}
+
 function renderWorkerLedger(cwd) {
   const ledger = ledgerForBriefing(cwd);
   if (!ledger.populated.length) {
@@ -737,7 +828,9 @@ export function claimTask(cwd, runId, taskId, lane) {
       reasoningEffort: route.reasoningEffort,
       claimedAt: nowIso(),
       startedAt: null,
-      finishedAt: null
+      finishedAt: null,
+      outcome: null,
+      diagnostics: []
     };
     task.attempts.push(attempt);
     task.status = "dispatching";
@@ -896,6 +989,36 @@ export function recordTaskResult(cwd, runId, taskId, { attemptId, resultText }) 
     };
     attempt.status = status;
     attempt.finishedAt = nowIso();
+    let outcome = null;
+    if (malformed) {
+      outcome = assignAttemptOutcome(
+        attempt,
+        outcomeInput("contract_failed", "replan", "malformed_result_contract", {
+          signals: ["malformed_result"],
+          metadata: { missingFields: parsed.missing }
+        })
+      );
+    } else if (blocked) {
+      const blockerCode = structured?.payload.blocker_code ?? "other";
+      const blockerActions = {
+        missing_context: "clarify",
+        ambiguous_objective: "clarify",
+        scope_required: "escalate",
+        missing_authority: "escalate",
+        model_unavailable: "escalate",
+        policy_boundary: "replan",
+        other: "replan"
+      };
+      const blockerReason = blockerCode === "other"
+        ? "worker_reported_blocker"
+        : blockerCode;
+      outcome = assignAttemptOutcome(
+        attempt,
+        outcomeInput("worker_blocked", blockerActions[blockerCode], blockerReason, {
+          signals: ["worker_blocker_reported"]
+        })
+      );
+    }
     task.status = status;
     task.result = result;
     task.updatedAt = nowIso();
@@ -906,7 +1029,8 @@ export function recordTaskResult(cwd, runId, taskId, { attemptId, resultText }) 
       taskId: task.id,
       attemptId: attempt.id,
       status,
-      result
+      result,
+      outcome
     });
     return { task, attempt, runStatus: run.status };
   });
@@ -982,16 +1106,42 @@ export function syncExecutionStatus(cwd, runId, taskId, { attemptId, status }) {
   });
 }
 
-export function failTaskAttempt(cwd, runId, taskId, { attemptId, error }) {
+export function failTaskAttempt(
+  cwd,
+  runId,
+  taskId,
+  {
+    attemptId,
+    error,
+    terminalOutcome = "execution_failed",
+    action = "execute",
+    reasonCode = "worker_execution_failed",
+    provenance = "automatic",
+    signals = ["worker_process_error"]
+  }
+) {
   const id = assertId(runId, "run");
   const filePath = runFile(cwd, id);
   return withFileLock(filePath, () => {
     const run = loadRun(cwd, id);
     const task = requireTask(run, taskId);
     const attempt = currentAttempt(task, attemptId);
+    const outcomeCandidate = outcomeInput(terminalOutcome, action, reasonCode, {
+      provenance,
+      signals
+    });
+    if (attempt.outcome) {
+      if (sameOutcomeClassification(attempt.outcome, outcomeCandidate)) {
+        return task;
+      }
+      throw new Error(
+        `Attempt "${attempt.id}" already has terminal outcome "${attempt.outcome.terminalOutcome}".`
+      );
+    }
     attempt.status = "failed";
     attempt.finishedAt = nowIso();
     attempt.error = String(error ?? "Worker execution failed.");
+    const outcome = assignAttemptOutcome(attempt, outcomeCandidate);
     task.status = "failed";
     task.result = {
       summary: attempt.error,
@@ -1008,7 +1158,8 @@ export function failTaskAttempt(cwd, runId, taskId, { attemptId, error }) {
       type: "task.execution_failed",
       taskId: task.id,
       attemptId: attempt.id,
-      error: attempt.error
+      error: attempt.error,
+      outcome
     });
     return task;
   });
@@ -1041,7 +1192,17 @@ export function recordIntegration(
     };
     task.status = "completed";
     task.updatedAt = nowIso();
-    currentAttempt(task).status = "completed";
+    const attempt = currentAttempt(task);
+    attempt.status = "completed";
+    attempt.finishedAt ??= nowIso();
+    const outcome = assignAttemptOutcome(
+      attempt,
+      outcomeInput("accepted", "execute", "integration_succeeded", {
+        provenance: "supervisor",
+        evidence: task.verification.evidence,
+        metadata: { integrationHead }
+      })
+    );
     run.repository.integrationHead = integrationHead;
     refreshRunStatus(run);
     writeRun(cwd, run);
@@ -1050,7 +1211,8 @@ export function recordIntegration(
       taskId: task.id,
       commits,
       integrationHead,
-      evidence: task.verification.evidence
+      evidence: task.verification.evidence,
+      outcome
     });
     return { task, ready: readyTasks(run), runStatus: run.status };
   });
@@ -1082,15 +1244,164 @@ export function verifyTask(cwd, runId, taskId, { verdict, evidence = [] }) {
     task.updatedAt = nowIso();
     const attempt = currentAttempt(task);
     attempt.status = task.status;
+    attempt.finishedAt ??= nowIso();
+    const outcome = assignAttemptOutcome(
+      attempt,
+      normalizedVerdict === "pass"
+        ? outcomeInput("accepted", "execute", "supervisor_verified", {
+            provenance: "supervisor",
+            evidence: verification.evidence
+          })
+        : outcomeInput("verification_failed", "replan", "supervisor_verification_failed", {
+            provenance: "supervisor",
+            signals: ["verification_failed"],
+            evidence: verification.evidence
+          })
+    );
     refreshRunStatus(run);
     writeRun(cwd, run);
     appendEvent(cwd, id, {
-      type: "task.verified",
+      type: normalizedVerdict === "pass" ? "task.verified" : "task.verification_failed",
       taskId: task.id,
       attemptId: attempt.id,
-      verification
+      verification,
+      outcome
     });
     return { task, ready: readyTasks(run), runStatus: run.status };
+  });
+}
+
+export function recordTaskDisposition(
+  cwd,
+  runId,
+  taskId,
+  {
+    terminalOutcome,
+    action,
+    reasonCode,
+    provenance = "supervisor",
+    evidence = [],
+    signals = []
+  }
+) {
+  const allowed = new Map([
+    ["policy_refused", {
+      action: "refuse",
+      status: "blocked",
+      reasons: new Set([
+        "policy_boundary",
+        "scope_violation"
+      ])
+    }],
+    ["authority_escalated", {
+      action: "escalate",
+      status: "blocked",
+      reasons: new Set(["missing_authority", "scope_required", "model_unavailable"])
+    }],
+    ["integration_failed", {
+      action: "replan",
+      status: "failed",
+      reasons: new Set([
+        "integration_conflict",
+        "worktree_unavailable",
+        "integration_inspection_failed"
+      ])
+    }]
+  ]);
+  if (!allowed.has(terminalOutcome)) {
+    throw new Error(
+      'A supervisor disposition must be "policy_refused", "authority_escalated", or "integration_failed".'
+    );
+  }
+  const policy = allowed.get(terminalOutcome);
+  if (policy.action !== action) {
+    throw new Error(
+      `Disposition "${terminalOutcome}" requires action "${policy.action}".`
+    );
+  }
+  if (!policy.reasons.has(reasonCode)) {
+    throw new Error(
+      `Disposition "${terminalOutcome}" cannot use reason code "${reasonCode}".`
+    );
+  }
+  const id = assertId(runId, "run");
+  const filePath = runFile(cwd, id);
+  return withFileLock(filePath, () => {
+    const run = loadRun(cwd, id);
+    const task = requireTask(run, taskId);
+    if (task.status !== "reported") {
+      throw new Error(
+        `Task "${task.id}" cannot receive a supervisor disposition from status "${task.status}".`
+      );
+    }
+    const attempt = currentAttempt(task);
+    const outcome = assignAttemptOutcome(
+      attempt,
+      outcomeInput(terminalOutcome, action, reasonCode, {
+        provenance,
+        evidence: stringList(evidence, "disposition evidence"),
+        signals
+      })
+    );
+    task.disposition = { ...outcome, at: nowIso() };
+    task.status = policy.status;
+    task.updatedAt = nowIso();
+    attempt.status = policy.status;
+    attempt.finishedAt ??= nowIso();
+    refreshRunStatus(run);
+    writeRun(cwd, run);
+    appendEvent(cwd, id, {
+      type: "task.disposition_recorded",
+      taskId: task.id,
+      attemptId: attempt.id,
+      outcome
+    });
+    return { task, runStatus: run.status };
+  });
+}
+
+export function recordIntegrationDiagnostic(
+  cwd,
+  runId,
+  taskId,
+  {
+    kind = "refused",
+    reasonCode = "integration_inspection_failed",
+    signals = ["integration_inspection_failed"],
+    error = "",
+    details = {}
+  } = {}
+) {
+  if (!["refused", "failed"].includes(kind)) {
+    throw new Error('Integration diagnostic kind must be "refused" or "failed".');
+  }
+  const id = assertId(runId, "run");
+  const filePath = runFile(cwd, id);
+  return withFileLock(filePath, () => {
+    const run = loadRun(cwd, id);
+    const task = requireTask(run, taskId);
+    if (task.status !== "reported") {
+      throw new Error(
+        `Task "${task.id}" cannot record an integration diagnostic from status "${task.status}".`
+      );
+    }
+    const attempt = currentAttempt(task);
+    const diagnostic = appendAttemptDiagnostic(attempt, {
+      type: `integration_${kind}`,
+      reasonCode,
+      signals,
+      error: String(error ?? ""),
+      details
+    });
+    task.updatedAt = nowIso();
+    writeRun(cwd, run);
+    appendEvent(cwd, id, {
+      type: `task.integration_${kind}`,
+      taskId: task.id,
+      attemptId: attempt.id,
+      diagnostic
+    });
+    return { task, diagnostic, runStatus: run.status };
   });
 }
 
@@ -1103,18 +1414,31 @@ export function retryTask(cwd, runId, taskId) {
     if (!RETRYABLE_TASK_STATUSES.has(task.status)) {
       throw new Error(`Task "${task.id}" cannot be retried from status "${task.status}".`);
     }
+    const previousAttempt = task.attempts.at(-1) ?? null;
     task.status = "pending";
     task.result = null;
     task.verification = null;
+    task.disposition = null;
     task.updatedAt = nowIso();
     refreshRunStatus(run);
     writeRun(cwd, run);
-    appendEvent(cwd, id, { type: "task.retried", taskId: task.id });
+    appendEvent(cwd, id, {
+      type: "task.retried",
+      taskId: task.id,
+      previousAttemptId: previousAttempt?.id ?? null,
+      previousOutcome: previousAttempt?.outcome ?? null
+    });
     return task;
   });
 }
 
-export function cancelTask(cwd, runId, taskId, reason = "") {
+export function cancelTask(
+  cwd,
+  runId,
+  taskId,
+  reason = "",
+  { provenance = "user", reasonCode = "task_cancelled" } = {}
+) {
   const id = assertId(runId, "run");
   const filePath = runFile(cwd, id);
   return withFileLock(filePath, () => {
@@ -1124,9 +1448,20 @@ export function cancelTask(cwd, runId, taskId, reason = "") {
       throw new Error(`Completed task "${task.id}" cannot be cancelled.`);
     }
     const attempt = task.attempts.at(-1);
-    if (attempt && ACTIVE_TASK_STATUSES.has(attempt.status)) {
+    let outcome = attempt?.outcome ?? null;
+    if (
+      attempt &&
+      !attempt.outcome &&
+      [...ACTIVE_TASK_STATUSES, "reported"].includes(attempt.status)
+    ) {
       attempt.status = "cancelled";
       attempt.finishedAt = nowIso();
+      outcome = assignAttemptOutcome(
+        attempt,
+        outcomeInput("cancelled", "abstain", reasonCode, {
+          provenance
+        })
+      );
     }
     task.status = "cancelled";
     task.cancelReason = String(reason ?? "").trim();
@@ -1136,7 +1471,8 @@ export function cancelTask(cwd, runId, taskId, reason = "") {
     appendEvent(cwd, id, {
       type: "task.cancelled",
       taskId: task.id,
-      reason: task.cancelReason
+      reason: task.cancelReason,
+      outcome
     });
     return task;
   });
@@ -1147,12 +1483,24 @@ export function cancelRun(cwd, runId, reason = "") {
   const filePath = runFile(cwd, id);
   return withFileLock(filePath, () => {
     const run = loadRun(cwd, id);
+    const outcomes = [];
     for (const task of Object.values(run.tasks)) {
       if (task.status !== "completed") {
         const attempt = task.attempts.at(-1);
-        if (attempt && ACTIVE_TASK_STATUSES.has(attempt.status)) {
+        if (
+          attempt &&
+          !attempt.outcome &&
+          [...ACTIVE_TASK_STATUSES, "reported"].includes(attempt.status)
+        ) {
           attempt.status = "cancelled";
           attempt.finishedAt = nowIso();
+          const outcome = assignAttemptOutcome(
+            attempt,
+            outcomeInput("cancelled", "abstain", "run_cancelled", {
+              provenance: "user"
+            })
+          );
+          outcomes.push({ taskId: task.id, attemptId: attempt.id, outcome });
         }
         task.status = "cancelled";
         task.cancelReason = String(reason ?? "").trim();
@@ -1162,7 +1510,11 @@ export function cancelRun(cwd, runId, reason = "") {
     run.status = "cancelled";
     run.cancelReason = String(reason ?? "").trim();
     writeRun(cwd, run);
-    appendEvent(cwd, id, { type: "run.cancelled", reason: run.cancelReason });
+    appendEvent(cwd, id, {
+      type: "run.cancelled",
+      reason: run.cancelReason,
+      outcomes
+    });
     return run;
   });
 }
@@ -1316,6 +1668,9 @@ export function renderSupervisorBriefing(cwd, run, lane) {
         attempt?.threadId ? `thread ${attempt.threadId}` : null,
         attempt?.worktree?.path ? `worktree ${attempt.worktree.path}` : null
       ].filter(Boolean).join("; ");
+      const attemptOutcomes = task.attempts.map(
+        (entry) => `${entry.id}: ${outcomeSummary(entry)}`
+      );
       return `### ${task.id} — ${task.title}
 
 - status: ${task.status}
@@ -1329,6 +1684,8 @@ export function renderSupervisorBriefing(cwd, run, lane) {
 - result: ${task.result?.summary || "none"}
 - confidence: ${structured?.confidence || task.result?.fields?.confidence || "not reported"}
 - blockers: ${structured?.blockers?.length ? structured.blockers.join("; ") : task.result?.fields?.blockers || "none"}
+- attempt outcomes:
+${renderList(attemptOutcomes)}
 - worker checks:
 ${renderList(workerTests)}
 - supervisor evidence:

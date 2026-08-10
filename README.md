@@ -24,6 +24,8 @@ what should happen, what is acceptable, what gets integrated, and when the whole
 - Read-only sandboxes for analysis/review tasks and workspace-write sandboxes for implementation
 - JSON-schema-enforced worker reports with files, tests, decisions, assumptions, blockers, and
   confidence
+- Versioned terminal attempt outcomes that distinguish execution, contract, verification, policy,
+  authority, integration, cancellation, and acceptance decisions
 - Scope, cleanliness, declaration, commit, and branch-drift gates before integration
 - Supervisor verification for every task and a separate combined final gate
 - Durable run JSON, append-only events, worker handles, Codex thread IDs, checkpoints, and evidence
@@ -110,7 +112,8 @@ replacement run or rely on conversational memory.
 3. **Monitor.** Detached process IDs, status files, JSONL events, Codex thread IDs, outputs, and
    worktree paths are persisted under `.orchestrator/local/`.
 4. **Review.** Worker output becomes `reported`, never automatically complete. Claude evaluates the
-   evidence and acceptance criteria.
+   evidence and acceptance criteria. Terminal attempt outcomes are recorded separately from task
+   lifecycle state so retries retain an auditable reason for each earlier result.
 5. **Integrate.** A write task must be clean, committed, in scope, and exactly match its declared
    files. Passing commits are cherry-picked. Conflicts abort without discarding either side.
 6. **Recover or replan.** Failed, blocked, or cancelled attempts remain in history. Verified work
@@ -138,6 +141,11 @@ The lower-level CLI is available to command definitions and operators:
 ```text
 node plugins/orchestrator/scripts/orch.mjs help
 ```
+
+Supervisors can explicitly stop a reported task at a policy or authority boundary, or terminalize
+an unrecoverable integration failure, with `run decide`. The decision records a versioned
+`policy_refused`, `authority_escalated`, or `integration_failed` outcome; policy and authority
+decisions are never inferred from worker prose.
 
 ## Context and memory
 

@@ -53,6 +53,34 @@ blocked | failed | cancelled -> pending (explicit retry)
 worktree inspection and integration, which records the supervisor verdict and commit evidence
 together.
 
+## Attempt outcomes and diagnostics
+
+Task lifecycle state answers what the scheduler may do next. A versioned attempt outcome answers
+why a terminal attempt ended. New terminal attempts record exactly one of `accepted`,
+`worker_blocked`, `policy_refused`, `authority_escalated`, `execution_failed`, `contract_failed`,
+`verification_failed`, `integration_failed`, or `cancelled`, together with a compatible next
+action, reason code, provenance, signals, and evidence references.
+
+Outcomes live on attempts rather than task results. Retrying clears the current task result and
+verification while preserving every earlier attempt and its outcome. Version 3 and version 4 run
+files without outcomes remain readable and are shown as unclassified legacy state rather than
+being guessed or backfilled.
+
+Worker reports do not create accepted outcomes. Only supervisor verification or successful
+integration can record `accepted`. Policy refusal and authority escalation are explicit supervisor
+decisions through `run decide`; they are never inferred from free-form worker prose. The same
+command can make a retryable integration diagnostic terminal as `integration_failed` when the
+supervisor determines that the fixed attempt cannot be integrated safely.
+
+Checkout drift, a dirty supervisor checkout, and a wrong launch branch are classified as
+execution precondition failures with their own reason codes. They do not imply that worker code
+failed, and they do not become policy refusals without an explicit supervisor decision.
+
+Integration inspection failures and conflicts are initially retryable diagnostics. They append a
+typed event and diagnostic signal while the task remains `reported`, leaving the same fixed worker
+attempt eligible for a later successful integration. Cancellation closes active or reported
+attempts only when they do not already have a terminal outcome.
+
 ## Task dispatch
 
 `run launch` performs these steps:

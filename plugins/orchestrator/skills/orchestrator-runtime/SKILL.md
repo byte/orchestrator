@@ -28,13 +28,16 @@ All support `--json` where structured output is useful.
   dispatch until a checkpoint covers the current plan revision, because the run record preserves
   what happened and only the checkpoint preserves why.
 - A report is not completion. Verify read tasks directly; inspect and integrate write worktrees.
+- Newly terminal attempts carry a versioned outcome separate from lifecycle state. Use `run decide`
+  for explicit policy refusal, authority escalation, or a terminal integration failure; never infer
+  policy or authority boundaries from worker prose.
 - The run is not complete when its tasks finish. Run the combined checks and use `run finalize`
   with exact evidence. Finalization is the user-facing success gate.
 
 ## Durable state
 
 Run JSON, events, worker status, structured results, PIDs, Codex thread ids, worktree pointers,
-checkpoints, verification evidence, and integration commits live under the self-ignored
+checkpoints, terminal attempt outcomes, verification evidence, and integration commits live under the self-ignored
 `.orchestrator/local/runs/`. The committed ledger carries durable project facts across machines.
 
 ## Legacy single-task bridge
