@@ -198,6 +198,11 @@ test("collection is metadata-only, private, deterministic, and idempotent", () =
   assert.equal(second.unchanged, 1);
   assert.equal(fs.readFileSync(learningExamplesFile(root), "utf8"), bytes);
   assert.equal(fs.statSync(learningExamplesFile(root)).mtimeMs, modified);
+
+  const legacyRedaction = JSON.parse(bytes);
+  legacyRedaction.redaction.version = 1;
+  fs.writeFileSync(learningExamplesFile(root), `${JSON.stringify(legacyRedaction)}\n`);
+  assert.equal(listLearningExamples(root)[0].redaction.version, 1);
 });
 
 test("route source distinguishes planned task routes from explicit run pins", () => {

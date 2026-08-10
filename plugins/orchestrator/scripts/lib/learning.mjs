@@ -9,7 +9,11 @@ import {
   normalizeOutcomeRecord,
   validateOutcomeRecord
 } from "./outcomes.mjs";
-import { REDACTION_VERSION, redactTextFields } from "./redaction.mjs";
+import {
+  REDACTION_VERSION,
+  SUPPORTED_REDACTION_VERSIONS,
+  redactTextFields
+} from "./redaction.mjs";
 import { eventsFile, listRuns, loadRun } from "./runs.mjs";
 import { atomicWrite, localDir, nowIso } from "./state.mjs";
 import { resolveWorkspaceRoot } from "./workspace.mjs";
@@ -982,7 +986,7 @@ function removeAffectedExports(cwd, removedIds, selectors, all) {
       if (manifest.exportVersion !== LEARNING_EXPORT_VERSION ||
           manifest.exportRecordVersion !== LEARNING_EXPORT_RECORD_VERSION ||
           manifest.learningSchemaVersion !== LEARNING_SCHEMA_VERSION ||
-          manifest.redactionVersion !== REDACTION_VERSION ||
+          !SUPPORTED_REDACTION_VERSIONS.includes(manifest.redactionVersion) ||
           manifest.sampleCount !== actualIds.length ||
           new Set(actualIds).size !== actualIds.length ||
           manifest.provenance?.kind !== "derived_local_export" ||
@@ -1304,8 +1308,10 @@ export function validateLearningExample(example) {
     ["version", "appliedFields", "findings"],
     "learning redaction"
   );
-  if (example.redaction?.version !== REDACTION_VERSION) {
-    throw new Error(`Learning redaction version must be ${REDACTION_VERSION}.`);
+  if (!SUPPORTED_REDACTION_VERSIONS.includes(example.redaction?.version)) {
+    throw new Error(
+      `Learning redaction version must be one of: ${SUPPORTED_REDACTION_VERSIONS.join(", ")}.`
+    );
   }
   if (example.redaction.appliedFields.length !== 0 ||
       Object.keys(example.redaction.findings).length !== 0) {

@@ -39,10 +39,25 @@ over months. That changes what is credible:
 - The near-term payoff is not model selection statistics; it is turning
   labeled failures into versioned briefing guidance (milestone 4).
 
-Concretely: ship milestones 1–2 now, ship milestone 4's lightweight guidance
-path as soon as milestone 1 labels exist in the milestone 2 store, and gate
-milestones 3 and 5–6 on an explicit data threshold (at least ~200 labeled
-terminal attempts, revisited then).
+Concretely: ship milestones 1–2 now and ship milestone 4's lightweight guidance
+path as soon as milestone 1 labels exist in the milestone 2 store. Approximately
+200 genuinely reviewed terminal attempts is the earliest sensible readiness
+review for milestones 3 and 5–6, not an automatic start or promotion threshold.
+At that review, the observed data must also show:
+
+- repeated, independently reviewed examples for the eligible failure signatures,
+  actions, and task populations the proposed machinery would evaluate
+- enough eligible policy matches or judge/routing opportunities to measure the
+  behavior that could actually change, rather than mostly unmatched examples
+- a credible leakage-free evaluation and holdout shape that retains meaningful
+  coverage of the intended operating scope
+- start and promotion rules recorded before results are examined, so sparse or
+  unfavorable cells cannot be waived after the fact
+
+A large total dominated by one lane, one route, successful attempts, or isolated
+one-off signatures does not satisfy the gate. The milestone-specific gates below
+may require more evidence once the real distribution is visible; this plan does
+not invent unsupported per-cell numeric thresholds in advance.
 
 ## Delivery sequence
 
@@ -58,8 +73,9 @@ The work is divided into independently shippable milestones:
 
 Milestones 1–2 form the foundational release and should ship immediately.
 Milestone 4's lightweight path depends on milestones 1–2 but is exempt from
-the reviewed-data threshold. Milestones 3, 5, and 6 start only after that
-threshold is met.
+the reviewed-data gate. Milestones 3, 5, and 6 start only after both the volume
+review and the relevance, coverage, independence, and prospective-holdout
+conditions above are met.
 
 Pre-integration evaluation of multiple parallel candidate implementations
 (N-best sampling with baseline-vs-candidate comparison) is **out of scope** for
@@ -171,6 +187,8 @@ data.
 - Add deterministic deduplication and source provenance.
 - Add configurable retention and targeted purge.
 - Add secret and PII redaction before any text-enabled export.
+- Prefer privacy to perfect semantic classification: syntactically IPv4-like
+  dotted quads may be redacted even when they are version-like text.
 - Require explicit opt-in before including textual fields.
 - Add CLI commands:
 
@@ -204,9 +222,12 @@ data.
 
 ## 3. Add rubrics, annotations, and golden evaluations (data-gated)
 
-Do not start this milestone before the data threshold in
-[Data-volume constraint](#data-volume-constraint) is met. Kappa, confusion
-matrices, and partitioned holdouts are noise below that volume.
+Do not start this milestone merely because the total count reaches the review
+point in [Data-volume constraint](#data-volume-constraint). First record a
+readiness inventory showing repeated eligible signatures, independent source
+groups, and a prospective leakage-free split with meaningful coverage. Kappa,
+confusion matrices, and partitioned holdouts are noise when the relevant cells
+remain sparse even if the aggregate count looks large.
 
 ### Objective
 
@@ -285,9 +306,11 @@ This milestone has two phases:
   Every injected instruction is versioned, provenance-tagged, and reversible.
   No holdout comparison is required — validation is supervisor judgment plus
   the rollback lever.
-- **Validated path (data-gated):** once milestone 3 exists, compare
-  enabled/disabled guidance against the frozen holdout before promoting
-  guidance from provisional to confirmed.
+- **Validated path (data-gated):** once milestone 3 exists and the frozen
+  holdout contains repeated eligible match opportunities for the guidance in
+  scope, compare enabled/disabled behavior before promoting guidance from
+  provisional to confirmed. Aggregate corpus size alone is not promotion
+  evidence.
 
 ### Tasks
 
@@ -304,6 +327,10 @@ This milestone has two phases:
 - Give each injected instruction a policy version and provenance.
 - Enforce a briefing token budget.
 - Never inject raw production examples or untrusted worker prose.
+- Apply that exclusion specifically to the learned policy and provisional
+  guidance block. Ordinary worker-briefing context—such as the assigned
+  objective, scope, constraints, acceptance criteria, and reviewed dependency
+  context—continues to be rendered by the existing runtime.
 - Keep the lightweight path advisory and retry-specific. It must not make route
   recommendations or activate refusal behavior without independent policy
   authority.
@@ -326,10 +353,17 @@ This milestone has two phases:
 - Disabling the policy removes the provisional worker-guidance block and
   restores no-guidance worker behavior.
 - Resume reconstructs the exact guidance version used.
-- (Validated path only) Holdout performance improves without increasing false
-  refusals.
+- (Validated path only) Report matched and unmatched holdout opportunities;
+  confirm only guidance signatures with repeated eligible coverage and improved
+  behavior without increased false refusals or safety errors.
 
 ## 5. Implement judge evaluation (single judge first, data-gated)
+
+Do not start this milestone from aggregate volume alone. Milestone 3 must first
+produce a frozen, leakage-checked evaluation set with repeated eligible
+high-risk cases and enough prospective judge invocations to evaluate agreement,
+abstention, and safety-gate behavior. Isolated examples or a holdout dominated
+by cases that would never invoke the judge are not sufficient.
 
 ### Objective
 
@@ -358,7 +392,8 @@ configuration rather than hard-coded identities.
   - prompt and runner versions
 - Add first-class judge state to runs, designed so a single judge is a
   one-member panel (the schema supports N judges; v1 configures one).
-- Treat candidate content and worker prose as delimited, untrusted data.
+- Treat evaluation input and worker prose as delimited, untrusted data. This is
+  judge input, not an N-best implementation-candidate experiment.
 - Aggregation rules (apply identically at N=1 and N>1):
   - all safety gates must pass
   - automatic acceptance requires unanimous action and category
@@ -391,12 +426,18 @@ configuration rather than hard-coded identities.
 - Prompt-injection text cannot alter judge instructions.
 - Interrupted judge runs resume without duplicate votes.
 - Individual votes, routes, prompt hashes, and rubric hashes remain auditable.
+- Operational use remains gated until the frozen holdout contains repeated
+  eligible judge opportunities across the intended scope and demonstrates
+  acceptable agreement, abstention, and safety behavior.
 
 ## 6. Introduce routing recommendations in shadow mode (data-gated)
 
-Do not start this milestone before the data threshold in
-[Data-volume constraint](#data-volume-constraint) is met; promotion criteria
-below are only meaningful against a credible outcome sample.
+Do not start this milestone merely because the aggregate review point in
+[Data-volume constraint](#data-volume-constraint) is reached. The reviewed data
+must contain repeated comparable routing decisions for the task populations and
+route alternatives in scope, plus enough eligible recommendation opportunities
+to measure coverage. A corpus concentrated in one route or dominated by cases
+where the policy would abstain cannot support a routing claim.
 
 ### Objective
 
@@ -427,6 +468,7 @@ surrendering supervisor control.
 - Run recommendations only in shadow mode initially.
 - Compare recommendations against supervisor choices and resulting outcomes.
 - Gate promotion on:
+  - meaningful coverage and repeated match opportunities on the frozen holdout
   - no increase in verification escapes
   - no increase in false refusals or escalations
   - maintained or improved success rate
@@ -454,6 +496,9 @@ than overwritten.
 - Policy versions and overrides survive resume.
 - Route changes are traceable to evaluated evidence.
 - Rollback restores the previous behavior exactly.
+- Promotion evidence reports both matched and unmatched opportunities and does
+  not generalize beyond route/task populations represented repeatedly in the
+  frozen holdout.
 
 ## 7. Optional external training adapter
 
@@ -504,7 +549,8 @@ The initiative is complete when:
 - Golden evaluations, once built, are reproducible and leakage-checked.
 - Judge disagreement safely abstains.
 - Routing remains advisory until measured promotion criteria pass.
-- Data-gated milestones have not started before the data threshold is met.
+- Data-gated milestones have not started before volume, repeated-signature,
+  policy-opportunity, independence, and holdout-coverage evidence is recorded.
 - Explicit user pins and supervisor authority remain intact.
 - Existing scope, worktree, checkpoint, and finalization invariants do not
   regress.
@@ -540,7 +586,16 @@ preserved during implementation.
   complete on 2026-08-10. The exact focused and full-suite evidence is recorded
   in the tasklist. Guidance remains explicitly opt-in, advisory, reversible,
   and limited to fixed templates derived from reviewed typed outcomes.
-- Next gate: Milestone 3 remains data-gated until the store contains at least
-  about 200 genuinely reviewed terminal attempts. Milestones 4B, 5, and 6 stay
-  blocked behind that evidence. Do not fabricate the prerequisite from fixtures
-  or worker self-reports.
+- Post-review hardening: reviewed-source selection now lives in the directly
+  tested guidance layer; canonical policy ordering is ICU-independent; run,
+  lane, and local-thread state evolve under separate schemas; redaction version
+  2 rejects impossible IPv4 addresses while preserving version-1 records; and
+  the full repository gate passes 164 tests. Exact commands are recorded in the
+  tasklist.
+- Next gate: Milestone 3 remains data-gated. Approximately 200 genuinely
+  reviewed terminal attempts triggers a readiness review, but does not pass it
+  by itself. The review must also show repeated eligible signatures,
+  independent source groups, meaningful policy match or invocation
+  opportunities, and a credible prospective holdout. Milestones 4B, 5, and 6
+  remain blocked behind their corresponding coverage and holdout evidence. Do
+  not fabricate prerequisites from fixtures or worker self-reports.

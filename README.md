@@ -169,7 +169,9 @@ The base store is permanently metadata-only. A managed export can include one of
 text fields only when both `--consent user|supervisor` and
 `--acknowledge-sensitive-export` are present; redaction runs before bounded text is written.
 Exports stay under the private learning directory so purge can find and remove every managed
-copy. There is no upload or network destination.
+copy. There is no upload or network destination. Redaction deliberately favors privacy over
+semantic precision: IPv4-shaped dotted quads can be removed even when they resemble a version
+number rather than a real network address.
 
 Reviewed non-success outcomes can be compiled into provisional per-run guidance:
 
@@ -183,8 +185,11 @@ Enabling guidance requires a supervisor- or user-reviewed outcome for the run's 
 current checkpoint stale, so the supervisor must review and checkpoint the policy before dispatch.
 Only a retry whose typed prior outcome exactly matches a reviewed failure signature receives an
 item. The item is a fixed built-in template: objectives, evidence, worker prose, source text, and
-free-form instructions never enter the policy. Guidance is advisory and cannot change model or
-effort pins, task state, scope, constraints, safety rules, or supervisor authority.
+free-form instructions never enter the learned policy or provisional guidance block. This does not
+remove the ordinary run objective, assignment, scope, constraints, acceptance criteria,
+dependency context, or other established sections of the worker briefing. Guidance is advisory
+and cannot change model or effort pins, task state, scope, constraints, safety rules, or supervisor
+authority.
 
 ## Context and memory
 

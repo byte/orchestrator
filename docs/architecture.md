@@ -112,7 +112,9 @@ Managed exports use a separate versioned wrapper and carry a manifest with schem
 versions, opaque membership, filters, consent, provenance, counts, and a content digest. Base
 records remain metadata-only. Text exists only in an explicitly acknowledged managed export,
 only for named allowlisted fields, and only after secret, credential, PII, network-address, and
-path redaction. Exports have no URL destination and use no network capability.
+path redaction. The privacy-first IPv4 matcher intentionally may redact a version-like dotted
+quad; avoiding a possible address leak takes precedence over preserving ambiguous dotted text.
+Exports have no URL destination and use no network capability.
 
 Retention belongs only to derived learning records. The default is 365 days; `forever` means
 retain until explicitly purged. Purge selectors can target a sample, run, task, attempt, expired
@@ -135,6 +137,11 @@ ledger, and free-form instructions are ineligible. The compiler maps typed actio
 codes to closed built-in templates and hashes the canonical policy. One explicit supervisor or
 user review is sufficient only for this opt-in provisional phase; it is not high-confidence
 evidence, a confirmed policy, or evidence that a later promotion gate has passed.
+
+Those exclusions apply to learned policy content and the provisional guidance block, not to the
+ordinary worker prompt. The existing runtime still renders the run objective, bounded assignment,
+scope, constraints, acceptance criteria, reviewed dependency context, and durable project context
+in their established briefing sections.
 
 The operator explicitly enables a policy per run. That change increments a guidance revision and
 makes the existing checkpoint stale. New tasks receive an enabled zero-item selection; a retry can

@@ -1,4 +1,5 @@
-export const REDACTION_VERSION = 1;
+export const REDACTION_VERSION = 2;
+export const SUPPORTED_REDACTION_VERSIONS = Object.freeze([1, REDACTION_VERSION]);
 
 const RULES = Object.freeze([
   {
@@ -89,6 +90,7 @@ const RULES = Object.freeze([
   {
     type: "ipv4",
     pattern: /\b(?:\d{1,3}\.){3}\d{1,3}\b/g,
+    shouldRedact: (match) => match.split(".").every((octet) => Number(octet) <= 255),
     replacement: "<redacted:ipv4>"
   },
   {
@@ -124,6 +126,9 @@ export function redactText(value) {
   for (const rule of RULES) {
     let count = 0;
     text = text.replace(rule.pattern, (...args) => {
+      if (rule.shouldRedact && !rule.shouldRedact(args[0])) {
+        return args[0];
+      }
       count += 1;
       return typeof rule.replacement === "function"
         ? rule.replacement(...args)

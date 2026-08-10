@@ -35,6 +35,9 @@ All support `--json` where structured output is useful.
 - Guidance is advisory briefing text only. It cannot alter routes, pins, scope, constraints,
   lifecycle state, policy, or supervisor authority. Use `--mode off` as the kill switch and
   `--rollback` to restore the previous exact policy snapshot.
+- The learned guidance block accepts only fixed templates and typed metadata. This restriction
+  does not remove the run objective, assignment, scope, constraints, acceptance criteria,
+  dependency context, or other ordinary sections from the worker briefing.
 - A report is not completion. Verify read tasks directly; inspect and integrate write worktrees.
 - Newly terminal attempts carry a versioned outcome separate from lifecycle state. Use `run decide`
   for explicit policy refusal, authority escalation, or a terminal integration failure; never infer

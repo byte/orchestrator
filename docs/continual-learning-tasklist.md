@@ -125,7 +125,8 @@ Depends on: Milestone 1.
   purge.
 - Privacy: base records use an explicit allowlist; text exists only in a managed
   export with named fields, user or supervisor consent, an acknowledgement
-  receipt, and redaction before truncation and first write.
+  receipt, and redaction before truncation and first write. The IPv4 matcher is
+  intentionally conservative and may redact version-like dotted quads.
 - Resilience: one live-owner-aware store lock protects every mutation; files and
   directories enforce `0600`/`0700`; symlink ancestors are refused; corrupt and
   incomplete exports are removed conservatively during purge.
@@ -139,9 +140,27 @@ Depends on: Milestone 1.
 
 Depends on: Milestone 2.
 
-Status: data-gated until the learning store contains approximately 200
-genuinely reviewed terminal attempts. Fixtures, automatic-only labels, and
-worker self-reports do not satisfy this threshold.
+Status: data-gated. Approximately 200 genuinely reviewed terminal attempts is
+the earliest readiness review, not an automatic start threshold. Fixtures,
+automatic-only labels, worker self-reports, and a large but irrelevant or
+one-sided corpus do not satisfy the gate.
+
+### Readiness gate
+
+- [ ] **M3.R1** Inventory reviewed examples by terminal outcome, action, reason
+  code, lane, task kind, and independent source group.
+- [ ] **M3.R2** Demonstrate repeated eligible signatures in the populations the
+  rubric and metrics are intended to cover; isolated one-off cases do not count
+  as support for a general rule.
+- [ ] **M3.R3** Demonstrate that a prospective leakage-free evaluation and
+  holdout split can retain meaningful coverage rather than being dominated by
+  unmatched or homogeneous examples.
+- [ ] **M3.R4** Record start and promotion rules before inspecting evaluation
+  results. Set evidence requirements from the observed distribution instead of
+  inventing unsupported per-cell numeric thresholds now.
+- [ ] **M3 readiness gate** Approve the milestone only when aggregate volume,
+  repeated-signature relevance, source independence, and prospective holdout
+  coverage are all credible.
 
 ### Rubrics and annotations
 
@@ -191,7 +210,7 @@ worker self-reports do not satisfy this threshold.
 ## Milestone 4 — Refusal and just-in-time guidance
 
 Milestone 4A depends on completed Milestones 1–2 but is exempt from the
-reviewed-data threshold and may ship before Milestone 3.
+reviewed-data gate and may ship before Milestone 3.
 Milestone 4B is data-gated and depends on Milestone 3.
 
 ### Phase A — Lightweight provisional guidance
@@ -211,8 +230,11 @@ Milestone 4B is data-gated and depends on Milestone 3.
   mutate task state, dispatch routes, or authority decisions.
 - [x] **M4A.6** Render only fixed, compact instructions under character, token,
   and item budgets.
-- [x] **M4A.7** Prohibit objectives, prompts, production examples, evidence,
-  worker/tool output, source text, ledger text, and free-form instructions.
+- [x] **M4A.7** Prohibit copying objectives, prompts, production examples,
+  evidence, worker/tool output, source text, ledger text, or free-form
+  instructions into the learned policy or provisional guidance block. Ordinary
+  assignment context remains in the existing worker briefing outside that
+  block.
 - [x] **M4A.8** Persist item IDs, policy version/hash, provenance, provisional
   status, and exact attempt snapshots for resume.
 - [x] **M4A.9** Add an explicit run-level off switch and exact rollback.
@@ -247,23 +269,77 @@ Milestone 4B is data-gated and depends on Milestone 3.
   tests/learning.test.mjs` passed 101 tests with 0 failures on 2026-08-10.
 - Full repository gate: `npm test` passed 156 tests with 0 failures on
   2026-08-10.
+- Change-size context: commit `bb3e39e` records 2,413 insertions and 143
+  deletions across 17 files. That includes 899 inserted test lines and 214
+  changed tasklist lines from milestone resequencing; the runtime behavior is
+  deliberately narrow, but the defensive schema, state, recovery, CLI, and
+  regression surface is not a tiny implementation.
+
+### Post-review hardening
+
+- [x] **M4A.H1** Move reviewed-label selection, conflict handling, provenance
+  filtering, and lane isolation out of the CLI into the directly tested
+  guidance layer (`7d55e12`).
+- [x] **M4A.H2** Replace locale-aware policy ordering with deterministic
+  code-unit ordering and cover the composite-key behavior directly
+  (`7d55e12`).
+- [x] **M4A.H3** Decouple run state version 5 from marked lane and local-thread
+  schema version 1 while preserving lossless migration of legacy unmarked
+  version-3, version-4, and version-5 files (`2940245`).
+- [x] **M4A.H4** Version the tightened IPv4 redactor, preserve version-1
+  derived records, reject impossible addresses, and document intentional
+  privacy-first handling of ambiguous valid dotted quads.
+- [x] **M4A.H5** Replace the aggregate-count-only roadmap gate with explicit
+  relevance, repeated-signature, independent-source, policy-opportunity, and
+  prospective-holdout readiness evidence.
+- [x] **M4A.H6** Run the focused guidance, state, redaction, CLI, run, and
+  learning gates.
+- [x] **M4A.H7** Run `npm test`.
+
+#### Post-review evidence
+
+- Core hardening gate: `node --test --test-reporter=spec
+  tests/guidance.test.mjs tests/state.test.mjs tests/redaction.test.mjs` passed
+  30 tests with 0 failures on 2026-08-10.
+- Integration gate: `node --test --test-reporter=spec tests/cli.test.mjs
+  tests/runs.test.mjs tests/learning.test.mjs` passed 73 tests with 0 failures
+  on 2026-08-10.
+- Full repository gate: `npm test` passed 164 tests with 0 failures on
+  2026-08-10.
 
 ### Phase B — Validated guidance
 
-Do not start before Milestone 3 and the reviewed-data threshold.
+Do not start merely because Milestone 3 exists or the aggregate review point
+has been reached. The frozen holdout must contain repeated eligible match
+opportunities for the guidance signatures proposed for confirmation.
 
+- [ ] **M4B.R1** Report policy coverage, matched and unmatched opportunities,
+  and independently sourced examples for each guidance signature in scope.
 - [ ] **M4B.1** Add optional rubric-aware guidance matching.
 - [ ] **M4B.2** Compare enabled and disabled behavior on the frozen holdout.
 - [ ] **M4B.3** Measure false refusal, unnecessary escalation, success, and
   verification-escape rates.
-- [ ] **M4B.4** Promote guidance from provisional to confirmed only when the
-  frozen evaluation improves without a quality or safety regression.
+- [ ] **M4B.4** Promote only guidance signatures with repeated eligible
+  holdout coverage and improved matched-case behavior without a quality or
+  safety regression; leave under-covered signatures provisional.
 - [ ] **M4B gate** Produce reproducible promotion evidence tied to policy,
-  rubric, dataset, and holdout hashes.
+  rubric, dataset, and holdout hashes, including coverage and match counts.
 
 ## Milestone 5 — Independent judge evaluation
 
-Depends on: Milestone 3 and the reviewed-data threshold.
+Depends on: Milestone 3 plus a frozen, leakage-checked evaluation set with
+repeated eligible high-risk cases and meaningful prospective judge-invocation
+coverage. Aggregate volume alone is insufficient.
+
+### Readiness gate
+
+- [ ] **M5.R1** Show repeated independently sourced cases for the high-risk
+  populations where the judge would actually run.
+- [ ] **M5.R2** Show that the frozen holdout can measure judge/supervisor
+  agreement, abstention, malformed results, and safety-gate behavior rather
+  than mostly exercising ineligible cases.
+- [ ] **M5 readiness gate** Record the intended operating scope and evidence
+  rules before implementing or enabling judge-backed decisions.
 
 ### Judge protocol
 
@@ -287,14 +363,28 @@ Depends on: Milestone 3 and the reviewed-data threshold.
 - [ ] **M5.10** Run targeted judge, worker, run, and CLI tests.
 - [ ] **M5.11** Run `npm test`.
 - [ ] **M5 gate** Confirm judges cannot bypass supervisor authority and all
-  abstention or disagreement safely defers.
+  abstention or disagreement safely defers; keep operational use gated until
+  repeated eligible holdout evidence covers the intended scope.
 
 Pre-integration N-best candidate experiments remain a separate future
 initiative and are not a dependency of this plan.
 
 ## Milestone 6 — Shadow routing recommendations
 
-Depends on: Milestone 3 and a sufficient reviewed sample set.
+Depends on: Milestone 3 plus repeated comparable routing decisions and
+meaningful recommendation opportunities for the task populations and route
+alternatives in scope. Approximately 200 total reviewed attempts does not pass
+this gate when the corpus is concentrated in one route or mostly ineligible.
+
+### Readiness gate
+
+- [ ] **M6.R1** Inventory comparable reviewed outcomes by task population,
+  selected route, alternative route opportunity, and independent source group.
+- [ ] **M6.R2** Demonstrate repeated recommendation opportunities and a
+  prospective holdout that represents the routes and task populations the
+  shadow policy would cover.
+- [ ] **M6 readiness gate** Pre-register coverage, abstention, quality, safety,
+  and efficiency promotion rules before shadow results are inspected.
 
 ### Policy and features
 
@@ -312,10 +402,11 @@ Depends on: Milestone 3 and a sufficient reviewed sample set.
 
 - [ ] **M6.6** Generate recommendations without affecting dispatch.
 - [ ] **M6.7** Compare recommendations with supervisor selections and outcomes.
-- [ ] **M6.8** Measure verification escapes, false refusals, success, retries,
-  duration, and available token usage.
-- [ ] **M6.9** Define evidence thresholds for promoting a policy from shadow
-  mode.
+- [ ] **M6.8** Measure matched and unmatched opportunities, coverage,
+  abstention, verification escapes, false refusals, success, retries, duration,
+  and available token usage.
+- [ ] **M6.9** Apply the pre-registered evidence rules when considering
+  promotion; do not generalize beyond repeatedly represented route/task cells.
 - [ ] **M6.10** Guarantee explicit user pins always win.
 - [ ] **M6.11** Guarantee dispatched attempts retain their persisted routes.
 - [ ] **M6.12** Add version rollback.
@@ -329,7 +420,8 @@ Depends on: Milestone 3 and a sufficient reviewed sample set.
 - [ ] **M6.17** Run targeted routing, run, and command tests.
 - [ ] **M6.18** Run `npm test`.
 - [ ] **M6 gate** Keep the policy in shadow mode unless the frozen evaluation
-  shows improved efficiency with no quality or safety regression.
+  has meaningful policy coverage and repeated match opportunities, and shows
+  improved efficiency with no quality or safety regression.
 
 ## Milestone 7 — Optional external training adapter
 
@@ -369,6 +461,9 @@ Complete the applicable items at every milestone:
 - [ ] Golden evaluations are frozen, reproducible, and leakage-checked.
 - [ ] Judge disagreement and abstention cannot auto-promote work.
 - [ ] Routing remains advisory until promotion criteria pass.
+- [ ] Data-gated starts and promotions have repeated eligible signatures,
+  meaningful policy opportunities, independent sources, and frozen holdout
+  coverage; aggregate attempt count alone is never treated as sufficient.
 - [ ] Explicit user pins and supervisor authority remain intact.
 - [ ] Scope, worktree, checkpoint, integration, and finalization invariants do
   not regress.

@@ -3,6 +3,7 @@ import { test } from "node:test";
 
 import {
   REDACTION_VERSION,
+  SUPPORTED_REDACTION_VERSIONS,
   redactText,
   redactTextFields
 } from "../plugins/orchestrator/scripts/lib/redaction.mjs";
@@ -14,7 +15,8 @@ test("redaction removes common secrets without retaining matched values", () => 
   const result = redactText(
     `OpenAI ${secret}; GitHub ${github}; password=hunterhunter; ${privateKey}`
   );
-  assert.equal(REDACTION_VERSION, 1);
+  assert.equal(REDACTION_VERSION, 2);
+  assert.deepEqual(SUPPORTED_REDACTION_VERSIONS, [1, 2]);
   assert.doesNotMatch(result.text, /1234567890abcdefghijklmnop/);
   assert.doesNotMatch(result.text, /hunterhunter|secretmaterial/);
   assert.match(result.text, /<redacted:openai_key>/);
@@ -79,6 +81,15 @@ test("redaction covers authorization, service tokens, network data, and other pa
     const expected = type === "absolute_path" ? 2 : 1;
     assert.equal(result.findings[type], expected, `expected ${expected} ${type} finding(s)`);
   }
+});
+
+test("IPv4 redaction rejects impossible addresses and stays privacy-first for ambiguous versions", () => {
+  const result = redactText(
+    "invalid 999.1.2.3; endpoint 192.168.10.5; release version 10.1.2.3"
+  );
+  assert.match(result.text, /999\.1\.2\.3/);
+  assert.doesNotMatch(result.text, /192\.168\.10\.5|10\.1\.2\.3/);
+  assert.equal(result.findings.ipv4, 2);
 });
 
 test("field redaction only copies explicitly selected fields", () => {
