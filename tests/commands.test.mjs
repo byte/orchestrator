@@ -22,6 +22,12 @@ test("the run command keeps Claude in authority and routes only within the GPT-5
   assert.match(command, /use `luna` for clear, repeatable, high-volume/);
   assert.match(command, /Select effort independently/);
   assert.match(command, /Prefer the lowest effort that should reliably/);
+  assert.match(command, /Flags never make the first positional token a lane/);
+  assert.match(
+    command,
+    /--max-workers 3 add cursor pagination[\s\S]+objective is `add cursor\s+pagination`/
+  );
+  assert.doesNotMatch(command, /When flags are present: the first positional token is the lane/);
   assert.match(
     command,
     /only `gpt-5\.6-sol`, `gpt-5\.6-terra`, or `gpt-5\.6-luna`/

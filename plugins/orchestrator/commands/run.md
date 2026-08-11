@@ -1,6 +1,6 @@
 ---
 description: Automatically route and manage a GPT-5.6 Codex worker pool from the Claude Code main thread
-argument-hint: "<lane> [--max-workers <n>] [--model <auto|sol|terra|luna>] [--effort <auto|level>] <objective>"
+argument-hint: "<what you want done> [lane] [--max-workers <n>] [--model <auto|sol|terra|luna>] [--effort <auto|level>]"
 allowed-tools: Read, Grep, Glob, Write, Bash(node:*), AskUserQuestion
 ---
 
@@ -15,15 +15,40 @@ $ARGUMENTS
 
 ## 1. Parse and inspect
 
-The first positional token is the lane. `--max-workers`, `--model`, and `--effort` configure the
-pool; everything else is the objective. Model and effort both default to `auto`, which means you
-must select them per task during planning. Treat explicit values as user pins, not suggestions.
+Expect plain language, not flags. Most invocations are a sentence describing an outcome, and the
+user may not name a lane, a worker count, or a route at all. Extract what was given and derive the
+rest; never answer a conversational request with flag syntax the user must retype.
+
+Parse `--max-workers`, `--model`, and `--effort` with their values independently from the
+remaining text. Flags never make the first positional token a lane. Treat the remaining text as
+the objective unless the user unambiguously named a lane under the resolution rules below. For
+example, in `/orchestrator:run --max-workers 3 add cursor pagination`, the objective is `add cursor
+pagination`; `add` is not a lane merely because a pool flag is present. Model and effort both
+default to `auto`, which means you must select them per task during planning. Treat explicit values
+as user pins, not suggestions.
 
 Inspect the relevant repository guidance and implementation before planning. Keep this inspection
 in the main thread so the plan benefits from the user's conversation context.
 
-Do not silently create a missing lane or widen its scope. Ask only when an ambiguity would
-materially change the result or require new authority.
+### Resolving the lane
+
+A lane is a durable write boundary, not a form the user must fill in first. Resolve it in this
+order:
+
+1. The user named an existing lane. Use it.
+2. The objective clearly belongs to exactly one existing lane. Use it and say which one you chose.
+3. No lane fits. Derive one from the objective and the repository: scope from the subsystem the
+   work actually touches, standing constraints from the repository's own conventions, and a
+   definition of done from how this repository is verified. Show the proposed lane in plain
+   language, confirm it once, then create it with `lane add`.
+
+Deriving and confirming a lane is not silent creation. What remains forbidden is creating a lane
+the user never saw, widening an existing lane's scope to fit a task, or proceeding past a
+confirmation the user declined. If the user rejects the proposal, adjust it — do not fall back to
+telling them to run `lane add` themselves.
+
+Ask only when an ambiguity would materially change the result or require new authority. Prefer
+proposing a concrete answer to confirm over asking an open question.
 
 ## 2. Create the durable run
 
