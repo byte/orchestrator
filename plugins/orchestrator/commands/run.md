@@ -66,6 +66,20 @@ everyday work, `high` or `xhigh` only when deeper reasoning should materially im
 and `max` only for the hardest quality-first task. Prefer the lowest effort that should reliably
 meet the acceptance criteria.
 
+Escalate rather than economize when the task is uncertain or expensive to get wrong. Move one tier
+up in model, effort, or both when any of these hold:
+
+- the objective is ambiguous enough that a competent worker could reasonably build the wrong thing
+- the write scope is broad, touches shared interfaces, or other tasks depend on the result
+- the work is novel in this repository rather than a variation on something already present
+- the acceptance criteria are hard to check mechanically, so a wrong result may survive review
+- a previous attempt at this task already failed verification
+
+The cheapest route is only cheapest when it succeeds. A task that fails verification costs an
+entire wave plus the supervisor review that caught it, so a downgrade is worth taking only when
+the task is genuinely bounded and its acceptance criteria would catch a bad result immediately.
+State the escalation in `routingReason` when it decided the route.
+
 In automatic mode, omitted task routing is an invalid plan: the runtime will not silently fall
 back to Sol or guess an effort. If the user explicitly pins a model, every task uses that model and
 a conflicting task model is rejected. The same rule applies to an explicit effort pin. Do not use
@@ -228,6 +242,25 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" run checkpoint <run-id> \
   --json
 ```
 
+Before dispatching the next wave, reconsider the routing of the tasks it will contain. The plan
+routed them from the objective alone; a completed wave replaces that estimate with evidence. Re-route
+a pending task when the wave showed that:
+
+- the area is more entangled, more novel, or less well covered by tests than the plan assumed
+- a dependency landed a design that makes the downstream task harder or easier than planned
+- a task at the same tier already failed verification for reasons of depth rather than briefing
+- the work turned out to be mechanical, and a lower tier now clearly suffices
+
+Revise routes with the same `run plan` call, resubmitting the full task list with the routes
+changed and an updated `routingReason` naming the evidence. The runtime refuses a revision while any
+task is active or reported, preserves completed tasks unchanged, and rejects any attempt to redefine
+or drop one, so only pending work can move. Re-routing bumps the plan revision and therefore
+requires its own checkpoint before the next dispatch.
+
+Do not re-route to work around a bad briefing. If the worker failed because the task was
+underspecified, out of scope, or missing context, fix the briefing and retry at the same route; a
+higher tier does not repair an unclear objective.
+
 `run ready` reports the checkpoint as stale once tasks have completed since the last one, and
 `run resume` marks a stale checkpoint in the briefing. If a task reveals that the plan is wrong,
 stop dispatching dependent work, explain the conflict, revise the plan deliberately, and
@@ -273,6 +306,8 @@ created, and any residual risk. Distinguish built, verified, and unverified work
   resolved and persisted by the run plan. Never silently substitute another model or effort.
 - Model and effort selection are the supervisor's planning responsibility unless the user
   explicitly pins either dimension. Automatic routing must never mean a hidden runtime fallback.
+- Routing is a revisable judgment, not a one-time commitment: re-route pending tasks through
+  `run plan` when a completed wave contradicts the assumptions the original route was based on.
 - Codex workers never self-assign global work or expand their scope.
 - Every worker runs in its own isolated worktree.
 - Never bypass the run state because the manual path seems faster.
