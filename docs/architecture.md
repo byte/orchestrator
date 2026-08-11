@@ -153,6 +153,12 @@ IDs, policy version/hash, provenance, rendered text, and budget—onto the attem
 renders that persisted block. Resume reports the saved version/hash/item IDs and returns the full
 snapshot in JSON; neither path queries a mutable learning store.
 
+Within a run, one policy version name identifies one canonical policy hash across the active
+configuration and archived policies. Recompiling changed reviewed sources under an existing name
+fails closed and requires a new `--policy-version`; exact reapplication of the same version and
+hash remains idempotent. Recovery discards conflicting malformed history without weakening the
+emergency off path or a valid rollback.
+
 Guidance changes only a bounded briefing block. Route resolution, user model/effort pins, task
 state, dependencies, scope, lane constraints, sandboxing, verification, integration, finalization,
 and supervisor authority remain structurally independent. `run guidance --mode off` restores the

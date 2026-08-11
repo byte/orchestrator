@@ -8,15 +8,15 @@ repository shippable and pass its exit gate before dependent work begins.
 
 ## Working rules
 
-- [ ] Preserve the existing uncommitted changes in
+- [x] Preserve the existing uncommitted changes in
   `plugins/orchestrator/commands/run.md`.
-- [ ] Keep raw run artifacts local and self-ignored.
-- [ ] Do not add uploads, telemetry, hosted services, or training dependencies.
-- [ ] Do not use worker self-reports as ground truth.
-- [ ] Keep Claude as final reviewer and integration authority.
-- [ ] Preserve explicit user model and effort pins.
-- [ ] Maintain backward compatibility with version-4 state.
-- [ ] Run targeted tests after each task and `npm test` at every milestone gate.
+- [x] Keep raw run artifacts local and self-ignored.
+- [x] Do not add uploads, telemetry, hosted services, or training dependencies.
+- [x] Do not use worker self-reports as ground truth.
+- [x] Keep Claude as final reviewer and integration authority.
+- [x] Preserve explicit user model and effort pins.
+- [x] Maintain backward compatibility with version-4 state.
+- [x] Run targeted tests after each task and `npm test` at every milestone gate.
 
 ## Milestone 1 — Normalized outcomes
 
@@ -307,6 +307,39 @@ Milestone 4B is data-gated and depends on Milestone 3.
 - Full repository gate: `npm test` passed 164 tests with 0 failures on
   2026-08-10.
 
+### Post-review follow-up completion checklist
+
+Status: completed after primary implementation confirmation and fresh targeted
+and full-suite evidence on 2026-08-11.
+
+- [x] **M4A.F1** Remove the unused standalone guidance-policy resolver and the
+  tests that exercise only that unreachable API; verify no production caller
+  remains.
+- [x] **M4A.F2** Enforce one canonical policy hash per policy version across
+  active and archived run policies, rejecting reuse of a version label for
+  different content without weakening emergency disable or valid rollback.
+- [x] **M4A.F3** Preserve deterministic selector priority under character,
+  token, and item budgets so a lower-priority candidate cannot leapfrog one
+  that exhausts the remaining budget.
+- [x] **M4A.F4** Add focused negative and recovery tests for resolver removal,
+  policy-version conflicts, priority ordering, and budget truncation.
+- [x] **M4A.F5** Run the focused guidance, run, and CLI gate.
+- [x] **M4A.F6** Run `npm test`.
+- [x] **M4A follow-up gate** Record exact commands, counts, and date after the
+  primary verifies the combined implementation, committed as `030a636`.
+
+#### Post-review follow-up evidence
+
+- Inspection: `resolveGuidancePolicy` and its resolver-only tests are absent;
+  the runtime validates active, archived, and recovery policies for immutable
+  version-to-hash membership; budget exhaustion stops lower-priority
+  candidates from leapfrogging.
+- Targeted gate: `node --test --test-reporter=spec tests/guidance.test.mjs
+  tests/runs.test.mjs tests/cli.test.mjs` passed 76 tests with 0 failures on
+  2026-08-11.
+- Full repository gate: `npm test` passed 164 tests with 0 failures on
+  2026-08-11.
+
 ### Phase B — Validated guidance
 
 Do not start merely because Milestone 3 exists or the aggregate review point
@@ -442,30 +475,63 @@ contract. This milestone is not part of the core release.
 
 Complete the applicable items at every milestone:
 
-- [ ] Update `README.md` for user-visible behavior and commands.
-- [ ] Update `docs/architecture.md` for state, recovery, and failure behavior.
-- [ ] Update command definitions under `plugins/orchestrator/commands/`.
-- [ ] Update `plugins/orchestrator/skills/orchestrator-runtime/SKILL.md`.
-- [ ] Update CLI help and examples.
-- [ ] Update release metadata and `CHANGELOG.md` when releasing.
-- [ ] Distinguish raw audit state, curated examples, offline evaluation, shadow
+- [x] Update `README.md` for user-visible behavior and commands.
+- [x] Update `docs/architecture.md` for state, recovery, and failure behavior.
+- [x] Update command definitions under `plugins/orchestrator/commands/`.
+- [x] Update `plugins/orchestrator/skills/orchestrator-runtime/SKILL.md`.
+- [x] Update CLI help and examples.
+- [x] Prepare synchronized `0.5.0` release metadata and `CHANGELOG.md`.
+- [x] Distinguish raw audit state, curated examples, offline evaluation, shadow
   policy, active policy, and external training.
-- [ ] Inspect the final rendered Markdown and all referenced paths.
-- [ ] Run `npm test` and record the exact result.
+- [x] Inspect the final rendered Markdown and all referenced paths.
+- [x] Run `npm test` and record the exact result for the final release-prep
+  tree after the M4A follow-up is confirmed.
+
+Release status: `0.5.0` metadata and notes are prepared locally. Tagging,
+pushing, marketplace publication, and installation are deferred to the primary
+release workflow and are not authorized by this checklist. Milestones 3, 4B,
+5, and 6 remain data-gated; Milestone 7 remains an optional, separately
+authorized external integration and is not part of the `0.5.0` core release.
+
+Release-prep evidence on 2026-08-11:
+
+- `node --test --test-reporter=spec tests/metadata.test.mjs
+  tests/commands.test.mjs tests/render.test.mjs` passed 6 tests with 0 failures.
+- `node --test --test-reporter=spec tests/guidance.test.mjs
+  tests/runs.test.mjs tests/cli.test.mjs` passed 76 tests with 0 failures.
+- `npm test` passed 164 tests with 0 failures against the confirmed follow-up
+  and release-prep tree.
+- `git diff --check` passed for the release bookkeeping changes.
 
 ## Final acceptance checklist
 
-- [ ] Raw artifacts remain local and are never silently promoted.
-- [ ] Every terminal attempt has one machine-readable outcome and provenance.
-- [ ] Derived records are sanitized, traceable, bounded, and removable.
+### Applicable to the 0.5.0 core release
+
+- [x] Raw artifacts remain local and are never silently promoted.
+- [x] Every newly recorded terminal attempt has one machine-readable outcome
+  and provenance; older unclassified attempts remain explicit rather than
+  receiving guessed backfills.
+- [x] Derived records are sanitized, traceable, bounded, and removable.
+- [x] Explicit user pins and supervisor authority remain intact.
+- [x] Scope, worktree, checkpoint, integration, and finalization invariants do
+  not regress.
+- [x] Applicable privacy, replay, refusal, recovery, metadata, documentation,
+  and full repository tests pass for the release-prep tree.
+
+### Deferred data-gated acceptance
+
 - [ ] Golden evaluations are frozen, reproducible, and leakage-checked.
 - [ ] Judge disagreement and abstention cannot auto-promote work.
 - [ ] Routing remains advisory until promotion criteria pass.
 - [ ] Data-gated starts and promotions have repeated eligible signatures,
   meaningful policy opportunities, independent sources, and frozen holdout
   coverage; aggregate attempt count alone is never treated as sufficient.
-- [ ] Explicit user pins and supervisor authority remain intact.
-- [ ] Scope, worktree, checkpoint, integration, and finalization invariants do
-  not regress.
-- [ ] Privacy, consensus, replay, refusal, routing, recovery, and full repository
-  tests pass.
+- [ ] Consensus and routing tests pass when Milestones 5 and 6 are authorized
+  and implemented.
+
+### Not applicable to the 0.5.0 core release
+
+- N-best pre-integration candidate experiments are out of scope for this
+  initiative.
+- External training remains Milestone 7 and requires separate authorization,
+  trainer configuration, serving contracts, and evaluation evidence.

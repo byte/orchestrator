@@ -32,6 +32,8 @@ All support `--json` where structured output is useful.
   this provisional mode; it is not confirmed or promotion evidence. Enabling, disabling, rolling
   back, or retry-selecting guidance invalidates the checkpoint; review the selected policy and
   checkpoint it before dispatch.
+- A policy version name is immutable within a run. If reviewed sources produce a different policy
+  hash, use a new `--policy-version`; never rebind an archived or active version name.
 - Guidance is advisory briefing text only. It cannot alter routes, pins, scope, constraints,
   lifecycle state, policy, or supervisor authority. Use `--mode off` as the kill switch and
   `--rollback` to restore the previous exact policy snapshot.

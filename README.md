@@ -189,7 +189,8 @@ free-form instructions never enter the learned policy or provisional guidance bl
 remove the ordinary run objective, assignment, scope, constraints, acceptance criteria,
 dependency context, or other established sections of the worker briefing. Guidance is advisory
 and cannot change model or effort pins, task state, scope, constraints, safety rules, or supervisor
-authority.
+authority. A policy version name is immutable within a run: if reviewed sources change the policy
+hash, enable it under a new `--policy-version` instead of rebinding the old name.
 
 ## Context and memory
 

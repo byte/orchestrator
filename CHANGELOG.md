@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.5.0
+
+- Added versioned terminal attempt outcomes with separate action, reason,
+  diagnostic-signal, and provenance fields. Verification, integration,
+  refusal, escalation, cancellation, and retry history remain distinct from
+  scheduler lifecycle state and readable from older version-3/version-4 runs.
+- Added a private, local-only learning store that derives deterministic,
+  metadata-only examples behind opaque keyed references. Reviewed labels,
+  retention, hierarchical purge, and managed local exports are auditable;
+  textual exports require explicit consent and acknowledgement, run redaction
+  before truncation, and never upload automatically.
+- Added opt-in provisional guidance for retries. Policies compile only from
+  supervisor- or user-reviewed typed outcomes and render closed, bounded
+  templates; policy changes invalidate the checkpoint, attempts freeze the
+  selected policy, and operators can disable or roll back guidance without
+  changing routes, pins, scope, safety rules, or supervisor authority.
+- Hardened persisted schemas and recovery. Run state version 5 is decoupled
+  from marked lane and local-thread schemas, legacy unmarked version-3 through
+  version-5 files migrate without guessed learning data, guidance selections
+  must belong to retained policies, policy version names cannot be rebound to
+  different hashes, deterministic ordering is locale-neutral, and redaction
+  version 2 remains compatible with version-1 derived records.
+- Kept rubrics, confirmed guidance, judges, and shadow routing behind explicit
+  data-readiness gates. Aggregate attempt count is insufficient without
+  repeated eligible signatures, independent sources, meaningful policy
+  opportunities, and credible holdout coverage; N-best implementation
+  experiments remain out of scope and external training remains separately
+  authorized.
+
 ## 0.4.0
 
 - New runs default to enforced supervisor routing: Fable or Opus must assign every unpinned task
