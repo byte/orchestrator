@@ -52,6 +52,8 @@ invokes Codex CLI directly. The bridge is needed only for the legacy `/orch:do` 
 
 ## Install
 
+### From GitHub
+
 In Claude Code:
 
 ```text
@@ -61,8 +63,57 @@ In Claude Code:
 /orch:init
 ```
 
+This installs whatever is on the marketplace repository's default branch, which is not necessarily
+the newest local work.
+
+### From a local checkout
+
+Point the marketplace at the working copy instead of GitHub. Use this to run unreleased changes, or
+to develop the plugin itself:
+
+```text
+/plugin marketplace add /absolute/path/to/orchestrator
+/plugin install orchestrator@orchestrator
+/reload-plugins
+/orch:init
+```
+
+The path must be the repository root — the directory holding `.claude-plugin/marketplace.json`, not
+`plugins/orchestrator`. Claude Code records it as a `directory` marketplace source.
+
+Installing **copies** the plugin into `~/.claude/plugins/cache/orchestrator/orchestrator/<version>`.
+The install is a snapshot, not a live link to the checkout, so editing files in the repository does
+not change the installed plugin. After changing plugin sources, refresh the marketplace and
+reinstall:
+
+```text
+/plugin marketplace update orchestrator
+/plugin install orchestrator@orchestrator
+/reload-plugins
+```
+
+Because the cache path contains the version, a stale install can sit alongside a much newer
+checkout. Check what is actually installed:
+
+```bash
+cat ~/.claude/plugins/installed_plugins.json
+```
+
+If the recorded `version` is behind `plugins/orchestrator/.claude-plugin/plugin.json`, reinstall
+before assuming a fix is live.
+
+### Verify
+
 `/orch:init` creates the repository state and reports exact remedies for missing Codex CLI,
-authentication, or Git prerequisites.
+authentication, or Git prerequisites. Run it inside the repository you want orchestrated, not
+inside this plugin's own checkout.
+
+If `/orch:*` commands do not appear after installing, run `/reload-plugins`, then confirm the
+marketplace and plugin are both registered:
+
+```bash
+cat ~/.claude/plugins/known_marketplaces.json
+```
 
 ## Quick start
 

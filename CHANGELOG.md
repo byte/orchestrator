@@ -28,6 +28,11 @@
   opportunities, and credible holdout coverage; N-best implementation
   experiments remain out of scope and external training remains separately
   authorized.
+- Documented installing from a local checkout alongside the GitHub path,
+  including the repository-root marketplace requirement, the versioned install
+  cache that makes an install a snapshot rather than a live link, the refresh
+  and reinstall cycle after editing plugin sources, and how to check the
+  installed version against the checkout.
 
 ## 0.4.0
 
