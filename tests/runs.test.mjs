@@ -793,6 +793,62 @@ test("version-5 runs require guidance state and bind selections to retained poli
   );
 });
 
+test("guidance policy versions cannot be rebound to a different hash", () => {
+  const root = repo();
+  const laneRef = `lane-${"9".repeat(32)}`;
+  const makePolicy = (sourceId, terminalOutcome, action, reasonCode) =>
+    createProvisionalGuidancePolicy({
+      policyVersion: "immutable-v1",
+      sources: [{
+        sourceType: "curated_label",
+        sourceId,
+        provenance: "supervisor",
+        lane: laneRef,
+        taskKind: "read",
+        terminalOutcome,
+        action,
+        reasonCode,
+        signals: []
+      }]
+    });
+  const first = makePolicy(
+    `label-${"7".repeat(32)}`, "worker_blocked", "clarify", "missing_context"
+  );
+  const replacement = makePolicy(
+    `label-${"8".repeat(32)}`, "verification_failed", "replan", "test_failure"
+  );
+  assert.notEqual(first.policyHash, replacement.policyHash);
+
+  createRun(root, { id: "run-guidance-version", lane: "api", objective: "Version guidance" });
+  replacePlan(root, "run-guidance-version", [
+    { id: "review", title: "Review", objective: "Review input", kind: "read" }
+  ]);
+  const enabled = configureRunGuidance(root, "run-guidance-version", {
+    mode: "provisional", laneRef, policy: first
+  });
+  const unchanged = configureRunGuidance(root, "run-guidance-version", {
+    mode: "provisional", laneRef, policy: first
+  });
+  assert.equal(unchanged.guidance.revision, enabled.guidance.revision);
+  assert.throws(
+    () => configureRunGuidance(root, "run-guidance-version", {
+      mode: "provisional", laneRef, policy: replacement
+    }),
+    /choose a new --policy-version/
+  );
+  assert.equal(loadRun(root, "run-guidance-version").guidance.policy.policyHash,
+    first.policyHash);
+
+  const file = runFile(root, "run-guidance-version");
+  const conflicting = JSON.parse(fs.readFileSync(file, "utf8"));
+  conflicting.guidance.policy = replacement;
+  fs.writeFileSync(file, `${JSON.stringify(conflicting, null, 2)}\n`);
+  assert.throws(
+    () => loadRun(root, "run-guidance-version"),
+    /choose a new --policy-version/
+  );
+});
+
 test("guidance off and rollback recover from a malformed active policy", () => {
   const root = repo();
   const laneRef = `lane-${"f".repeat(32)}`;

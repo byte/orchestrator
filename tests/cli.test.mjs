@@ -852,6 +852,22 @@ test("the run guidance CLI enables reviewed advice and supports disable and roll
   ]).stdout);
   assert.equal(emergencyDisabled.mode, "disabled");
 
+  runCli(root, [
+    "learn", "label", sample.sampleId, "--outcome", "worker_blocked",
+    "--action", "clarify", "--reason-code", "missing_context",
+    "--provenance", "user"
+  ]);
+  const reusedVersion = runCli(root, [
+    "run", "guidance", "run-guided", "--mode", "provisional"
+  ]);
+  assert.equal(reusedVersion.code, 1);
+  assert.match(reusedVersion.stderr, /choose a new --policy-version/);
+  const newlyVersioned = JSON.parse(runCli(root, [
+    "run", "guidance", "run-guided", "--mode", "provisional",
+    "--policy-version", "provisional-v2", "--json"
+  ]).stdout);
+  assert.equal(newlyVersioned.policy.policyVersion, "provisional-v2");
+
   assert.match(runCli(root, [
     "run", "guidance", "run-guided", "--mode", "off", "--rollback"
   ]).stderr, /cannot be combined/);

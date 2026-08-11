@@ -14,7 +14,6 @@ import {
   createProvisionalGuidancePolicy,
   deriveReviewedGuidanceSources,
   estimateBriefingTokens,
-  resolveGuidancePolicy,
   selectGuidance,
   validateGuidancePolicy,
   validateGuidanceSelection
@@ -300,7 +299,7 @@ test("selection uses lane, task kind, and exact failure signature", () => {
   })).items.length, 1);
 });
 
-test("character, token, and item budgets bound the exact rendered briefing", () => {
+test("character, token, and item budgets truncate the priority-ordered briefing", () => {
   const built = policy();
   const byCharacters = selectGuidance(built, context(), {
     maxCharacters: 20,
@@ -330,12 +329,7 @@ test("character, token, and item budgets bound the exact rendered briefing", () 
 });
 
 test("the complete disable path restores byte-empty briefing behavior", () => {
-  const disabled = resolveGuidancePolicy(
-    [{ corrupt: "policy must not block emergency disable" }],
-    { enabled: false, activePolicyVersion: null, rollbackPolicyVersion: null }
-  );
-  assert.equal(disabled, null);
-  assert.deepEqual(selectGuidance(disabled, null), {
+  assert.deepEqual(selectGuidance(null, null), {
     schemaVersion: 1,
     enabled: false,
     policyVersion: null,
@@ -365,42 +359,6 @@ test("an enabled policy with no prior failure stays enabled but injects nothing"
     truncated: false,
     budget: DEFAULT_GUIDANCE_BUDGET
   });
-});
-
-test("an explicit rollback selects an earlier exact policy version", () => {
-  const oldPolicy = policy("guidance-v1");
-  const currentPolicy = policy("guidance-v2", [source({
-    terminalOutcome: "policy_refused",
-    action: "refuse",
-    reasonCode: "policy_boundary",
-    signals: []
-  })]);
-  const corruptCurrent = clone(currentPolicy);
-  corruptCurrent.entries[0].text = "corrupt active policy";
-  assert.equal(
-    resolveGuidancePolicy([corruptCurrent, oldPolicy], {
-      enabled: true,
-      activePolicyVersion: "guidance-v2",
-      rollbackPolicyVersion: "guidance-v1"
-    }).policyVersion,
-    "guidance-v1"
-  );
-  assert.equal(
-    resolveGuidancePolicy([oldPolicy, currentPolicy], {
-      enabled: true,
-      activePolicyVersion: "guidance-v2",
-      rollbackPolicyVersion: null
-    }).policyVersion,
-    "guidance-v2"
-  );
-  assert.throws(
-    () => resolveGuidancePolicy([oldPolicy, corruptCurrent], {
-      enabled: true,
-      activePolicyVersion: "guidance-v2",
-      rollbackPolicyVersion: null
-    }),
-    /canonical reviewed action behavior/
-  );
 });
 
 test("only supervisor/user-reviewed labels and structured outcomes are accepted", () => {
@@ -560,22 +518,6 @@ test("invalid selectors, controls, versions, and budgets fail closed", () => {
   assert.throws(
     () => selectGuidance(policy(), context(), { maxTokens: -1 }),
     /non-negative integer/
-  );
-  assert.throws(
-    () => resolveGuidancePolicy([policy()], {
-      enabled: true,
-      activePolicyVersion: "missing-v1",
-      rollbackPolicyVersion: null
-    }),
-    /is unavailable/
-  );
-  assert.throws(
-    () => resolveGuidancePolicy([policy(), policy()], {
-      enabled: true,
-      activePolicyVersion: "guidance-v1",
-      rollbackPolicyVersion: null
-    }),
-    /Duplicate guidance policy version/
   );
 });
 

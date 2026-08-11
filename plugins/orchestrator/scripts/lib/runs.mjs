@@ -127,11 +127,29 @@ function validateGuidanceSnapshot(snapshot, label) {
   return snapshot;
 }
 
+function assertUniqueGuidancePolicyVersions(policies, label) {
+  const hashesByVersion = new Map();
+  for (const policy of policies) {
+    if (!policy) {
+      continue;
+    }
+    const priorHash = hashesByVersion.get(policy.policyVersion);
+    if (priorHash && priorHash !== policy.policyHash) {
+      throw new Error(
+        `${label} reuses guidance policy version "${policy.policyVersion}" with a ` +
+        "different policy hash; choose a new --policy-version."
+      );
+    }
+    hashesByVersion.set(policy.policyVersion, policy.policyHash);
+  }
+}
+
 function validateRunGuidance(run, filePath) {
   if (Number(run.version ?? 0) >= 5 && run.guidance === undefined) {
     throw new Error(`${filePath} is missing required version-5 guidance state.`);
   }
   const policies = [];
+  const versionedPolicies = [];
   if (run.guidance !== undefined) {
     const config = run.guidance;
     if (!config || typeof config !== "object" || Array.isArray(config)) {
@@ -148,8 +166,14 @@ function validateRunGuidance(run, filePath) {
       throw new Error(`${filePath} contains invalid guidance metadata.`);
     }
     validateGuidanceSnapshot(guidanceSnapshot(config), "Run guidance");
+    if (config.policy) {
+      versionedPolicies.push(config.policy);
+    }
     for (const snapshot of config.history) {
       validateGuidanceSnapshot(snapshot, "Run guidance history");
+      if (snapshot.policy) {
+        versionedPolicies.push(snapshot.policy);
+      }
     }
     const policyHashes = new Set();
     for (const policy of config.policies) {
@@ -159,10 +183,12 @@ function validateRunGuidance(run, filePath) {
       }
       policyHashes.add(policy.policyHash);
       policies.push(policy);
+      versionedPolicies.push(policy);
     }
     if (config.policy && !policyHashes.has(config.policy.policyHash)) {
       policies.push(config.policy);
     }
+    assertUniqueGuidancePolicyVersions(versionedPolicies, filePath);
   }
   for (const task of Object.values(run.tasks ?? {})) {
     if (task.guidanceSelection !== undefined && task.guidanceSelection !== null) {
@@ -212,6 +238,7 @@ function validGuidanceRecoveryParts(config) {
 
   const policies = [];
   const seen = new Set();
+  const hashesByVersion = new Map();
   const candidates = [
     config?.policy,
     ...(Array.isArray(config?.policies) ? config.policies : []),
@@ -226,12 +253,21 @@ function validGuidanceRecoveryParts(config) {
     } catch {
       continue;
     }
+    const priorHash = hashesByVersion.get(policy.policyVersion);
+    if (priorHash && priorHash !== policy.policyHash) {
+      continue;
+    }
+    hashesByVersion.set(policy.policyVersion, policy.policyHash);
     if (!seen.has(policy.policyHash)) {
       seen.add(policy.policyHash);
       policies.push(structuredClone(policy));
     }
   }
-  return { history, policies };
+  const compatibleHistory = history.filter((snapshot) =>
+    !snapshot.policy || hashesByVersion.get(snapshot.policy.policyVersion) ===
+      snapshot.policy.policyHash
+  );
+  return { history: compatibleHistory, policies };
 }
 
 function requireRetainedSelectionPolicies(run, policies) {
@@ -1762,6 +1798,11 @@ export function configureRunGuidance(
         history.push(guidanceSnapshot(current));
       }
     }
+    assertUniqueGuidancePolicyVersions([
+      ...policies,
+      ...history.map((snapshot) => snapshot.policy),
+      target.policy
+    ], `Run "${id}"`);
     run.guidance = {
       schemaVersion: GUIDANCE_SCHEMA_VERSION,
       ...structuredClone(target),

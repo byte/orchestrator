@@ -268,47 +268,6 @@ export function validateGuidancePolicy(policy) {
 }
 
 /**
- * Resolve the active version, an explicit rollback target, or a full kill
- * switch. Disabled resolution deliberately does not load or validate policy
- * bodies, so a malformed policy cannot prevent emergency rollback to the
- * original briefing behavior.
- */
-export function resolveGuidancePolicy(policies, controls) {
-  assertExactKeys(
-    controls,
-    ["enabled", "activePolicyVersion", "rollbackPolicyVersion"],
-    "Guidance controls"
-  );
-  if (typeof controls.enabled !== "boolean") {
-    throw new Error("Guidance controls enabled must be boolean.");
-  }
-  if (!controls.enabled) {
-    return null;
-  }
-  if (!Array.isArray(policies)) {
-    throw new Error("Guidance policies must be an array.");
-  }
-  assertPolicyVersion(controls.activePolicyVersion);
-  if (controls.rollbackPolicyVersion !== null) {
-    assertPolicyVersion(controls.rollbackPolicyVersion);
-  }
-
-  const selectedVersion = controls.rollbackPolicyVersion ?? controls.activePolicyVersion;
-  // Validate the selected version rather than every stored version. This lets
-  // an operator roll back from a malformed active policy to a known-good one.
-  const matches = policies.filter((policy) =>
-    isPlainObject(policy) && policy.policyVersion === selectedVersion
-  );
-  if (matches.length === 0) {
-    throw new Error(`Guidance policy version ${selectedVersion} is unavailable.`);
-  }
-  if (matches.length > 1) {
-    throw new Error(`Duplicate guidance policy version ${selectedVersion}.`);
-  }
-  return validateGuidancePolicy(matches[0]);
-}
-
-/**
  * Select the most specific applicable provisional item and render the exact
  * bounded block suitable for briefing integration. Passing a null policy is
  * the complete disable path and yields byte-empty briefing text.
@@ -365,7 +324,10 @@ export function selectGuidance(policy, context, budget = {}) {
     if (candidateBriefing.length > limits.maxCharacters ||
         estimateBriefingTokens(candidateBriefing) > limits.maxTokens) {
       truncated = true;
-      continue;
+      // Candidates are priority-ordered by selector specificity. Do not let a
+      // later, lower-priority item leapfrog one that exhausted the budget if
+      // the selector vocabulary ever expands beyond today's single action.
+      break;
     }
     items.push(entry);
     lines.push(line);
