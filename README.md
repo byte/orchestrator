@@ -10,8 +10,8 @@ compaction, interruption, or a new Claude Code session.
 
 The supervisor is whichever Claude model owns the Claude Code session — Claude Opus and Claude
 Fable are both supported. Nothing in the plugin selects or switches the supervising model; run
-`/orch:run` from the session whose model you want managing the pool. Only the worker model is
-selected by the plugin; every resolved worker route is pinned to its attempt.
+`/orchestrator:run` from the session whose model you want managing the pool. Only the worker
+model is selected by the plugin; every resolved worker route is pinned to its attempt.
 
 The important boundary is simple: Codex workers produce scoped work and evidence; Claude decides
 what should happen, what is acceptable, what gets integrated, and when the whole run is done.
@@ -47,8 +47,9 @@ Workers use the account already authenticated in Codex CLI. The plugin does not 
 OpenAI API key, change your Codex authentication, or grant model access; the selected model must
 be available to that account.
 
-The official `openai/codex-plugin-cc` Claude bridge is optional. Pooled `/orch:run` execution
-invokes Codex CLI directly. The bridge is needed only for the legacy `/orch:do` command.
+The official `openai/codex-plugin-cc` Claude bridge is optional. Pooled `/orchestrator:run`
+execution invokes Codex CLI directly. The bridge is needed only for the legacy
+`/orchestrator:do` command.
 
 ## Install
 
@@ -60,7 +61,7 @@ In Claude Code:
 /plugin marketplace add byte/orchestrator
 /plugin install orchestrator@orchestrator
 /reload-plugins
-/orch:init
+/orchestrator:init
 ```
 
 This installs whatever is on the marketplace repository's default branch, which is not necessarily
@@ -75,11 +76,11 @@ to develop the plugin itself:
 /plugin marketplace add /absolute/path/to/orchestrator
 /plugin install orchestrator@orchestrator
 /reload-plugins
-/orch:init
+/orchestrator:init
 ```
 
-The path must be the repository root — the directory holding `.claude-plugin/marketplace.json`, not
-`plugins/orchestrator`. Claude Code records it as a `directory` marketplace source.
+The path must be the repository root — the directory holding `.claude-plugin/marketplace.json`,
+not `plugins/orchestrator`. Claude Code records it as a `directory` marketplace source.
 
 Installing **copies** the plugin into `~/.claude/plugins/cache/orchestrator/orchestrator/<version>`.
 The install is a snapshot, not a live link to the checkout, so editing files in the repository does
@@ -104,12 +105,12 @@ before assuming a fix is live.
 
 ### Verify
 
-`/orch:init` creates the repository state and reports exact remedies for missing Codex CLI,
+`/orchestrator:init` creates the repository state and reports exact remedies for missing Codex CLI,
 authentication, or Git prerequisites. Run it inside the repository you want orchestrated, not
 inside this plugin's own checkout.
 
-If `/orch:*` commands do not appear after installing, run `/reload-plugins`, then confirm the
-marketplace and plugin are both registered:
+If `/orchestrator:*` commands do not appear after installing, run `/reload-plugins`, then confirm
+the marketplace and plugin are both registered:
 
 ```bash
 cat ~/.claude/plugins/known_marketplaces.json
@@ -117,32 +118,41 @@ cat ~/.claude/plugins/known_marketplaces.json
 
 ## Quick start
 
-Create a lane with a real write boundary and definition of done:
+Tell it what you want done:
 
 ```text
-/orch:lanes add api \
+/orchestrator:run add cursor pagination to the users API
+```
+
+That is the whole interface. Claude reads the repository, works out which subsystem the objective
+touches, and proposes a lane — the write boundary, standing constraints, and definition of
+done — for you to confirm. You do not have to define one first.
+
+From there Claude proposes a dependency-aware plan, records a checkpoint capturing the reasoning
+and model-routing choices behind it, and asks for confirmation when new authority is needed.
+Independent ready tasks launch into separate worktrees. The supervisor remains responsive, polls
+their durable handles, reviews their structured evidence, integrates passing write tasks, and
+replans or retries when evidence invalidates the current route.
+
+Model and effort are automatic by default. During planning, Fable or Opus must assign every task
+an exact `model`, `effort`, and concise `routingReason`: Sol for the hardest open-ended work,
+Terra for balanced general work, and Luna for clear high-volume work.
+The runtime rejects an unresolved task instead of silently falling back to Sol.
+
+### When you want exact control
+
+Everything the conversation infers can be stated outright. Name a lane, pin the pool, or define the
+write boundary yourself:
+
+```text
+/orchestrator:lanes add api \
   --scope 'src/api/**' \
   --scope 'tests/api/**' \
   --constraint 'No new production dependencies' \
   --done 'API tests and the full repository test suite pass'
+
+/orchestrator:run api --max-workers 3 add cursor pagination to the users API
 ```
-
-Give the supervisor an outcome:
-
-```text
-/orch:run api --max-workers 3 add cursor pagination to the users API
-```
-
-Claude inspects the repository, proposes a dependency-aware plan, records a checkpoint capturing
-the reasoning and model-routing choices behind it, and asks for confirmation when new authority is
-needed. Independent ready tasks launch into separate worktrees. The supervisor remains responsive,
-polls their durable handles, reviews their structured evidence, integrates passing write tasks,
-and replans or retries when evidence invalidates the current route.
-
-Model and effort are automatic by default. During planning, Fable or Opus must assign every task an
-exact `model`, `effort`, and concise `routingReason`: Sol for the hardest open-ended work, Terra for
-balanced general work, and Luna for clear high-volume work. The runtime rejects an unresolved task
-instead of silently falling back to Sol.
 
 Use `--model sol|terra|luna` only when you deliberately want to pin the entire pool to one model.
 Use `--effort <level>` only when you want to pin effort across the run. A conflicting task route is
@@ -152,7 +162,7 @@ silently change them.
 Resume the same manager after interruption or compaction:
 
 ```text
-/orch:resume <run-id>
+/orchestrator:resume <run-id>
 ```
 
 This polls workers first and reconstructs the supervisor briefing from disk. It does not create a
@@ -183,13 +193,13 @@ See [Architecture and recovery](docs/architecture.md) for the state machine and 
 
 | Command | Purpose |
 | --- | --- |
-| `/orch:init` | Create state and preflight Codex CLI, auth, and Git |
-| `/orch:lanes` | Define named scope, constraints, and lane-level done criteria |
-| `/orch:run` | Plan and manage a new Claude-supervised routed GPT-5.6 pool |
-| `/orch:resume` | Recover and continue an existing durable run |
-| `/orch:ledger` | Show or add stable project facts carried into future tasks |
-| `/orch:do` | Legacy single-task dispatch through the optional Claude Codex bridge |
-| `/orch:accept` | Legacy post-dispatch Git/result cross-check for `/orch:do` |
+| `/orchestrator:init` | Create state and preflight Codex CLI, auth, and Git |
+| `/orchestrator:lanes` | Define named scope, constraints, and lane-level done criteria |
+| `/orchestrator:run` | Plan and manage a new Claude-supervised routed GPT-5.6 pool |
+| `/orchestrator:resume` | Recover and continue an existing durable run |
+| `/orchestrator:ledger` | Show or add stable project facts carried into future tasks |
+| `/orchestrator:do` | Legacy single-task dispatch through the optional Claude Codex bridge |
+| `/orchestrator:accept` | Legacy post-dispatch Git/result cross-check for `/orchestrator:do` |
 
 The lower-level CLI is available to command definitions and operators:
 
@@ -266,7 +276,8 @@ State is split by portability:
 ```
 
 The ledger is intentionally small and stable. Per-run detail stays local because process IDs,
-worktree paths, and Codex threads are meaningful only on the machine that owns them. `/orch:resume`
+worktree paths, and Codex threads are meaningful only on the machine that owns them.
+`/orchestrator:resume`
 combines the run record, latest checkpoint, worker evidence, integration history, lane definition,
 and ledger into the supervisor's reconstructed context.
 
@@ -302,7 +313,7 @@ derive a purged sample again until the raw run itself is removed through a separ
 
 ## Legacy single-task mode
 
-`/orch:do` remains for small, one-off tasks. It compiles a lane briefing, calls the optional
+`/orchestrator:do` remains for small, one-off tasks. It compiles a lane briefing, calls the optional
 `codex:codex-rescue` bridge, stores a thread pointer, and checks the reported files against Git.
 It does not provide the pool, isolated integration, durable run DAG, or final supervisor gate.
 

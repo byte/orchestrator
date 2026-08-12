@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.5.1
+
+- Fixed a defect that made every 0.5.0 worker launch fail. `blocker_code` was
+  declared in the worker result schema but omitted from `required`, which
+  structured outputs reject outright, so workers exited before reading their
+  briefing regardless of task, model, or effort. The field is now nullable and
+  required, which satisfies the API while keeping the field optional in
+  practice: a worker with nothing to report sends null, and the blocked-attempt
+  path continues to fold that into `other`.
+- Added regression tests asserting that every declared property of the worker
+  result schema appears in `required`, that nested object schemas disallow
+  additional properties, and that an optional field stays expressible as null.
+- Surfaced API-level rejections in the recorded failure. Codex reports them as
+  JSON events on stdout rather than stderr, so a refused request previously left
+  an empty stderr log and was recorded only as `Codex exited 1`, forcing whoever
+  diagnosed it to read `events.jsonl` by hand. Worker collection now falls back
+  to the event stream and records the reported message.
+- Corrected every documented command invocation from `/orch:` to
+  `/orchestrator:`. Claude Code namespaces plugin commands by plugin name, so
+  the previously documented prefix never resolved. This affects the README,
+  command and skill docs, architecture notes, and the runtime's own remediation
+  messages.
+- Reworked the entry path so a run starts from a plain sentence. When no lane
+  fits an objective, `/orchestrator:run` now derives one from the repository,
+  proposes it, and confirms once, instead of refusing until the user hand-writes
+  a lane definition. Explicit lanes, pins, and flags remain available for exact
+  control. Pool flags now parse independently of the objective text, so a
+  present flag no longer makes the first word of a plain-language request a
+  lane name.
+- Documented installing from a local checkout alongside the GitHub path,
+  including the repository-root marketplace requirement, the versioned install
+  cache that makes an install a snapshot rather than a live link, the refresh
+  and reinstall cycle after editing plugin sources, and how to check the
+  installed version against the checkout.
+
 ## 0.5.0
 
 - Added versioned terminal attempt outcomes with separate action, reason,
@@ -28,11 +63,6 @@
   opportunities, and credible holdout coverage; N-best implementation
   experiments remain out of scope and external training remains separately
   authorized.
-- Documented installing from a local checkout alongside the GitHub path,
-  including the repository-root marketplace requirement, the versioned install
-  cache that makes an install a snapshot rather than a live link, the refresh
-  and reinstall cycle after editing plugin sources, and how to check the
-  installed version against the checkout.
 
 ## 0.4.0
 
@@ -65,7 +95,7 @@
   it; staleness prompts, a new plan revision blocks
 - Worker briefings now carry each completed dependency's decisions, assumptions, changed files,
   and supervisor-verified evidence instead of a single summary line
-- `/orch:run` documents the exact `run checkpoint` invocation at plan approval and wave
+- `/orchestrator:run` documents the exact `run checkpoint` invocation at plan approval and wave
   boundaries
 
 `orch run ready --json` now returns `{ tasks, checkpoint }` rather than a bare task array.
@@ -74,7 +104,7 @@
 
 A Claude supervisor can now manage a durable pool of Codex workers inside Claude Code.
 
-- `/orch:run` plans a task DAG, confirms it, and manages bounded workers pinned to
+- `/orchestrator:run` plans a task DAG, confirms it, and manages bounded workers pinned to
   `gpt-5.6-sol`
 - Detached `codex exec` processes use saved reasoning effort, least-privilege sandboxes,
   required JSON output, durable process/thread handles, and configurable pool capacity
@@ -82,8 +112,8 @@ A Claude supervisor can now manage a durable pool of Codex workers inside Claude
   exact file declarations, in-scope changes, and an unchanged supervisor branch
 - Worker reports remain untrusted evidence until the supervisor verifies read tasks or
   integrates passing write tasks
-- `/orch:resume` polls active workers and reconstructs the supervisor's full managerial context
-  from run state, checkpoints, evidence, integration history, lanes, and the ledger
+- `/orchestrator:resume` polls active workers and reconstructs the supervisor's full managerial
+  context from run state, checkpoints, evidence, integration history, lanes, and the ledger
 - Completed task graphs enter `finalizing`; a separate clean, branch-consistent combined
   verification record is required before a run becomes `completed`
 - Explicit retry, cancellation, replanning, conflict abort, branch-drift refusal, and safe
@@ -92,19 +122,19 @@ A Claude supervisor can now manage a durable pool of Codex workers inside Claude
   without consuming model quota
 
 The official Claude Codex bridge is now optional for pooled execution and remains supported
-for legacy `/orch:do` dispatch.
+for legacy `/orchestrator:do` dispatch.
 
 ## 0.1.0
 
 Initial release.
 
-- `/orch:init` — set up `.orchestrator/` and preflight the Codex toolchain
-- `/orch:lanes` — named workstreams with scope patterns, standing constraints, and a
+- `/orchestrator:init` — set up `.orchestrator/` and preflight the Codex toolchain
+- `/orchestrator:lanes` — named workstreams with scope patterns, standing constraints, and a
   definition of done
-- `/orch:do` — compile a briefing, delegate to Codex via `/codex:rescue`, bind the returned
-  thread, and check the result
-- `/orch:ledger` — durable project facts carried into every briefing
-- `/orch:accept` — re-check a lane's working tree against what Codex reported
+- `/orchestrator:do` — compile a briefing, delegate to Codex via `/codex:rescue`, bind the
+  returned thread, and check the result
+- `/orchestrator:ledger` — durable project facts carried into every briefing
+- `/orchestrator:accept` — re-check a lane's working tree against what Codex reported
 
 Lane definitions and the ledger are committed; thread bindings and pre-dispatch snapshots
 stay machine-local under `.orchestrator/local/`.
