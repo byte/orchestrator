@@ -275,7 +275,7 @@ memory.
 | Dirty worker checkout | Inspection and cleanup refused | Ask worker/reviewer to resolve or preserve for diagnosis |
 | Cherry-pick conflict | Cherry-pick aborted | Replan integration order or create a bounded conflict task |
 | Supervisor branch drift | Launch/integration/finalization refused | Reconcile external commit deliberately |
-| Claude interruption | Workers and state remain on disk | `/orch:resume <run-id>` |
+| Claude interruption | Workers and state remain on disk | `/orchestrator:resume <run-id>` |
 | Plan revised without a checkpoint | Dispatch refused | Record a checkpoint for the new revision |
 | Automatic task omits model, effort, or routing reason | Plan refused | Supervisor classifies the task and saves an exact justified route |
 | Task conflicts with an explicit run pin | Plan refused | Honor the user override or create a separate run |

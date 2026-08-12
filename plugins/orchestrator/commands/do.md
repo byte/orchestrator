@@ -27,9 +27,9 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" brief <lane> --task "<task text>" 
 
 This also snapshots the working tree so step 5 can attribute changes to this run.
 
-If it fails because orchestrator is not initialized, tell the user to run `/orch:init` and stop.
+If it fails because orchestrator is not initialized, tell the user to run `/orchestrator:init` and stop.
 If it fails because the lane is unknown, show the known lanes and offer to create it with
-`/orch:lanes add`. Do not invent a lane silently.
+`/orchestrator:lanes add`. Do not invent a lane silently.
 
 **3. Enrich the briefing.** You are the supervisor and you have context the CLI cannot see:
 what the user just asked for, what was tried earlier this session, what you already know is
@@ -86,4 +86,4 @@ noise is expensive.
   quietly substitute your own implementation.
 - Present Codex's summary substantially as written. You may lead with the acceptance report,
   but do not rewrite Codex's findings into your own words.
-- If preflight is failing, run `/orch:init` guidance rather than improvising an auth flow.
+- If preflight is failing, run `/orchestrator:init` guidance rather than improvising an auth flow.

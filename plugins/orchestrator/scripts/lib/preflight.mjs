@@ -98,7 +98,7 @@ function checkInitialized(cwd) {
     label: "Orchestrator initialized",
     ok,
     detail: ok ? ".orchestrator/ present" : ".orchestrator/ not created yet",
-    remedy: "/orch:init"
+    remedy: "/orchestrator:init"
   };
 }
 
@@ -112,7 +112,7 @@ export function preflight(cwd = process.cwd()) {
   ];
 
   // Native pool dispatch uses Codex CLI directly. The upstream Claude bridge is
-  // optional and retained only for the legacy single-task /orch:do workflow.
+  // optional and retained only for the legacy single-task /orchestrator:do workflow.
   const blocking = checks.filter(
     (check) => !check.ok && check.id !== "initialized" && !check.optional
   );

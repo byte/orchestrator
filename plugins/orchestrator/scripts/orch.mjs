@@ -124,7 +124,7 @@ function emitJson(payload) {
 
 function requireInitialized(cwd) {
   if (!isInitialized(cwd)) {
-    throw new Error("Orchestrator is not initialized in this repository. Run /orch:init first.");
+    throw new Error("Orchestrator is not initialized in this repository. Run /orchestrator:init first.");
   }
 }
 

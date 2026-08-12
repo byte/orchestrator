@@ -4,7 +4,7 @@ argument-hint: "<lane> [--result-file <path>]"
 allowed-tools: Bash(node:*)
 ---
 
-Re-run the acceptance check for a lane. `/orch:do` does this automatically; use this command
+Re-run the acceptance check for a lane. `/orchestrator:do` does this automatically; use this command
 to re-check after further edits, or to check a run that was dispatched in the background.
 
 Raw user request:

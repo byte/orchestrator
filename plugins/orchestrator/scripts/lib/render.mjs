@@ -17,7 +17,7 @@ export function renderPreflight(report) {
 
 export function renderLanes(lanes) {
   if (!lanes.length) {
-    return "No lanes yet. Create one with `/orch:lanes add <name> --scope <glob>`.";
+    return "No lanes yet. Create one with `/orchestrator:lanes add <name> --scope <glob>`.";
   }
   const lines = ["# Lanes", ""];
   for (const lane of lanes) {

@@ -64,7 +64,7 @@ recollection can therefore recreate purged derived data.
 
 ## Legacy single-task bridge
 
-`/orch:do` still composes with `codex:codex-rescue`. For that compatibility path:
+`/orchestrator:do` still composes with `codex:codex-rescue`. For that compatibility path:
 
 - Always `brief` before dispatching so `accept` has a pre-dispatch snapshot.
 - The upstream plugin's `--resume` is session-relative, not lane-addressed. Default to `--fresh`.

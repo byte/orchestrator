@@ -401,7 +401,7 @@ configuration rather than hard-coded identities.
   - individual votes remain stored after aggregation
 - If a multi-judge panel is later enabled: launch judges blinded and in
   parallel, ensuring they cannot see one another's results.
-- Persist incomplete judge runs so `/orch:resume` can continue safely.
+- Persist incomplete judge runs so `/orchestrator:resume` can continue safely.
 - Add a supervisor adjudication queue.
 - Add CLI commands:
 
