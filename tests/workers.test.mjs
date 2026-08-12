@@ -15,6 +15,7 @@ import {
   verifyTask
 } from "../plugins/orchestrator/scripts/lib/runs.mjs";
 import {
+  WORKER_RESULT_SCHEMA,
   launchTaskWorker,
   pollRunWorkers,
   stopTaskWorker
@@ -385,4 +386,75 @@ test("detached workers can be stopped without losing their durable handle", asyn
   assert.equal(update.status, "cancelled");
   const cancelled = loadRun(root, "run-stop").tasks.build.attempts.at(-1);
   assert.equal(cancelled.outcome.terminalOutcome, "cancelled");
+});
+
+test("the worker result schema satisfies structured-output requirements", () => {
+  // OpenAI structured outputs reject any object schema whose `required` array
+  // omits a declared property key. A worker that fails this check exits before
+  // reading its briefing, so every run launch breaks identically.
+  const visit = (schema, pointer) => {
+    if (!schema || typeof schema !== "object") {
+      return;
+    }
+    if (schema.type === "object" || schema.properties) {
+      const declared = Object.keys(schema.properties ?? {});
+      const required = schema.required ?? [];
+      assert.deepEqual(
+        declared.filter((key) => !required.includes(key)),
+        [],
+        `${pointer} declares properties missing from required`
+      );
+      assert.equal(
+        schema.additionalProperties,
+        false,
+        `${pointer} must set additionalProperties to false`
+      );
+      for (const [key, child] of Object.entries(schema.properties ?? {})) {
+        visit(child, `${pointer}/${key}`);
+      }
+    }
+    if (schema.items) {
+      visit(schema.items, `${pointer}/items`);
+    }
+  };
+  visit(WORKER_RESULT_SCHEMA, "#");
+});
+
+test("an optional worker field stays expressible as null", () => {
+  const blockerCode = WORKER_RESULT_SCHEMA.properties.blocker_code;
+  assert.ok(
+    blockerCode.type.includes("null"),
+    "blocker_code must accept null so a successful worker is not forced to invent a blocker"
+  );
+  assert.ok(blockerCode.enum.includes(null));
+  assert.ok(blockerCode.enum.includes("missing_context"));
+});
+
+test("an API rejection reported on stdout is surfaced as the failure reason", async () => {
+  // Codex writes API-level rejections to the event stream, not stderr. Without
+  // reading it back the supervisor records only "Codex exited 1" and the real
+  // cause has to be dug out of events.jsonl by hand.
+  const root = makeRepo();
+  after(() => cleanup(root));
+  const apiErrorFixture = path.join(
+    path.dirname(fileURLToPath(import.meta.url)),
+    "fixtures",
+    "fake-codex-api-error.mjs"
+  );
+  plan(root, "run-api-error");
+  checkpointPlan(root, "run-api-error");
+  launchTaskWorker(root, "run-api-error", "build", { constraints: [] }, {
+    codexCommand: [process.execPath, apiErrorFixture]
+  });
+  let update;
+  for (let index = 0; index < 100; index += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    update = pollRunWorkers(root, "run-api-error")[0];
+    if (update && !["running", "dispatching"].includes(update.status)) {
+      break;
+    }
+  }
+  assert.equal(update.status, "failed");
+  assert.match(update.error, /Invalid schema for response_format/);
+  assert.doesNotMatch(update.error, /^Codex exited/);
 });

@@ -38,8 +38,12 @@ export const WORKER_RESULT_SCHEMA = {
     decisions: { type: "array", items: { type: "string" } },
     assumptions: { type: "array", items: { type: "string" } },
     blockers: { type: "array", items: { type: "string" } },
+    // Structured outputs require every declared property to appear in
+    // `required`, so an optional field must be expressed as a nullable type
+    // rather than an absent key. A worker with nothing to report sends null,
+    // which the blocked-attempt path already folds into "other".
     blocker_code: {
-      type: "string",
+      type: ["string", "null"],
       enum: [
         "missing_context",
         "scope_required",
@@ -47,7 +51,8 @@ export const WORKER_RESULT_SCHEMA = {
         "missing_authority",
         "policy_boundary",
         "model_unavailable",
-        "other"
+        "other",
+        null
       ]
     },
     confidence: { type: "string", enum: ["high", "medium", "low"] }
@@ -59,10 +64,49 @@ export const WORKER_RESULT_SCHEMA = {
     "decisions",
     "assumptions",
     "blockers",
+    "blocker_code",
     "confidence"
   ],
   additionalProperties: false
 };
+
+/**
+ * Codex reports API-level rejections as JSON events on stdout, not on stderr.
+ * A request the API refuses outright — an invalid output schema, an unavailable
+ * model — therefore leaves an empty stderr log and a bare non-zero exit, so the
+ * supervisor would otherwise record "Codex exited 1" and lose the only
+ * description of what actually went wrong.
+ */
+function eventStreamError(filePath) {
+  const text = tail(filePath);
+  if (!text) {
+    return "";
+  }
+  const messages = [];
+  // A truncated leading fragment simply fails to parse and is skipped.
+  for (const line of text.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("{")) {
+      continue;
+    }
+    let event;
+    try {
+      event = JSON.parse(trimmed);
+    } catch {
+      continue;
+    }
+    const isError = typeof event?.type === "string" && event.type.includes("error");
+    if (!isError && !event?.error) {
+      continue;
+    }
+    const detail = event?.error ?? event?.message ?? null;
+    const message = typeof detail === "string" ? detail : detail?.message;
+    if (typeof message === "string" && message.trim()) {
+      messages.push(message.trim());
+    }
+  }
+  return [...new Set(messages)].join(" | ");
+}
 
 function executionDir(cwd, runId, taskId, attemptId) {
   return path.join(cwd, ".orchestrator", "local", "runs", runId, "workers", taskId, attemptId);
@@ -208,7 +252,10 @@ export function pollRunWorkers(cwd, runId) {
       });
       continue;
     }
-    const error = status.error || tail(attempt.runner.errorFile) || `Codex exited ${status.exitCode}.`;
+    const error = status.error
+      || tail(attempt.runner.errorFile)
+      || eventStreamError(attempt.runner.outputFile)
+      || `Codex exited ${status.exitCode}.`;
     const missingResult = status.status === "completed";
     const failed = failTaskAttempt(cwd, runId, task.id, {
       attemptId: attempt.id,
