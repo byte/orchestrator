@@ -70,7 +70,7 @@ test("new runs default to enforced supervisor routing and start in planning", ()
   assert.equal(run.workerPolicy.model, null);
   assert.equal(run.workerPolicy.reasoningEffort, null);
   assert.equal(run.workerPolicy.routingMode, "auto");
-  assert.equal(run.workerPolicy.maxWorkers, 3);
+  assert.equal(run.workerPolicy.maxWorkers, 5);
   assert.equal(run.version, 6);
   assert.equal(run.guidance.mode, "disabled");
   assert.equal(run.guidance.revision, 0);

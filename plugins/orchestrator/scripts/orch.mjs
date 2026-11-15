@@ -51,6 +51,11 @@ import {
   stopTaskWorker
 } from "./lib/workers.mjs";
 import {
+  ROUTE_TABLE_MIN_ATTEMPTS,
+  renderRouteEvidence,
+  routeEvidence
+} from "./lib/routes.mjs";
+import {
   DEFAULT_WAIT_INTERVAL_SECONDS,
   DEFAULT_WAIT_TIMEOUT_SECONDS,
   waitForRunChange
@@ -82,6 +87,8 @@ Usage:
   orch learn export [--name <id>] [--run <id>]... [--outcome <value>]... [--sample <id>]... [--include-text <field>]... [--consent <supervisor|user>] [--acknowledge-sensitive-export] [--json]
   orch learn purge [--sample <id>]... [--run <id>]... [--task <id>]... [--attempt <id>]... [--expired|--all] [--json]
   orch run list [--json]
+  orch run routes [--lane <lane>] [--include-legacy] [--json]
+      per model and effort: attempts, first-attempt acceptance (rate only when n>=5), retries, median duration
   orch run create <lane> --objective <text> [--id <run-id>] [--max-workers <n>] [--model <auto|astra|sol|terra|luna>] [--effort <auto|level>] [--json]
   orch run show <run-id> [--json]
   orch run plan <run-id> --plan-file <path> [--json]
@@ -460,9 +467,36 @@ async function commandRunWait(cwd, runId, options) {
   process.exitCode = result.exitCode;
 }
 
+/**
+ * The route-evidence section for a run's own lane, or null while fewer than
+ * ROUTE_TABLE_MIN_ATTEMPTS attempts can be counted there.
+ */
+function laneRouteEvidence(cwd, run) {
+  const evidence = routeEvidence(cwd, { lane: run.lane });
+  return {
+    evidence,
+    text: evidence.attempts >= ROUTE_TABLE_MIN_ATTEMPTS ? renderRouteEvidence(evidence) : null
+  };
+}
+
 function commandRun(argv, cwd) {
   requireInitialized(cwd);
   const [action = "list", ...rest] = argv;
+
+  if (action === "routes") {
+    const { options, positionals } = parseArgs(rest, {
+      booleanOptions: ["json", "include-legacy"],
+      valueOptions: ["lane"]
+    });
+    if (positionals.length) {
+      throw new Error("`orch run routes` does not accept positional arguments; use --lane <lane>.");
+    }
+    const evidence = routeEvidence(cwd, {
+      lane: options.lane ? String(options.lane) : null,
+      includeLegacy: Boolean(options["include-legacy"])
+    });
+    return options.json ? emitJson(evidence) : emit(renderRouteEvidence(evidence));
+  }
 
   if (action === "list") {
     const { options } = parseArgs(rest, { booleanOptions: ["json"] });
@@ -592,7 +626,11 @@ function commandRun(argv, cwd) {
     const lane = requireLane(cwd, run.lane);
     const tasks = Array.isArray(payload) ? payload : payload.tasks;
     const updated = replacePlan(cwd, runId, tasks, { defaultScope: lane.scope });
-    return options.json ? emitJson(updated) : emit(renderRunSummary(updated));
+    if (options.json) {
+      return emitJson(updated);
+    }
+    const routes = laneRouteEvidence(cwd, updated).text;
+    return emit(routes ? `${routes}\n\n${renderRunSummary(updated)}` : renderRunSummary(updated));
   }
 
   if (action === "ready") {
@@ -618,7 +656,8 @@ function commandRun(argv, cwd) {
 
   if (action === "briefing") {
     const run = loadRun(cwd, runId);
-    return emit(renderSupervisorBriefing(cwd, run, requireLane(cwd, run.lane)).trimEnd());
+    const routes = laneRouteEvidence(cwd, run).text;
+    return emit(renderSupervisorBriefing(cwd, run, requireLane(cwd, run.lane), { routeEvidence: routes }).trimEnd());
   }
 
   if (action === "resume") {
@@ -626,10 +665,21 @@ function commandRun(argv, cwd) {
     const run = loadRun(cwd, runId);
     const recovery = recoveryReport(run);
     const substitutions = modelSubstitutionSummary(run);
-    const briefing = renderSupervisorBriefing(cwd, run, requireLane(cwd, run.lane)).trimEnd();
+    const routes = laneRouteEvidence(cwd, run);
+    const briefing = renderSupervisorBriefing(cwd, run, requireLane(cwd, run.lane), {
+      routeEvidence: routes.text
+    }).trimEnd();
     const substitutedThisPoll = updates.filter((update) => update.notice).map(renderPollUpdate);
     return options.json
-      ? emitJson({ updates, recovery, substitutions, run, briefing, checkpoint: checkpointStatus(run) })
+      ? emitJson({
+          updates,
+          recovery,
+          substitutions,
+          routes: routes.text ? routes.evidence : null,
+          run,
+          briefing,
+          checkpoint: checkpointStatus(run)
+        })
       : emit(`${substitutedThisPoll.length ? `${substitutedThisPoll.join("\n")}\n\n` : ""}${briefing}\n\n## Active worker recovery\n\n${recovery.length ? recovery.map((item) => `- ${item.taskId}: ${item.model} (${item.reasoningEffort})${item.substitution ? `, substituted for ${item.requestedModel}${item.substitution.pinned ? " (user pin overridden)" : ""}` : ""}${item.resumedFromAttemptId ? `, ${item.resumeFallback ? "fresh fallback of a warm retry of" : "warm retry resuming"} ${item.resumedFromAttemptId}` : ""}, pid ${item.runnerPid ?? "unknown"}, thread ${item.threadId ?? "pending"}, worktree ${item.worktreePath ?? "unavailable"}`).join("\n") : "- none"}`);
   }
 

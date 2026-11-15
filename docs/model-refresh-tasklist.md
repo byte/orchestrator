@@ -476,22 +476,66 @@ Independent of M2 and M3.
 Depends on: M1. Smaller than the gated shadow-routing work in the continual
 learning plan; this only shows the supervisor what already happened.
 
-- [ ] **M5.1** Add `run routes [--lane <lane>]`: per model and effort, the
+- [x] **M5.1** Add `run routes [--lane <lane>]`: per model and effort, the
   count of attempts, first-attempt acceptance rate, retries, and median
   duration, from local run state only.
-- [ ] **M5.2** Print the same table for the current lane at the top of
+- [x] **M5.2** Print the same table for the current lane at the top of
   `run plan` output and in the `run resume` briefing when at least five
   attempts exist.
-- [ ] **M5.3** Tell the supervisor in `run.md` section 3 to read it before
+- [x] **M5.3** Tell the supervisor in `run.md` section 3 to read it before
   routing and to cite it in `routingReason` when it changed a route.
-- [ ] **M5.4** Exclude legacy-slug attempts from the table by default so
+- [x] **M5.4** Exclude legacy-slug attempts from the table by default so
   GPT-5.6 history does not bias routes on the new roster.
-- [ ] **M5.5** Raise `DEFAULT_MAX_WORKERS` (`runs.mjs:31`) from 3 to 5, and
+- [x] **M5.5** Raise `DEFAULT_MAX_WORKERS` (`runs.mjs:31`) from 3 to 5, and
   replace "Prefer 3–5 substantial parallel tasks" with guidance to size tasks
   by write-surface independence.
-- [ ] **M5.6** Tests for the aggregation, the five-attempt threshold, and the
+- [x] **M5.6** Tests for the aggregation, the five-attempt threshold, and the
   legacy exclusion.
-- [ ] **M5 gate** `run routes` matches a hand count on a fixture of saved runs.
+- [x] **M5 gate** `run routes` matches a hand count on a fixture of saved runs.
+
+### Milestone 5 evidence
+
+- Built (2026-11-15): `orch run routes [--lane <lane>] [--include-legacy] [--json]` in
+  `scripts/lib/routes.mjs`, a read-only aggregation over `local/runs/<run-id>/run.json`. It writes
+  nothing, does not read the learning store, adds no dependency, and lists a run file it cannot
+  load as skipped instead of failing. Per actual model and effort: finished attempts, first-attempt
+  acceptance (`accepted/first` and a rate), retries, attempts that ran as a substitute, and median
+  duration with its sample size. Everything not counted is listed under "Not counted".
+- Counting: attempts are attributed to `attempt.model`, the model that ran. A launch Codex rejected
+  as model-unavailable (`modelUnavailable`) and a launch that failed before Codex started
+  (`launchFailed`) never reached a worker, so they count for neither model; rejections are listed
+  by the rejected slug. `needs_input` rounds are part of their attempt. Open (running or paused) and
+  cancelled attempts are not counted. "First attempt" is a task's first attempt that reached a
+  worker; later counted attempts, warm or cold, are retries. Attempts saved before outcome records
+  are classified from their status.
+- Small samples: a first-attempt rate is printed only when at least 5 first attempts back it
+  (`ROUTE_RATE_MIN_SAMPLE`); below that the cell shows the counts and `n<5, no rate`. Counts appear
+  beside every rate, and the median shows its `n`.
+- M5.2: `run plan` (text output, above the run summary), `run briefing`, and `run resume` (briefing
+  section and `routes` in `--json`) show the table for the run's lane once it has at least 5
+  counted attempts (`ROUTE_TABLE_MIN_ATTEMPTS`). `renderSupervisorBriefing` takes the rendered
+  table as an option, so `runs.mjs` still never reads other runs. `run plan --json` is unchanged.
+- M5.3: `run.md` section 3 tells the supervisor to run `run routes --lane <lane>` before routing,
+  explains the counting and the minimum, and to cite it in `routingReason` when it changed a route.
+  `docs/architecture.md` gained a "Route evidence" section.
+- M5.4: `gpt-5.6-sol` and `gpt-5.6-terra` attempts are excluded by default and counted with
+  `--include-legacy`.
+- M5.5: `DEFAULT_MAX_WORKERS` is 5. "Prefer 3–5 substantial parallel tasks" is replaced by sizing
+  tasks by write-surface independence without inventing tasks to fill the pool; section 2 states
+  the default of 5. Checked for other pool-of-3 assumptions: only `tests/runs.test.mjs` asserted the
+  default (now 5). The `--max-workers 3` examples in README and `run.md` are explicit user values,
+  the M4 gate's "three-worker wave" is a test scenario, and no help text names a default.
+- M5.6 and gate: `tests/routes.test.mjs` (9 tests). A fixture of three saved runs (two in lane
+  `api`, one version-5 on `gpt-5.6-sol`; one in lane `web` with an attempt that has no outcome
+  record) covers a warm retry with two answered input rounds, an astra launch rejected and
+  relaunched on sol, a launch failure, a cancelled first attempt, running and paused attempts, and
+  a malformed result; the CLI's JSON equals the hand count written in the test's comment. Also
+  covered: withheld and shown rates in the text table, legacy exclusion and `--include-legacy`, all
+  lanes, read-only behaviour with an unreadable run, and the five-attempt threshold for `run plan`,
+  `run briefing`, and `run resume` (four in the lane: hidden; a fifth in another lane: hidden; a
+  fifth in the lane: shown). One doc assertion added to `tests/commands.test.mjs`.
+- No state version bump: nothing new is persisted.
+- Full repository gate: `npm test` passed 203 tests with 0 failures on 2026-11-15.
 
 ## Milestone 6 — Release 0.6.0
 

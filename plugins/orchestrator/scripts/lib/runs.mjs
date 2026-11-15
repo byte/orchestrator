@@ -29,7 +29,7 @@ import {
 export const DEFAULT_WORKER_MODEL = null;
 export const DEFAULT_REASONING_EFFORT = null;
 export const DEFAULT_ROUTING_MODE = "auto";
-export const DEFAULT_MAX_WORKERS = 3;
+export const DEFAULT_MAX_WORKERS = 5;
 // Every effort below was accepted by every model in a real `codex exec` probe
 // against Codex CLI 0.169.0 on 2026-11-15; see docs/architecture.md.
 const ALL_REASONING_EFFORTS = Object.freeze(["low", "medium", "high", "xhigh", "max", "ultra"]);
@@ -3272,7 +3272,12 @@ function renderList(items) {
   return items.length ? items.map((item) => `- ${item}`).join("\n") : "- none";
 }
 
-export function renderSupervisorBriefing(cwd, run, lane) {
+/**
+ * `routeEvidence` is the already rendered route-evidence table for the run's lane
+ * (see `routes.mjs`), or null to leave the section out. The caller decides, so
+ * this module never reads other runs.
+ */
+export function renderSupervisorBriefing(cwd, run, lane, { routeEvidence = null } = {}) {
   const ledger = ledgerForBriefing(cwd);
   const checkpoint = checkpointStatus(run);
   const latest = checkpoint.latest;
@@ -3394,7 +3399,11 @@ ${run.objective}
 ## Model availability and substitutions
 
 ${substitutions.pinned ? "A user-pinned model was substituted. Tell the user which model actually ran before reporting any result.\n\n" : ""}${renderList(substitutions.lines)}
+${routeEvidence ? `
+${routeEvidence}
 
+Read this before routing pending work. It is history from this repository's saved runs, not a rule; cite it in \`routingReason\` when it changed a route.
+` : ""}
 ## Workers awaiting your answer
 
 ${waiting.length ? "These workers are paused, not finished; each holds its pool slot until answered. Grant scope inside the lane on your own authority; anything outside the lane needs the user first (--user-approved). Never grant a path another active task may write.\n\n" : ""}${renderList(waiting)}

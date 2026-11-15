@@ -148,3 +148,15 @@ test("the supervisor waits on a background run wait instead of polling in a loop
   assert.match(skill, /never by calling `run poll` in a loop/);
   assert.match(skill, /`0` changed, `2` timed out \(default 1800 s\), `3` no worker running or\s+paused, `4`/);
 });
+
+test("the run command routes from its own evidence and sizes waves by write surface", () => {
+  const command = fs.readFileSync(path.join(root, "plugins", "orchestrator", "commands", "run.md"), "utf8");
+  const plan = command.slice(command.indexOf("## 3. Plan"), command.indexOf("## 4. Dispatch a wave"));
+  assert.match(plan, /run routes --lane <lane>/);
+  assert.match(plan, /no rate is printed below 5 samples/);
+  assert.match(plan, /cite it in\s+`routingReason`/);
+  assert.match(plan, /--include-legacy/);
+  assert.match(plan, /Size tasks by write-surface independence/);
+  assert.doesNotMatch(command, /Prefer 3–5/);
+  assert.match(command, /the default pool is 5 concurrent\s+workers/);
+});

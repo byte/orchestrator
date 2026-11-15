@@ -59,7 +59,8 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" run create <lane> \
   --json
 ```
 
-Append `--model <astra|sol|terra|luna>` or `--effort <level>` only when the user explicitly
+Pass `--max-workers` only when the user gave a worker count; the default pool is 5 concurrent
+workers. Append `--model <astra|sol|terra|luna>` or `--effort <level>` only when the user explicitly
 supplied that override. Omitted dimensions remain supervisor-routed. Keep the returned run id.
 
 ## 3. Plan
@@ -82,6 +83,24 @@ Produce a small task DAG. Each task must have:
   dimension is supervisor-routed
 - `timeoutMinutes` (optional): the task's wall-clock limit when the tier default in section 5 does
   not fit; exceeding it is reported, never enforced
+
+Before routing, read what each route actually did in this repository:
+
+```bash
+node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" run routes --lane <lane>
+```
+
+It is a read-only table over local run state: per actual model and effort, the finished attempts
+that reached a worker, first-attempt acceptance, retries, and median duration. A substituted
+attempt counts for the model that ran; a launch Codex rejected as unavailable counts for neither
+model; answered input requests are part of their attempt; attempts on the retired `gpt-5.6-sol` and
+`gpt-5.6-terra` slugs are left out unless you pass `--include-legacy`. Every rate sits next to its counts,
+and no rate is printed below 5 samples, so a cell with two attempts is an anecdote, not a trend.
+`run plan`, `run briefing`, and `run resume` print the same table for the run's lane once it holds
+at least 5 counted attempts. Treat it as evidence, not a rule: it says nothing about tasks unlike
+the ones that produced it. When it changed a route you would otherwise have chosen, cite it in
+`routingReason` (for example, "terra/medium accepted 1/6 first attempts in this lane; routed to
+sol").
 
 Route by the demands of each bounded task:
 
@@ -140,9 +159,13 @@ briefing. A substituted user pin is flagged as such; tell the user which model a
 rung is left, the task fails with a `model_unavailable` outcome for you to escalate. Runs saved by
 0.5.x that route to `gpt-5.6-sol` or `gpt-5.6-terra` keep those exact slugs and are not substituted.
 
-Prefer 3–5 substantial parallel tasks over many tiny tasks. Separate implementation from
-independent verification when risk warrants it. Two tasks must not own the same write surface in
-the same wave.
+Size tasks by write-surface independence, not to a target count. Split work into separate tasks
+where the pieces own disjoint paths and can be verified on their own; keep it as one task where the
+pieces would touch the same files or interfaces, because two tasks must not own the same write
+surface in the same wave. Prefer substantial tasks over many tiny ones: each task costs a briefing,
+a worktree, and a review. A wave can run as many independent tasks as the pool allows (5 by
+default); do not invent parallel tasks to fill it. Separate implementation from independent
+verification when risk warrants it.
 
 Write `{"tasks": [...]}` to a temporary JSON file outside the tracked tree, then persist it:
 

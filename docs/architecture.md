@@ -531,6 +531,34 @@ a completed task with a different limit is not a redefinition.
 No state version bump: `task.timeoutMinutes` and `attempt.overLimit` are optional, and runs saved
 by versions 3 to 5 wait on their tier defaults (tested with a version-5 run on `gpt-5.6-sol`).
 
+## Route evidence
+
+`orch run routes [--lane <lane>] [--include-legacy] [--json]` (`scripts/lib/routes.mjs`) is a
+read-only aggregation over `local/runs/<run-id>/run.json`. It writes nothing, never reads the
+learning store, and a run file it cannot load is listed as skipped rather than failing the command.
+Per actual model and effort it reports finished attempts, first-attempt acceptance, retries, the
+number that ran as a substitute, and the median duration (`startedAt`, else `claimedAt`, to
+`finishedAt`). The counting rules:
+
+- An attempt is attributed to `attempt.model`, the model it ran on, never `requestedModel`.
+- An attempt with `modelUnavailable` (Codex rejected the launch) or `launchFailed` (Codex never
+  started) did not reach a worker. It is not an attempt for either model; rejections are listed
+  separately by the rejected model.
+- `needs_input` rounds belong to their attempt, so they never add attempts. Attempts with no outcome
+  yet (running or paused) and cancelled attempts are listed but not counted.
+- A task's first attempt that reached a worker is its first attempt; every later counted attempt,
+  warm or cold, is a retry. If that first attempt was cancelled or is still open, the task gives no
+  first-attempt sample.
+- Attempts saved before outcome records existed are classified from their status (`completed` is
+  accepted; `failed` and `blocked` are not).
+- Attempts on `gpt-5.6-sol` and `gpt-5.6-terra` are excluded unless `--include-legacy` is given.
+
+Each first-attempt rate is printed beside its counts and only when at least 5 first attempts back
+it; below that only the counts appear. `run plan`, `run briefing`, and `run resume` print the table
+for the run's own lane, and `run resume --json` returns it as `routes`, once the lane has at least 5
+counted attempts. The table is evidence for the supervisor; the runtime never changes a route from
+it.
+
 ## Collection and integration
 
 `run poll` (and `run wait`, `run resume`) reads status files for active tasks. Successful final JSON is recorded as task
