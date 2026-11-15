@@ -304,32 +304,86 @@ Depends on: M2 (uses thread resume).
 Today the prompt at `runs.mjs:1076` tells a worker to report a blocker if it
 needs any file outside scope, which ends the attempt.
 
-- [ ] **M3.1** Add a `needs_input` terminal state to the worker result schema
+- [x] **M3.1** Add a `needs_input` terminal state to the worker result schema
   with a typed request: `scope_extension` (paths plus reason) or `question`
   (text plus the options the worker sees). Keep every schema property in
   `required` and nullable, per the 0.5.1 fix.
-- [ ] **M3.2** Add `run answer <run-id> <task-id>` with `--grant-scope <glob>`,
+- [x] **M3.2** Add `run answer <run-id> <task-id>` with `--grant-scope <glob>`,
   `--deny`, and `--reply <text>`. It resumes the same thread in the same
   worktree with the supervisor's answer.
-- [ ] **M3.3** Record a granted extension on the task, not the lane, and have
+- [x] **M3.3** Record a granted extension on the task, not the lane, and have
   `run inspect` and `run integrate` honor it. Lane scope stays unchanged.
-- [ ] **M3.4** Refuse a grant that overlaps another active task's write
+- [x] **M3.4** Refuse a grant that overlaps another active task's write
   surface.
-- [ ] **M3.5** Add `needs_input` to `lib/outcomes.mjs` as a non-terminal
+- [x] **M3.5** Add `needs_input` to `lib/outcomes.mjs` as a non-terminal
   outcome so it does not count as a failed attempt in learning data.
-- [ ] **M3.6** Rewrite the "Required behavior" block of the worker prompt:
+- [x] **M3.6** Rewrite the "Required behavior" block of the worker prompt:
   request an extension for a necessary adjacent change, and ask when the
   objective admits two materially different readings, instead of guessing or
   stopping.
-- [ ] **M3.7** Add a rule to `run.md` section 6: the supervisor may grant an
+- [x] **M3.7** Add a rule to `run.md` section 6: the supervisor may grant an
   extension inside the lane on its own authority, and must ask the user for
   anything outside the lane.
-- [ ] **M3.8** Cap `needs_input` round trips per task (recommendation: 3) and
+- [x] **M3.8** Cap `needs_input` round trips per task (recommendation: 3) and
   convert further requests to a blocker.
-- [ ] **M3.9** Tests for grant, deny, reply, overlap refusal, the cap, and
+- [x] **M3.9** Tests for grant, deny, reply, overlap refusal, the cap, and
   integration with an extended scope.
 - [ ] **M3 gate** A real run in which a worker requests one adjacent file,
-  receives it, and integrates cleanly without a retry.
+  receives it, and integrates cleanly without a retry. (`npm test` part met; the
+  real run is outstanding, see evidence.)
+
+### Milestone 3 evidence
+
+- Built (2026-11-15): a nullable, strict `needs_input` object in the worker
+  result schema (`kind` `scope_extension` | `question`, `paths`, `reason`,
+  `question`, `options`, all required, no additional properties); a
+  `needs_input` task and attempt status that records the request on
+  `attempt.inputRequests` with no outcome and a `task.needs_input` event; `run
+  answer <run-id> <task-id>` with `--grant-scope <glob>` (repeatable), `--deny`,
+  `--reply <text>`, and `--user-approved`; `task.scopeGrants` and
+  `effectiveTaskScope`, used by the briefing, `run inspect` (which reports
+  `grantedScope`), and `run integrate`; `NON_TERMINAL_OUTCOMES` in
+  `lib/outcomes.mjs`; the rewritten "Required behavior" block and a
+  "Supervisor answers" briefing section.
+- M3.2: `run answer` reuses the M2 resume path in `worker-child.mjs` (`codex
+  exec -C <worktree> --sandbox <mode> resume --model ... -c
+  model_reasoning_effort=... <thread-id> -`) with the attempt's own model and
+  effort, so a substituted model stays substituted, and the task's sandbox. The
+  resumed thread gets a short answer message; the spec's new
+  `fallbackPromptFile` gives a fresh-thread fallback the full briefing. Each
+  round's files live in `workers/<task>/<attempt>/round-<n>/`. A launch failure
+  reverts the answer and its grant.
+- Decision: an answered task is the **same attempt continuing**, not a linked
+  new attempt. Outcomes, retries, `retryCount`, warm-failure escalation, and
+  learning samples are all per attempt; a linked attempt would need a terminal
+  outcome for the paused one and would count as a retry. Cost: the attempt's
+  duration includes the wait for the answer.
+- M3.4: a grant is refused when it may overlap the planned-plus-granted scope
+  of another write task that is dispatching, running, `needs_input`, or reported
+  but not integrated. Glob overlap is conservative (disjoint only when literal
+  prefixes or suffixes diverge). M3.7 is also enforced: a grant the lane's
+  scope does not provably cover needs `--user-approved`.
+- M3.8: at most 3 answered round trips per task, counted across its attempts;
+  the next request closes the attempt as `worker_blocked` / `scope_required` or
+  `ambiguous_objective` with the request appended to its blockers.
+- A paused task holds its pool slot, counts as running for run status, and
+  blocks plan and guidance revisions; it cannot be retried, only answered or
+  cancelled.
+- No state version bump: every new field is optional; version-3 to version-5
+  runs load, pause, answer, and retry unchanged (tested with a version-5 run).
+  The `needs_input` status is written only by version-6 builds, and no released
+  build reads version 6.
+- M3.9: `tests/answer.test.mjs` (12 tests, fixture
+  `tests/fixtures/fake-codex-ask.mjs`) covers grant with integration, an
+  ungranted stray path still refused, deny, reply on a read-only resume,
+  overlap refusal, the lane authority rule, the cap, slot holding and
+  cancellation, the missing-thread fallback, the substituted model, a
+  version-5 run, and a malformed request. Glob, outcome, schema, and docs
+  tests were added alongside.
+- Not done: the real-run gate. The implementer could not invoke slash commands;
+  the owner must run it.
+- Full repository gate: `npm test` passed 180 tests with 0 failures on
+  2026-11-15.
 
 ## Milestone 4 — The supervisor stops hand-polling
 

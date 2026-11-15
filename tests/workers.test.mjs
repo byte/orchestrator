@@ -434,6 +434,16 @@ test("an optional worker field stays expressible as null", () => {
   assert.ok(blockerCode.enum.includes("missing_context"));
 });
 
+test("a worker request is a nullable, strict nested object", () => {
+  const request = WORKER_RESULT_SCHEMA.properties.needs_input;
+  assert.ok(WORKER_RESULT_SCHEMA.required.includes("needs_input"));
+  assert.deepEqual(request.type, ["object", "null"]);
+  assert.deepEqual(request.properties.kind.enum, ["scope_extension", "question"]);
+  assert.deepEqual(request.required, ["kind", "paths", "reason", "question", "options"]);
+  assert.equal(request.additionalProperties, false);
+  assert.ok(request.properties.question.type.includes("null"));
+});
+
 test("an API rejection reported on stdout is surfaced as the failure reason", async () => {
   // Codex writes API-level rejections to the event stream, not stderr. Without
   // reading it back the supervisor records only "Codex exited 1" and the real

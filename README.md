@@ -197,7 +197,10 @@ replacement run or rely on conversational memory.
    task's), exact model and effort,
    least-privilege sandbox, authoritative briefing, and required result schema.
 3. **Monitor.** Detached process IDs, status files, JSONL events, Codex thread IDs, outputs, and
-   worktree paths are persisted under `.orchestrator/local/`.
+   worktree paths are persisted under `.orchestrator/local/`. A worker that needs one adjacent
+   file outside its scope, or faces an objective with two materially different readings, pauses
+   as `needs_input` with a typed request instead of stopping. Claude answers with `run answer`,
+   and the same attempt continues on the same Codex thread in the same worktree.
 4. **Review.** Worker output becomes `reported`, never automatically complete. Claude evaluates the
    evidence and acceptance criteria. Terminal attempt outcomes are recorded separately from task
    lifecycle state so retries retain an auditable reason for each earlier result.
@@ -238,6 +241,20 @@ Retry a failed or blocked task with a correction for the worker:
 ```text
 orch run retry <run-id> <task-id> [--note "<what to change>"] [--fresh]
 ```
+
+Answer a worker that paused with a `needs_input` request (a scope extension or a question):
+
+```text
+orch run answer <run-id> <task-id> (--grant-scope <glob>... [--user-approved] | --deny | --reply "<text>") [--reply "<text>"]
+```
+
+The answer resumes the same attempt on the same thread, worktree, model, effort, and sandbox; it
+creates no new attempt, records no outcome, and does not count as a retry. A grant is recorded on
+the task, never on the lane, and inspection and integration honour it for that task only. The
+supervisor may grant inside the lane on its own authority; a grant outside the lane is refused
+until the user agrees and `--user-approved` is passed. A grant that may overlap another running,
+paused, or unintegrated task's write surface is refused. Each task gets at most 3 answered round
+trips; a further request becomes an ordinary blocker.
 
 Supervisors can explicitly stop a reported task at a policy or authority boundary, or terminalize
 an unrecoverable integration failure, with `run decide`. The decision records a versioned
@@ -300,6 +317,7 @@ State is split by portability:
       run.json                     # task graph, attempts, results, evidence, checkpoints
       events.jsonl                 # append-only supervisory event history
       workers/<task>/<attempt>/    # prompt, schema, JSONL output, status, final result
+        round-<n>/                 # the same files for each resume after `run answer`
     worktrees/<run-id>/...         # isolated worker checkouts
     learning/                      # private 0700 derived learning state
       identity.json                # local HMAC key and opaque repository identity (0600)
@@ -314,8 +332,9 @@ combines the run record, latest checkpoint, worker evidence, integration history
 and ledger into the supervisor's reconstructed context.
 
 All versioned state is read defensively. Run state version 6 adds the GPT-6 roster and model
-substitution records, and optional warm-retry fields (`review`, `retry`, `resumedFromAttemptId`,
-`resumeFallback`) that older runs simply lack; version 5 added guidance policy and attempt snapshot fields. Version-3
+substitution records, optional warm-retry fields (`review`, `retry`, `resumedFromAttemptId`,
+`resumeFallback`), and optional worker-request fields (`inputRequests`, `scopeGrants`, the
+`needs_input` status) that older runs simply lack; version 5 added guidance policy and attempt snapshot fields. Version-3
 through version-5 runs remain readable and resume and retry on their persisted exact slugs,
 including the retired `gpt-5.6-sol` and `gpt-5.6-terra`, which new plans cannot select. A newer
 version is refused instead of guessed at, writes are atomic, and shared state updates use file locks.
@@ -334,7 +353,9 @@ derive a purged sample again until the raw run itself is removed through a separ
   and effort is persisted before launch, and substitution is never silent.
 - Automatic routing is a plan-time supervisor decision, not a hidden runtime fallback. Every
   unpinned task must include an exact model, effort, and routing reason before dispatch.
-- A worker cannot widen its assigned scope or self-assign global work.
+- A worker cannot widen its assigned scope or self-assign global work. It can only ask; a grant
+  applies to that one task, never to the lane, and must not overlap another active task's write
+  surface. Grants outside the lane require the user's approval.
 - The supervisor checkout must be clean for launch, integration, and finalization.
 - The supervisor branch and recorded integration head must not drift outside the run.
 - Write-task reports must match the actual committed file set exactly.

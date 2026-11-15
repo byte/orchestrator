@@ -231,9 +231,59 @@ results, checkpoints, provisional-guidance revisions and attempt snapshots, mode
 and memory. Polling collects finished structured output into the task automatically, and relaunches
 a task whose model Codex rejected as unavailable; a poll update with status `substituted` names
 the requested and actual model. A worker report is not completion. It is evidence awaiting
-supervisor verification.
+supervisor verification. A poll update with status `needs_input` is neither: the worker paused to
+ask you something and is waiting for the answer described in section 6.
 
 ## 6. Verify
+
+### Answer worker requests first
+
+A worker no longer has to stop when it needs one adjacent file outside its scope or when its
+objective admits two materially different readings. It returns `needs_input` with a typed request
+instead: a `scope_extension` (exact paths and the reason) or a `question` (the question and the
+options it sees). The task is then `needs_input`: paused, not finished, holding its pool slot, with
+no outcome recorded. Answer it promptly; a paused worker does no work.
+
+```bash
+node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" run answer <run-id> <task-id> \
+  --grant-scope "<glob>" \
+  --reply "<optional explanation>" \
+  --json
+```
+
+Use exactly one decision: `--grant-scope <glob>` (repeatable, write tasks and scope requests only),
+`--deny`, or `--reply <text>`. A `--reply` may accompany a grant or a denial to explain it. The same
+attempt resumes on the same Codex thread, in the same worktree, on the model and effort the
+attempt is actually using (a substituted model stays substituted) and the task's sandbox. The
+resumed thread receives only your answer; if Codex no longer has the thread it falls back to a
+fresh thread with the full briefing, which carries every answer so far.
+
+Authority over a grant:
+
+- You may grant an extension inside the lane on your own authority when the change is necessary,
+  adjacent, and small. Prefer the narrowest grant that covers the request; a literal path is
+  better than a glob.
+- You must ask the user before granting anything outside the lane. The runtime refuses such a
+  grant until you repeat it with `--user-approved`, which records that the user agreed.
+- A grant belongs to the task, not the lane: the lane's scope and the task's planned scope stay
+  unchanged, and `run inspect` and `run integrate` accept the granted paths for that task only.
+  Everything else out of scope is still refused.
+- The runtime refuses a grant that may overlap the write surface of another task that is running,
+  paused, or reported but not yet integrated. Deny it, narrow it, or wait for that task.
+- Deny when the change belongs to another task or would widen the task's purpose; say in
+  `--reply` how the worker should proceed within scope.
+
+Answer a question with `--reply`. Use `--deny` only when you cannot or will not choose; the worker
+is then told to finish only what is unambiguous or report a blocker. If the question exposes a
+genuinely ambiguous objective that the user must settle, ask the user, then reply.
+
+A round trip is not a failed attempt and does not consume a retry: no new attempt is created, no
+outcome is recorded, and learning data later sees the one outcome the attempt ends with. A task
+gets at most 3 answered round trips; a further request is recorded as an ordinary blocker
+(`worker_blocked` / `scope_required` or `ambiguous_objective`) for you to resolve by retry or
+replan.
+
+### Review reported work
 
 For every reported task:
 
@@ -284,7 +334,8 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" run inspect <run-id> <task-id> --j
 ```
 
 Require a clean worktree, at least one worker commit, exact agreement between reported and changed
-files, and no out-of-scope paths. After independently confirming tests and acceptance criteria,
+files, and no paths outside the task's planned scope plus any scope you granted it (`grantedScope`
+in the inspection). After independently confirming tests and acceptance criteria,
 integrate it:
 
 ```bash
@@ -342,8 +393,9 @@ failed verification or a rejected integration warm, with a `--note` that names w
 When two warm retries of the same task have failed, stop retrying at that route: escalate it one
 tier (`luna` → `terra` → `sol` → `astra`) in a revised plan with a `routingReason` that cites the
 failures, or treat it as a blocker if the evidence points at the briefing rather than the tier.
-`run retry` prints this advice once the count is reached. Scope conflicts, missing authority, or an
-unmet prerequisite are blockers; do not loop indefinitely.
+`run retry` prints this advice once the count is reached. Answered `needs_input` round trips are
+not retries and do not count toward this. Scope conflicts, missing authority, or an unmet
+prerequisite are blockers; do not loop indefinitely.
 
 ## 8. Finish
 
@@ -386,7 +438,9 @@ created, and any residual risk. Distinguish built, verified, and unverified work
   explicitly pins either dimension. Automatic routing must never mean a hidden runtime fallback.
 - Routing is a revisable judgment, not a one-time commitment: re-route pending tasks through
   `run plan` when a completed wave contradicts the assumptions the original route was based on.
-- Codex workers never self-assign global work or expand their scope.
+- Codex workers never self-assign global work or expand their scope. They may ask for a scope
+  extension; only the supervisor (inside the lane) or the user (outside it) can grant one, and it
+  is granted to that task alone.
 - Every task runs in its own isolated worktree; a warm retry continues in that task's previous
   worktree unless integration failed on a conflict.
 - Never bypass the run state because the manual path seems faster.

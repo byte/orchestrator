@@ -33,6 +33,18 @@ All support `--json` where structured output is useful.
   the outcome, supervisor evidence, note, and changed files; it is ordinary briefing text, not
   guidance. A thread Codex no longer has falls back to a fresh thread with a
   `task.resume_fallback` event. After two failed warm retries, escalate one tier instead.
+- A worker that needs one adjacent file outside its scope, or faces an objective with two
+  materially different readings, returns `needs_input` (a `scope_extension` with paths and a
+  reason, or a `question` with the options it sees) instead of stopping. `run poll` reports the
+  task as `needs_input`; it is paused, not finished, keeps its pool slot, and has no outcome.
+  Answer with `run answer <run-id> <task-id>` and exactly one of `--grant-scope <glob>`
+  (repeatable), `--deny`, or `--reply <text>` (a reply may accompany a grant or denial). The same
+  attempt resumes on the same Codex thread, in the same worktree, with the attempt's own model,
+  effort, and sandbox. A grant belongs to the task, never the lane, and inspection and integration
+  honour it; it is refused when it may overlap another running, paused, or unintegrated task's
+  write surface. Grant inside the lane on your own authority; a grant outside the lane is refused
+  until you ask the user and repeat it with `--user-approved`. A task gets at most 3 answered round
+  trips; a further request is recorded as an ordinary blocker.
 - New runs auto-route by default. The supervisor must save an exact model, effort, and concise
   routing reason on each planned task unless the user explicitly pinned that dimension. The
   runtime rejects unresolved automatic routes and conflicts with explicit pins.
@@ -67,8 +79,10 @@ Run JSON, events, worker status, structured results, PIDs, Codex thread ids, wor
 checkpoints, terminal attempt outcomes, verification evidence, and integration commits live under the self-ignored
 `.orchestrator/local/runs/`. The committed ledger carries durable project facts across machines.
 Run state version 6 adds the current model roster, the models found unavailable during the run,
-per-attempt substitution records, and optional warm-retry fields (`attempt.review`,
-`attempt.retry`, `attempt.resumedFromAttemptId`, `attempt.resumeFallback`, `task.pendingRetry`). Version 5 stores the active provisional policy plus frozen
+per-attempt substitution records, optional warm-retry fields (`attempt.review`,
+`attempt.retry`, `attempt.resumedFromAttemptId`, `attempt.resumeFallback`, `task.pendingRetry`),
+and optional worker-request fields (`attempt.inputRequests`, `task.scopeGrants`, the
+`needs_input` task and attempt status). Version 5 stores the active provisional policy plus frozen
 task and attempt selections; version-3 through version-5 runs remain readable, keep their
 persisted exact slugs, and version-3 and version-4 runs default to guidance disabled.
 

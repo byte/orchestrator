@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 
 import { requireLane } from "./lanes.mjs";
 import {
+  answerTask,
   attachExecution,
   cancelTask,
   claimTask,
@@ -12,6 +13,7 @@ import {
   loadRun,
   recordModelUnavailable,
   recordTaskResult,
+  revertTaskAnswer,
   substitutionNotice,
   syncExecutionStatus
 } from "./runs.mjs";
@@ -58,6 +60,23 @@ export const WORKER_RESULT_SCHEMA = {
         null
       ]
     },
+    // A non-null value ends the turn as `needs_input` instead of a result: the
+    // worker is paused, not finished, and continues on the same thread once the
+    // supervisor answers. Nullable for the same structured-output reason as
+    // blocker_code, and every nested property is required too: `paths` is empty
+    // for a question, `question` is null and `options` empty for a scope request.
+    needs_input: {
+      type: ["object", "null"],
+      properties: {
+        kind: { type: "string", enum: ["scope_extension", "question"] },
+        paths: { type: "array", items: { type: "string" } },
+        reason: { type: "string" },
+        question: { type: ["string", "null"] },
+        options: { type: "array", items: { type: "string" } }
+      },
+      required: ["kind", "paths", "reason", "question", "options"],
+      additionalProperties: false
+    },
     confidence: { type: "string", enum: ["high", "medium", "low"] }
   },
   required: [
@@ -68,6 +87,7 @@ export const WORKER_RESULT_SCHEMA = {
     "assumptions",
     "blockers",
     "blocker_code",
+    "needs_input",
     "confidence"
   ],
   additionalProperties: false
@@ -193,6 +213,67 @@ function tail(filePath, bytes = 8000) {
   }
 }
 
+/**
+ * Write a worker's prompt, schema, and spec into `directory` and start the
+ * detached wrapper. Model, effort, and sandbox are always passed explicitly,
+ * also when resuming: a resumed Codex thread inherits none of them and would
+ * otherwise fall back to config defaults and write access. `fallbackPrompt` is
+ * what a resume that finds its thread missing sends to the fresh thread instead.
+ */
+function spawnWorker(
+  cwd,
+  directory,
+  { prompt, fallbackPrompt = null, codexCommand, worktreePath, model, reasoningEffort, kind, resumeThreadId = null }
+) {
+  fs.mkdirSync(directory, { recursive: true });
+  const files = {
+    promptFile: path.join(directory, "prompt.md"),
+    ...(fallbackPrompt ? { fallbackPromptFile: path.join(directory, "fallback-prompt.md") } : {}),
+    schemaFile: path.join(directory, "result.schema.json"),
+    outputFile: path.join(directory, "events.jsonl"),
+    errorFile: path.join(directory, "stderr.log"),
+    lastMessageFile: path.join(directory, "result.json"),
+    statusFile: path.join(directory, "status.json"),
+    specFile: path.join(directory, "spec.json")
+  };
+  atomicWrite(files.promptFile, prompt);
+  if (fallbackPrompt) {
+    atomicWrite(files.fallbackPromptFile, fallbackPrompt);
+  }
+  atomicWrite(files.schemaFile, `${JSON.stringify(WORKER_RESULT_SCHEMA, null, 2)}\n`);
+  const spec = {
+    ...files,
+    codexCommand,
+    worktreePath,
+    model,
+    reasoningEffort,
+    sandbox: kind === "write" ? "workspace-write" : "read-only",
+    ...(resumeThreadId ? { resumeThreadId } : {})
+  };
+  atomicWrite(files.specFile, `${JSON.stringify(spec, null, 2)}\n`);
+  const child = spawn(process.execPath, [childScript, files.specFile], {
+    cwd,
+    detached: true,
+    stdio: "ignore"
+  });
+  child.unref();
+  return {
+    pid: child.pid,
+    status: "starting",
+    ...files,
+    launchedAt: new Date().toISOString()
+  };
+}
+
+function launchCommand(runner, fallback = ["codex"]) {
+  try {
+    return readJson(runner.specFile).codexCommand ?? fallback;
+  } catch {
+    // The spec only records an override; without it the default command applies.
+    return fallback;
+  }
+}
+
 export function launchTaskWorker(
   cwd,
   runId,
@@ -213,46 +294,15 @@ export function launchTaskWorker(
           task.attempts.find((entry) => entry.id === retry.worktree.attemptId)
         )
       : createTaskWorktree(cwd, run, task, attempt);
-    const directory = executionDir(cwd, runId, taskId, attempt.id);
-    fs.mkdirSync(directory, { recursive: true });
-    const files = {
-      promptFile: path.join(directory, "prompt.md"),
-      schemaFile: path.join(directory, "result.schema.json"),
-      outputFile: path.join(directory, "events.jsonl"),
-      errorFile: path.join(directory, "stderr.log"),
-      lastMessageFile: path.join(directory, "result.json"),
-      statusFile: path.join(directory, "status.json"),
-      specFile: path.join(directory, "spec.json")
-    };
-    atomicWrite(files.promptFile, dispatch.briefing);
-    atomicWrite(files.schemaFile, `${JSON.stringify(WORKER_RESULT_SCHEMA, null, 2)}\n`);
-    const spec = {
-      ...files,
+    const runner = spawnWorker(cwd, executionDir(cwd, runId, taskId, attempt.id), {
+      prompt: dispatch.briefing,
       codexCommand,
       worktreePath: worktree.path,
-      // Always the attempt's own route and the task's sandbox, also when resuming:
-      // a resumed Codex thread inherits none of them and would otherwise fall
-      // back to config defaults and write access.
       model: dispatch.model,
       reasoningEffort: dispatch.reasoningEffort,
-      sandbox: task.kind === "write" ? "workspace-write" : "read-only",
-      ...(attempt.resumedFromAttemptId && retry?.resumeThreadId
-        ? { resumeThreadId: retry.resumeThreadId }
-        : {})
-    };
-    atomicWrite(files.specFile, `${JSON.stringify(spec, null, 2)}\n`);
-    const child = spawn(process.execPath, [childScript, files.specFile], {
-      cwd,
-      detached: true,
-      stdio: "ignore"
+      kind: task.kind,
+      resumeThreadId: attempt.resumedFromAttemptId ? retry?.resumeThreadId ?? null : null
     });
-    child.unref();
-    const runner = {
-      pid: child.pid,
-      status: "starting",
-      ...files,
-      launchedAt: new Date().toISOString()
-    };
     attachExecution(cwd, runId, taskId, {
       attemptId: attempt.id,
       worktree,
@@ -324,6 +374,10 @@ export function pollRunWorkers(cwd, runId) {
         status: recorded.task.status,
         threadId: status.threadId,
         exitCode: status.exitCode,
+        ...(recorded.inputRequest
+          ? { round: recorded.inputRequest.round, inputRequest: recorded.inputRequest.request }
+          : {}),
+        ...(recorded.task.result?.inputCapReached ? { inputCapReached: true } : {}),
         ...(status.resumeFallback ? { resumeFallback: status.resumeFallback } : {})
       });
       continue;
@@ -385,12 +439,7 @@ function substituteUnavailableModel(cwd, runId, task, attempt, status, error) {
   if (!recorded.fallbackModel || recorded.duplicate) {
     return update;
   }
-  let codexCommand = ["codex"];
-  try {
-    codexCommand = readJson(attempt.runner.specFile).codexCommand ?? codexCommand;
-  } catch {
-    // Fall back to the default command; the spec only records an override.
-  }
+  const codexCommand = launchCommand(attempt.runner);
   try {
     const run = loadRun(cwd, runId);
     const launched = launchTaskWorker(cwd, runId, task.id, requireLane(cwd, run.lane), {
@@ -411,6 +460,53 @@ function substituteUnavailableModel(cwd, runId, task, attempt, status, error) {
       ...update,
       relaunchError: launchError.message
     };
+  }
+}
+
+/**
+ * Answer a paused worker and resume it: the same attempt, the same Codex thread,
+ * the same worktree, on the model and effort the attempt is actually using (a
+ * substituted model stays substituted) and the task's own sandbox. The resumed
+ * thread receives only the answer; a fallback to a fresh thread receives the
+ * full briefing, which carries every answer so far. Each answered round writes
+ * its files under `round-<n>/` so earlier rounds stay on disk for audit.
+ */
+export function answerTaskWorker(
+  cwd,
+  runId,
+  taskId,
+  lane,
+  { grantScope = [], deny = false, reply = null, userApproved = false, codexCommand = null } = {}
+) {
+  const answered = answerTask(cwd, runId, taskId, lane, { grantScope, deny, reply, userApproved });
+  try {
+    const run = loadRun(cwd, runId);
+    const task = run.tasks[taskId];
+    const previousRunner = answered.round.answer.previousRunner;
+    const runner = spawnWorker(
+      cwd,
+      path.join(executionDir(cwd, runId, taskId, answered.attemptId), `round-${answered.round.round}`),
+      {
+        prompt: answered.answerPrompt,
+        fallbackPrompt: answered.briefing,
+        codexCommand: codexCommand ?? (previousRunner ? launchCommand(previousRunner) : ["codex"]),
+        worktreePath: answered.worktree.path,
+        model: answered.model,
+        reasoningEffort: answered.reasoningEffort,
+        kind: task.kind,
+        resumeThreadId: answered.resumeThreadId
+      }
+    );
+    runner.inputRound = answered.round.round;
+    attachExecution(cwd, runId, taskId, {
+      attemptId: answered.attemptId,
+      worktree: answered.worktree,
+      runner
+    });
+    return { ...answered, runner };
+  } catch (error) {
+    revertTaskAnswer(cwd, runId, taskId, { attemptId: answered.attemptId, error: error.message });
+    throw error;
   }
 }
 

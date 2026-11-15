@@ -113,3 +113,16 @@ test("the legacy single-task commands are retired", () => {
     assert.doesNotMatch(text, /orchestrator:do|orch brief|orch accept|`brief`|`accept`|GPT-5\.6/, skill);
   }
 });
+
+test("the run command lets workers ask and limits who may grant scope", () => {
+  const read = (...parts) => fs.readFileSync(path.join(root, "plugins", "orchestrator", ...parts), "utf8");
+  const command = read("commands", "run.md");
+  assert.match(command, /run answer <run-id> <task-id>/);
+  assert.match(command, /You may grant an extension inside the lane on your own authority/);
+  assert.match(command, /You must ask the user before granting anything outside the lane/);
+  assert.match(command, /--user-approved/);
+  assert.match(command, /A grant belongs to the task, not the lane/);
+  assert.match(command, /at most 3 answered round\s+trips/);
+  assert.match(read("commands", "resume.md"), /Workers awaiting your answer/);
+  assert.match(read("skills", "orchestrator-runtime", "SKILL.md"), /run answer <run-id> <task-id>/);
+});

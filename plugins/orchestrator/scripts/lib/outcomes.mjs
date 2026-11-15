@@ -18,6 +18,20 @@ export const TERMINAL_OUTCOMES = Object.freeze([
   "cancelled"
 ]);
 
+/**
+ * States an attempt can pause in without ending. `needs_input` means the worker
+ * returned a typed request (a scope extension or a question) and is waiting for
+ * the supervisor's answer, after which the same attempt continues on the same
+ * Codex thread. It is never stored as an outcome record: an attempt that asked
+ * is not a failed attempt, and the outcome it eventually ends with is the only
+ * one learning data sees. `validateOutcomeRecord` rejects it as a terminal value.
+ */
+export const NON_TERMINAL_OUTCOMES = Object.freeze(["needs_input"]);
+
+export function isTerminalOutcome(value) {
+  return TERMINAL_OUTCOMES.includes(value);
+}
+
 export const NEXT_ACTIONS = Object.freeze([
   "execute",
   "clarify",
@@ -241,6 +255,11 @@ export function validateOutcomeRecord(record) {
 
   // A scalar enum is intentional: arrays would permit conflicting terminal
   // classifications on the same attempt.
+  if (NON_TERMINAL_OUTCOMES.includes(record.terminalOutcome)) {
+    throw new Error(
+      `"${record.terminalOutcome}" is a non-terminal attempt state, not a terminal outcome.`
+    );
+  }
   assertEnumValue("terminal outcome", record.terminalOutcome, terminalOutcomeSet);
   assertEnumValue("next action", record.action, actionSet);
   assertEnumValue("reason code", record.reasonCode, reasonCodeSet);

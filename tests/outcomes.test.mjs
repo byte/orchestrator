@@ -3,6 +3,7 @@ import { test } from "node:test";
 
 import {
   NEXT_ACTIONS,
+  NON_TERMINAL_OUTCOMES,
   OUTCOME_ACTIONS,
   OUTCOME_REASON_CODES,
   OUTCOME_PROVENANCE,
@@ -13,6 +14,7 @@ import {
   TERMINAL_OUTCOME_PRECEDENCE,
   classifyTerminalOutcome,
   isOutcomeRecord,
+  isTerminalOutcome,
   normalizeOutcomeRecord,
   validateOutcomeRecord
 } from "../plugins/orchestrator/scripts/lib/outcomes.mjs";
@@ -252,4 +254,20 @@ test("isOutcomeRecord is a non-throwing predicate", () => {
   assert.equal(isOutcomeRecord(validRecord()), true);
   assert.equal(isOutcomeRecord({}), false);
   assert.equal(isOutcomeRecord(null), false);
+});
+
+test("needs_input is a non-terminal state that is never stored as an outcome", () => {
+  assert.deepEqual(NON_TERMINAL_OUTCOMES, ["needs_input"]);
+  assert.equal(TERMINAL_OUTCOMES.includes("needs_input"), false);
+  assert.equal(isTerminalOutcome("needs_input"), false);
+  assert.equal(isTerminalOutcome("worker_blocked"), true);
+  assert.throws(
+    () => normalizeOutcomeRecord({
+      terminalOutcome: "needs_input",
+      action: "clarify",
+      reasonCode: "scope_required",
+      provenance: "automatic"
+    }),
+    /non-terminal attempt state, not a terminal outcome/
+  );
 });

@@ -10,6 +10,7 @@ import {
   validateGuidancePolicy,
   validateGuidanceSelection
 } from "./guidance.mjs";
+import { overlappingPatterns, scopeCovers } from "./glob.mjs";
 import { ledgerForBriefing } from "./ledger.mjs";
 import {
   OUTCOME_SIGNALS,
@@ -82,7 +83,20 @@ const TASK_ID_PATTERN = RUN_ID_PATTERN;
 const TASK_KINDS = new Set(["write", "read", "verify"]);
 const REASONING_EFFORTS = new Set(ALL_REASONING_EFFORTS);
 const ACTIVE_TASK_STATUSES = new Set(["dispatching", "running"]);
+// A worker that returned `needs_input` is paused mid-attempt: its thread and
+// worktree are live and it resumes as soon as the supervisor answers. It keeps
+// its pool slot, so an answer never has to wait for capacity, and it blocks plan
+// and guidance changes exactly like a running worker.
+const NEEDS_INPUT = "needs_input";
+const SLOT_HOLDING_TASK_STATUSES = new Set([...ACTIVE_TASK_STATUSES, NEEDS_INPUT]);
+// Tasks whose write surface is still in play: running, paused, or reported and
+// not yet integrated. A scope grant must not overlap any of them.
+const WRITE_SURFACE_TASK_STATUSES = new Set([...SLOT_HOLDING_TASK_STATUSES, "reported"]);
 const RETRYABLE_TASK_STATUSES = new Set(["blocked", "failed", "cancelled"]);
+// Round trips a task may make through `needs_input` before a further request is
+// recorded as an ordinary blocker (M3.8).
+export const MAX_INPUT_ROUNDS = 3;
+const INPUT_REQUEST_KINDS = new Set(["scope_extension", "question"]);
 // Outcomes that mean the worker finished a turn and handed back a result the
 // supervisor then judged. Its thread holds useful context, so a retry resumes it.
 // Crashes, missing results, and cancellations leave a thread that may stop
@@ -845,6 +859,17 @@ function validateLunaLeaves(run, tasks) {
   }
 }
 
+/**
+ * The scope a task may write: its planned scope plus every extension the
+ * supervisor granted it through `run answer`. Grants belong to the task, not the
+ * lane, so the lane's scope and the planned task scope are never rewritten.
+ * Tasks saved before grants existed simply have none.
+ */
+export function effectiveTaskScope(task) {
+  const granted = (task.scopeGrants ?? []).flatMap((grant) => grant.patterns ?? []);
+  return [...new Set([...(task.scope ?? []), ...granted])];
+}
+
 function taskDefinition(run, task) {
   const route = resolveTaskWorker(run, task);
   return {
@@ -871,7 +896,7 @@ export function replacePlan(cwd, runId, rawTasks, { defaultScope = [] } = {}) {
   return withFileLock(filePath, () => {
     const run = loadRun(cwd, id);
     const active = Object.values(run.tasks).filter(
-      (task) => ACTIVE_TASK_STATUSES.has(task.status) || task.status === "reported"
+      (task) => SLOT_HOLDING_TASK_STATUSES.has(task.status) || task.status === "reported"
     );
     if (active.length) {
       throw new Error(`Run "${id}" has active or unverified work; its plan cannot be revised.`);
@@ -905,6 +930,9 @@ export function replacePlan(cwd, runId, rawTasks, { defaultScope = [] } = {}) {
           // A requested retry survives a plan revision. A route change does not
           // force a cold start: a resumed Codex thread can change model and effort.
           ...(existing.pendingRetry ? { pendingRetry: existing.pendingRetry } : {}),
+          // Scope the supervisor granted belongs to the task and survives a
+          // revision of its route, like a pending retry.
+          ...(existing.scopeGrants?.length ? { scopeGrants: existing.scopeGrants } : {}),
           createdAt: existing.createdAt
         };
       } else {
@@ -975,7 +1003,7 @@ function refreshRunStatus(run) {
     } else {
       run.status = "finalizing";
     }
-  } else if (tasks.some((task) => ACTIVE_TASK_STATUSES.has(task.status))) {
+  } else if (tasks.some((task) => SLOT_HOLDING_TASK_STATUSES.has(task.status))) {
     run.status = "running";
   } else if (tasks.some((task) => task.status === "reported")) {
     run.status = "verifying";
@@ -1057,7 +1085,16 @@ export function checkpointStatus(run) {
 }
 
 function activeTaskCount(run) {
-  return Object.values(run.tasks).filter((task) => ACTIVE_TASK_STATUSES.has(task.status)).length;
+  return Object.values(run.tasks).filter((task) => SLOT_HOLDING_TASK_STATUSES.has(task.status)).length;
+}
+
+function inputRounds(task) {
+  return task.attempts.flatMap((attempt) => attempt.inputRequests ?? []);
+}
+
+/** Round trips through `needs_input` that the supervisor answered, across every attempt of the task. */
+export function answeredInputRounds(task) {
+  return inputRounds(task).filter((round) => round.answer).length;
 }
 
 function requireTask(run, taskId) {
@@ -1172,6 +1209,9 @@ function sameOutcomeClassification(left, right) {
 function outcomeSummary(attempt) {
   if (attempt.outcome) {
     return `${attempt.outcome.terminalOutcome} / ${attempt.outcome.action} / ${attempt.outcome.reasonCode} (${attempt.outcome.provenance})`;
+  }
+  if (attempt.status === NEEDS_INPUT) {
+    return "needs_input — paused, awaiting the supervisor's answer (not an outcome)";
   }
   if (["completed", "failed", "blocked", "cancelled"].includes(attempt.status)) {
     return "unclassified (legacy state)";
@@ -1355,11 +1395,103 @@ function renderPreviousAttempt(task, attempt) {
   return `${lines.join("\n")}\n\n`;
 }
 
+function renderScope(task) {
+  const planned = task.scope.map((entry) => `- \`${entry}\``);
+  const planSet = new Set(task.scope);
+  const granted = (task.scopeGrants ?? []).flatMap((grant) =>
+    grant.patterns
+      .filter((pattern) => !planSet.has(pattern))
+      .map((pattern) => `- \`${pattern}\` (granted by the supervisor after you asked: ${grant.reason || "no reason recorded"})`)
+  );
+  const lines = [...planned, ...granted];
+  return lines.length ? lines.join("\n") : "- Read-only. Do not modify files.";
+}
+
+function describeInputRequest(request) {
+  if (request.kind === "scope_extension") {
+    return `scope extension for ${request.paths.map((entry) => `\`${entry}\``).join(", ")} — ${request.reason}`;
+  }
+  const options = request.options.length ? ` Options you gave: ${request.options.join(" | ")}.` : "";
+  return `question: ${request.question} — ${request.reason}.${options}`;
+}
+
+function describeAnswer(answer) {
+  if (answer.mode === "grant") {
+    return `granted ${answer.patterns.map((entry) => `\`${entry}\``).join(", ")} to this task`;
+  }
+  return answer.mode === "deny" ? "denied" : "answered";
+}
+
+/**
+ * Every answered `needs_input` round of the current attempt. Part of the full
+ * briefing so that a resume that falls back to a fresh thread still knows what
+ * it asked and what the supervisor decided.
+ */
+function renderInputAnswers(attempt) {
+  const rounds = (attempt?.inputRequests ?? []).filter((round) => round.answer);
+  if (!rounds.length) {
+    return "";
+  }
+  const sections = rounds.map((round) => [
+    `### Request ${round.round}`,
+    "",
+    `- you asked for: ${describeInputRequest(round.request)}`,
+    `- decision: ${describeAnswer(round.answer)}`,
+    `- supervisor reply: ${round.answer.reply || "none"}`
+  ].join("\n"));
+  return `## Supervisor answers\n\nYou paused this attempt to ask the supervisor. Each answer below is final for this attempt; work already in your worktree is yours to continue.\n\n${sections.join("\n\n")}\n\n`;
+}
+
+function renderRequiredBehavior(task) {
+  const remaining = Math.max(0, MAX_INPUT_ROUNDS - answeredInputRounds(task));
+  const lines = [
+    "- Inspect the real code before deciding.",
+    "- Stay within the declared scope. Never edit a file outside it."
+  ];
+  if (task.kind === "write") {
+    lines.push(
+      "- If the assignment cannot be finished properly without changing a specific file outside the scope " +
+        "(an adjacent change such as a shared type, an export, or a test helper), do not edit it, do not " +
+        "work around it, and do not stop: return `needs_input` with kind `scope_extension`, the exact " +
+        "repo-relative paths, and why each is needed. Leave your work in place; you continue in this " +
+        "thread and worktree once the supervisor answers."
+    );
+  }
+  lines.push(
+    "- If the objective admits two materially different readings and the choice would change the result, " +
+      "do not guess: return `needs_input` with kind `question`, the question, and the options you see. " +
+      "Decide ordinary implementation details yourself.",
+    remaining > 0
+      ? `- Report a blocker only when neither ${task.kind === "write" ? "a scope extension nor " : ""}an answer would let you finish. ` +
+        `This task may ask ${remaining} more time${remaining === 1 ? "" : "s"}; a request after that is recorded as a blocker.`
+      : "- This task has used all its requests to the supervisor. If you cannot finish within the scope and the answers above, report a blocker.",
+    "- Run the nearest meaningful checks for your assignment.",
+    "- Do not claim success from inspection alone.",
+    `- ${task.kind === "write" ? "Commit the completed task in your isolated worktree with a concise imperative subject. Do not merge or push." : "Do not modify or commit files; this is a read-only assignment."}`,
+    "- Do not modify orchestration state. The supervisor owns integration."
+  );
+  return lines.join("\n");
+}
+
+const REQUIRED_OUTPUT = `## Required output
+
+Return one JSON object matching the supplied output schema:
+
+- \`summary\`: concise work summary
+- \`files_touched\`: exact repo-relative paths, covering everything this attempt changed
+- \`tests\`: objects with \`command\` and \`outcome\`
+- \`decisions\`, \`assumptions\`, and \`blockers\`: arrays of strings
+- \`blocker_code\`: null unless you report a blocker
+- \`needs_input\`: null when you finished or are blocked. To ask the supervisor instead, an object with \`kind\` (\`scope_extension\` or \`question\`), \`paths\` (the files you need; empty for a question), \`reason\`, \`question\` (null for a scope extension), and \`options\` (the readings you see; empty for a scope extension). Keep \`blockers\` empty when you ask, and report your progress so far in the other fields.
+- \`confidence\`: \`high\`, \`medium\`, or \`low\`
+`;
+
 export function renderWorkerBriefing(cwd, run, task, lane, launchRoute = null) {
   // The header names the model the attempt actually launches on, which differs
   // from the saved route only after a recorded substitution.
   const route = launchRoute ?? resolveTaskWorker(run, task);
   const previousAttempt = renderPreviousAttempt(task, task.attempts.at(-1));
+  const inputAnswers = renderInputAnswers(task.attempts.at(-1));
   const guidance = task.attempts.at(-1)?.guidanceSnapshot ?? task.guidanceSelection;
   if (guidance) {
     validateGuidanceSelection(guidance);
@@ -1402,13 +1534,13 @@ Do not redefine the overall goal, widen scope, integrate other workers, or spawn
 
 ${task.objective}
 
-${previousAttempt}## Task kind
+${previousAttempt}${inputAnswers}## Task kind
 
 ${task.kind}
 
 ## Scope
 
-${task.scope.length ? task.scope.map((entry) => `- \`${entry}\``).join("\n") : "- Read-only. Do not modify files."}
+${renderScope(task)}
 
 ## Constraints
 
@@ -1428,23 +1560,50 @@ ${renderWorkerLedger(cwd)}
 
 ## Required behavior
 
-- Inspect the real code before deciding.
-- Stay within the declared scope. If another file is required, stop and report it as a blocker.
-- Run the nearest meaningful checks for your assignment.
-- Do not claim success from inspection alone.
-- ${task.kind === "write" ? "Commit the completed task in your isolated worktree with a concise imperative subject. Do not merge or push." : "Do not modify or commit files; this is a read-only assignment."}
-- Do not modify orchestration state. The supervisor owns integration.
+${renderRequiredBehavior(task)}
 
-## Required output
+${REQUIRED_OUTPUT}`;
+}
 
-Return one JSON object matching the supplied output schema:
+/**
+ * The message a paused worker receives when its thread resumes after `run
+ * answer`. The thread already holds the full briefing, so this restates only
+ * the request, the decision, and the scope that now applies. A resume that falls
+ * back to a fresh thread gets the full briefing instead, which carries the same
+ * answers in its "Supervisor answers" section.
+ */
+function renderAnswerPrompt(task, round) {
+  const { request, answer } = round;
+  const remaining = Math.max(0, MAX_INPUT_ROUNDS - answeredInputRounds(task));
+  const decision = {
+    grant:
+      `Granted. ${answer.patterns.map((entry) => `\`${entry}\``).join(", ")} ` +
+      `${answer.patterns.length === 1 ? "is" : "are"} now in scope for this task only. Everything else ` +
+      "outside the scope below is still forbidden; inspection and integration refuse it.",
+    deny:
+      request.kind === "scope_extension"
+        ? "Denied. Do not modify those paths. Finish the assignment within the scope below; if that is " +
+          "genuinely impossible, return a blocker that says exactly why."
+        : "The supervisor declined to choose. Do not guess between materially different readings: finish " +
+          "only what is unambiguous, or return a blocker that says exactly what is undecided.",
+    reply: request.kind === "question"
+      ? "Answered. Proceed on the supervisor's reading below."
+      : "The supervisor replied without granting new scope. Do not modify paths outside the scope below."
+  }[answer.mode];
+  return `## Supervisor answer (request ${round.round} of at most ${MAX_INPUT_ROUNDS})
 
-- \`summary\`: concise work summary
-- \`files_touched\`: exact repo-relative paths
-- \`tests\`: objects with \`command\` and \`outcome\`
-- \`decisions\`, \`assumptions\`, and \`blockers\`: arrays of strings
-- \`confidence\`: \`high\`, \`medium\`, or \`low\`
-`;
+You returned \`needs_input\`: ${describeInputRequest(request)}
+
+- decision: ${decision}
+- supervisor reply: ${answer.reply || "none"}
+
+## Scope now
+
+${renderScope(task)}
+
+Continue the same assignment in the same worktree; your earlier turns are above and the assignment, constraints, and acceptance criteria are unchanged. ${remaining > 0 ? `You may ask ${remaining} more time${remaining === 1 ? "" : "s"}.` : "You have no requests left; report a blocker if you cannot finish."}
+
+${REQUIRED_OUTPUT}`;
 }
 
 /**
@@ -1661,6 +1820,50 @@ function resultSummary(text) {
     : beforeContract;
 }
 
+function isRepoRelativePath(value) {
+  const entry = String(value ?? "").trim().replace(/\\/g, "/");
+  return Boolean(entry) &&
+    !entry.startsWith("/") &&
+    !entry.startsWith("!") &&
+    !/^[a-z]:/i.test(entry) &&
+    !entry.split("/").includes("..");
+}
+
+/**
+ * Validate the worker's `needs_input` field. Returns null when there is no
+ * request, the normalized request when it is well formed, and undefined when it
+ * is malformed, which fails the result contract like any other bad field.
+ */
+function normalizeInputRequest(value) {
+  if (value === undefined || value === null) {
+    return null;
+  }
+  if (typeof value !== "object" || Array.isArray(value) || !INPUT_REQUEST_KINDS.has(value.kind)) {
+    return undefined;
+  }
+  const strings = (entries) => Array.isArray(entries) && entries.every((entry) => typeof entry === "string");
+  const reason = typeof value.reason === "string" ? value.reason.trim() : "";
+  const question = typeof value.question === "string" ? value.question.trim() : "";
+  if (!reason || !strings(value.paths ?? []) || !strings(value.options ?? [])) {
+    return undefined;
+  }
+  const paths = (value.paths ?? []).map((entry) => entry.trim()).filter(Boolean);
+  const options = (value.options ?? []).map((entry) => entry.trim()).filter(Boolean);
+  if (value.kind === "scope_extension" && (!paths.length || !paths.every(isRepoRelativePath))) {
+    return undefined;
+  }
+  if (value.kind === "question" && !question) {
+    return undefined;
+  }
+  return {
+    kind: value.kind,
+    paths: value.kind === "scope_extension" ? paths : [],
+    reason,
+    question: value.kind === "question" ? question : null,
+    options: value.kind === "question" ? options : []
+  };
+}
+
 function parseStructuredResult(text) {
   let payload;
   try {
@@ -1696,9 +1899,15 @@ function parseStructuredResult(text) {
   if (!["high", "medium", "low"].includes(payload.confidence)) {
     missing.push("confidence");
   }
+  // Results written before M3, and fixtures that predate it, omit the field.
+  const inputRequest = normalizeInputRequest(payload.needs_input);
+  if (inputRequest === undefined) {
+    missing.push("needs_input");
+  }
   return {
     found: true,
     missing: [...new Set(missing)],
+    inputRequest: inputRequest ?? null,
     fields: {
       files_touched: Array.isArray(payload.files_touched)
         ? payload.files_touched.join(", ")
@@ -1724,9 +1933,8 @@ export function recordTaskResult(cwd, runId, taskId, { attemptId, resultText }) 
     }
     const structured = parseStructuredResult(resultText);
     const parsed = structured ?? parseResultBlock(resultText);
-    const blocked = parsed.found && !isNone(parsed.fields.blockers);
     const malformed = !parsed.found || parsed.missing.length > 0;
-    const status = malformed ? "failed" : blocked ? "blocked" : "reported";
+    const request = malformed ? null : structured?.inputRequest ?? null;
     const result = {
       summary: structured?.payload.summary || resultSummary(resultText),
       contractFound: parsed.found,
@@ -1735,6 +1943,53 @@ export function recordTaskResult(cwd, runId, taskId, { attemptId, resultText }) 
       structured: structured?.payload ?? null,
       reportedAt: nowIso()
     };
+    // A request is a pause, not an end: the attempt stays open with no outcome
+    // and resumes on the same thread once the supervisor answers (M3.5). Past the
+    // per-task cap it is recorded as the blocker it would otherwise have been.
+    let blockerCode = structured?.payload.blocker_code ?? "other";
+    if (request) {
+      const round = {
+        round: answeredInputRounds(task) + 1,
+        request,
+        threadId: attempt.threadId ?? null,
+        requestedAt: nowIso(),
+        result: structuredClone(result),
+        answer: null
+      };
+      attempt.inputRequests ??= [];
+      if (round.round <= MAX_INPUT_ROUNDS) {
+        attempt.inputRequests.push(round);
+        attempt.status = NEEDS_INPUT;
+        task.status = NEEDS_INPUT;
+        task.result = result;
+        task.updatedAt = nowIso();
+        refreshRunStatus(run);
+        writeRun(cwd, run);
+        appendEvent(cwd, id, {
+          type: "task.needs_input",
+          taskId: task.id,
+          attemptId: attempt.id,
+          round: round.round,
+          kind: request.kind,
+          paths: request.paths,
+          optionCount: request.options.length
+        });
+        return { task, attempt, runStatus: run.status, inputRequest: round };
+      }
+      attempt.inputRequests.push({ ...round, capped: true });
+      blockerCode = request.kind === "scope_extension" ? "scope_required" : "ambiguous_objective";
+      const capped = `Input request cap reached (${MAX_INPUT_ROUNDS} answered round trips on this task); ` +
+        `the worker's further request is recorded as a blocker: ${describeInputRequest(request)}`;
+      result.structured = {
+        ...result.structured,
+        blockers: [...(result.structured.blockers ?? []), capped],
+        blocker_code: blockerCode
+      };
+      result.fields = { ...result.fields, blockers: result.structured.blockers.join("; ") };
+      result.inputCapReached = true;
+    }
+    const blocked = parsed.found && !isNone(result.fields.blockers);
+    const status = malformed ? "failed" : blocked ? "blocked" : "reported";
     attempt.status = status;
     attempt.finishedAt = nowIso();
     let outcome = null;
@@ -1747,7 +2002,6 @@ export function recordTaskResult(cwd, runId, taskId, { attemptId, resultText }) 
         })
       );
     } else if (blocked) {
-      const blockerCode = structured?.payload.blocker_code ?? "other";
       const blockerActions = {
         missing_context: "clarify",
         ambiguous_objective: "clarify",
@@ -1781,6 +2035,210 @@ export function recordTaskResult(cwd, runId, taskId, { attemptId, resultText }) 
       outcome
     });
     return { task, attempt, runStatus: run.status };
+  });
+}
+
+function grantPatterns(values) {
+  const patterns = [...new Set(stringList(values, "granted scope"))];
+  for (const pattern of patterns) {
+    if (!isRepoRelativePath(pattern)) {
+      throw new Error(
+        `Cannot grant "${pattern}": a scope grant must be a repo-relative path or glob, ` +
+          "without a leading slash, a negation, or a \"..\" segment."
+      );
+    }
+  }
+  return patterns;
+}
+
+/**
+ * Record the supervisor's answer to a paused worker's `needs_input` request and
+ * prepare the same attempt to continue. Exactly one decision applies: a grant of
+ * scope (write tasks, scope requests only), a denial, or a plain reply; a reply
+ * may accompany a grant or a denial as explanation.
+ *
+ * A grant is recorded on the task, never on the lane or the planned scope. It is
+ * refused when it may overlap the write surface of another task that is running,
+ * paused, or reported but not yet integrated, and when the lane's scope does not
+ * certainly cover it unless the user approved it (`userApproved`): the
+ * supervisor's own authority ends at the lane boundary.
+ *
+ * The answered round does not create an attempt, record an outcome, or touch the
+ * retry state; the caller resumes the attempt's own thread on the attempt's own
+ * model, effort, and sandbox, in the attempt's own worktree.
+ */
+export function answerTask(
+  cwd,
+  runId,
+  taskId,
+  lane,
+  { grantScope = [], deny = false, reply = null, userApproved = false } = {}
+) {
+  const id = assertId(runId, "run");
+  const patterns = grantPatterns(grantScope);
+  const text = String(reply ?? "").trim();
+  if (patterns.length && deny) {
+    throw new Error("Choose one decision: --grant-scope or --deny, not both.");
+  }
+  if (!patterns.length && !deny && !text) {
+    throw new Error("`run answer` requires --grant-scope <glob>, --deny, or --reply <text>.");
+  }
+  const filePath = runFile(cwd, id);
+  return withFileLock(filePath, () => {
+    const run = loadRun(cwd, id);
+    const task = requireTask(run, taskId);
+    if (task.status !== NEEDS_INPUT) {
+      throw new Error(`Task "${task.id}" is not waiting for input (status "${task.status}").`);
+    }
+    const attempt = currentAttempt(task);
+    const round = attempt.inputRequests?.at(-1);
+    if (attempt.status !== NEEDS_INPUT || !round || round.answer) {
+      throw new Error(`Attempt "${attempt.id}" has no unanswered input request.`);
+    }
+    if (!attempt.threadId) {
+      throw new Error(
+        `Attempt "${attempt.id}" has no Codex thread id to resume; cancel the task and retry it instead.`
+      );
+    }
+    if (!attempt.worktree?.path || !fs.existsSync(attempt.worktree.path)) {
+      throw new Error(
+        `The worktree of attempt "${attempt.id}" is gone; cancel the task and retry it with --fresh.`
+      );
+    }
+    const request = round.request;
+    let insideLane = null;
+    if (patterns.length) {
+      if (task.kind !== "write") {
+        throw new Error(`Task "${task.id}" is read-only; it cannot be granted write scope.`);
+      }
+      if (request.kind !== "scope_extension") {
+        throw new Error(
+          `Task "${task.id}" asked a question, not for scope; answer it with --reply or --deny.`
+        );
+      }
+      const conflicts = [];
+      for (const other of Object.values(run.tasks)) {
+        if (other.id === task.id || other.kind !== "write" ||
+            !WRITE_SURFACE_TASK_STATUSES.has(other.status)) {
+          continue;
+        }
+        const surface = effectiveTaskScope(other);
+        for (const pattern of patterns) {
+          for (const overlap of overlappingPatterns(pattern, surface)) {
+            conflicts.push(`\`${pattern}\` overlaps \`${overlap}\` of ${other.status} task "${other.id}"`);
+          }
+        }
+      }
+      if (conflicts.length) {
+        throw new Error(
+          `Refusing the grant: ${conflicts.join("; ")}. Two active tasks must not share a write ` +
+            "surface; deny the request, narrow the grant, or wait until that task is integrated or cancelled."
+        );
+      }
+      const laneScope = lane?.scope ?? [];
+      const outside = patterns.filter((pattern) => !scopeCovers(laneScope, pattern));
+      insideLane = outside.length === 0;
+      if (!insideLane && !userApproved) {
+        throw new Error(
+          `Refusing the grant: ${outside.map((entry) => `\`${entry}\``).join(", ")} ` +
+            `${outside.length === 1 ? "is" : "are"} not inside lane "${run.lane}" ` +
+            `(scope: ${laneScope.length ? laneScope.join(", ") : "none declared"}). ` +
+            "The supervisor may grant only inside the lane on its own authority. Ask the user, then " +
+            "repeat the answer with --user-approved."
+        );
+      }
+    }
+    round.answer = {
+      mode: patterns.length ? "grant" : deny ? "deny" : "reply",
+      patterns,
+      reply: text || null,
+      insideLane,
+      userApproved: Boolean(userApproved) && patterns.length > 0,
+      answeredAt: nowIso(),
+      previousThreadId: attempt.threadId,
+      previousRunner: attempt.runner ? structuredClone(attempt.runner) : null
+    };
+    if (patterns.length) {
+      task.scopeGrants ??= [];
+      task.scopeGrants.push({
+        patterns,
+        attemptId: attempt.id,
+        round: round.round,
+        requestedPaths: request.paths,
+        reason: request.reason,
+        insideLane,
+        userApproved: round.answer.userApproved,
+        grantedAt: round.answer.answeredAt
+      });
+    }
+    attempt.status = "dispatching";
+    task.status = "dispatching";
+    task.result = null;
+    task.updatedAt = nowIso();
+    refreshRunStatus(run);
+    writeRun(cwd, run);
+    appendEvent(cwd, id, {
+      type: "task.input_answered",
+      taskId: task.id,
+      attemptId: attempt.id,
+      round: round.round,
+      kind: request.kind,
+      mode: round.answer.mode,
+      patterns,
+      insideLane,
+      userApproved: round.answer.userApproved,
+      replyPresent: Boolean(text)
+    });
+    const route = { model: attempt.model, reasoningEffort: attempt.reasoningEffort };
+    return {
+      runId: id,
+      taskId: task.id,
+      attemptId: attempt.id,
+      round: structuredClone(round),
+      model: attempt.model,
+      reasoningEffort: attempt.reasoningEffort,
+      resumeThreadId: attempt.threadId,
+      worktree: attempt.worktree,
+      scope: effectiveTaskScope(task),
+      answerPrompt: renderAnswerPrompt(task, round),
+      briefing: renderWorkerBriefing(cwd, run, task, lane, route)
+    };
+  });
+}
+
+/** Undo a recorded answer whose resume could not be launched, returning the task to `needs_input`. */
+export function revertTaskAnswer(cwd, runId, taskId, { attemptId, error }) {
+  const id = assertId(runId, "run");
+  const filePath = runFile(cwd, id);
+  return withFileLock(filePath, () => {
+    const run = loadRun(cwd, id);
+    const task = requireTask(run, taskId);
+    const attempt = currentAttempt(task, attemptId);
+    const round = attempt.inputRequests?.at(-1);
+    if (!round?.answer || attempt.status !== "dispatching") {
+      return task;
+    }
+    round.failedAnswers ??= [];
+    round.failedAnswers.push({ ...round.answer, error: String(error ?? ""), failedAt: nowIso() });
+    attempt.runner = round.answer.previousRunner ?? attempt.runner;
+    round.answer = null;
+    task.scopeGrants = (task.scopeGrants ?? []).filter(
+      (grant) => !(grant.attemptId === attempt.id && grant.round === round.round)
+    );
+    attempt.status = NEEDS_INPUT;
+    task.status = NEEDS_INPUT;
+    task.result = structuredClone(round.result);
+    task.updatedAt = nowIso();
+    refreshRunStatus(run);
+    writeRun(cwd, run);
+    appendEvent(cwd, id, {
+      type: "task.input_answer_failed",
+      taskId: task.id,
+      attemptId: attempt.id,
+      round: round.round,
+      error: String(error ?? "")
+    });
+    return task;
   });
 }
 
@@ -1839,12 +2297,19 @@ export function syncExecutionStatus(cwd, runId, taskId, { attemptId, status }) {
       exitCode: attempt.runner.exitCode,
       signal: attempt.runner.signal
     };
-    const fellBack = Boolean(status.resumeFallback && attempt.resumedFromAttemptId && !attempt.resumeFallback);
+    // A runner launched by `run answer` resumes the attempt's own thread; its
+    // fallback belongs to that answered round, not to the attempt's launch.
+    const answered = attempt.runner.inputRound
+      ? attempt.inputRequests?.find((round) => round.round === attempt.runner.inputRound)?.answer ?? null
+      : null;
+    const fallbackTarget = answered ?? attempt;
+    const resumed = answered ? true : Boolean(attempt.resumedFromAttemptId);
+    const fellBack = Boolean(status.resumeFallback && resumed && !fallbackTarget.resumeFallback);
     if (fellBack) {
-      attempt.resumeFallback = {
+      fallbackTarget.resumeFallback = {
         reason: String(status.resumeFallback.reason ?? "thread_missing"),
         message: String(status.resumeFallback.message ?? ""),
-        resumeThreadId: attempt.retry?.resumeThreadId ?? null,
+        resumeThreadId: answered ? answered.previousThreadId : attempt.retry?.resumeThreadId ?? null,
         at: nowIso()
       };
     }
@@ -1858,8 +2323,9 @@ export function syncExecutionStatus(cwd, runId, taskId, { attemptId, status }) {
         type: "task.resume_fallback",
         taskId: task.id,
         attemptId: attempt.id,
-        resumedFromAttemptId: attempt.resumedFromAttemptId,
-        ...attempt.resumeFallback
+        resumedFromAttemptId: attempt.resumedFromAttemptId ?? null,
+        ...(answered ? { inputRound: attempt.runner.inputRound } : {}),
+        ...fallbackTarget.resumeFallback
       });
     }
     if (JSON.stringify(previous) !== JSON.stringify(current)) {
@@ -2283,7 +2749,7 @@ export function configureRunGuidance(
       recoveredCorruptGuidance = true;
     }
     const active = Object.values(run.tasks).filter(
-      (task) => ACTIVE_TASK_STATUSES.has(task.status) || task.status === "reported"
+      (task) => SLOT_HOLDING_TASK_STATUSES.has(task.status) || task.status === "reported"
     );
     if (active.length) {
       throw new Error(
@@ -2448,7 +2914,7 @@ export function cancelTask(
     if (
       attempt &&
       !attempt.outcome &&
-      [...ACTIVE_TASK_STATUSES, "reported"].includes(attempt.status)
+      [...SLOT_HOLDING_TASK_STATUSES, "reported"].includes(attempt.status)
     ) {
       attempt.status = "cancelled";
       attempt.finishedAt = nowIso();
@@ -2487,7 +2953,7 @@ export function cancelRun(cwd, runId, reason = "") {
         if (
           attempt &&
           !attempt.outcome &&
-          [...ACTIVE_TASK_STATUSES, "reported"].includes(attempt.status)
+          [...SLOT_HOLDING_TASK_STATUSES, "reported"].includes(attempt.status)
         ) {
           attempt.status = "cancelled";
           attempt.finishedAt = nowIso();
@@ -2665,6 +3131,46 @@ function retryLabel(attempt) {
   return attempt.retry ? ` — fresh retry (${attempt.retry.reason})` : "";
 }
 
+function inputLabel(attempt) {
+  const answered = (attempt.inputRequests ?? []).filter((round) => round.answer);
+  if (!answered.length) {
+    return "";
+  }
+  const fallbacks = answered.filter((round) => round.answer.resumeFallback).length;
+  return ` — ${answered.length} answered input request${answered.length === 1 ? "" : "s"} (same attempt, same thread` +
+    `${fallbacks ? `; ${fallbacks} resume FELL BACK to a fresh thread` : ""})`;
+}
+
+function renderScopeGrants(task) {
+  return (task.scopeGrants ?? []).map((grant) =>
+    `${grant.patterns.join(", ")} (request ${grant.round} of ${grant.attemptId}; ` +
+    `${grant.insideLane ? "inside the lane" : grant.userApproved ? "OUTSIDE the lane, user-approved" : "outside the lane"})`
+  );
+}
+
+/** Paused workers, each with the exact command that answers it. */
+function pendingInputRequests(run) {
+  return Object.values(run.tasks)
+    .filter((task) => task.status === NEEDS_INPUT)
+    .map((task) => {
+      const attempt = task.attempts.at(-1);
+      const round = attempt?.inputRequests?.at(-1);
+      if (!round || round.answer) {
+        return `${task.id}: needs_input, but no unanswered request is recorded`;
+      }
+      const request = round.request;
+      const detail = request.kind === "scope_extension"
+        ? `asks for ${request.paths.join(", ")} — ${request.reason}`
+        : `asks: ${request.question} — ${request.reason}` +
+          `${request.options.length ? ` (options: ${request.options.join(" | ")})` : ""}`;
+      const answer = request.kind === "scope_extension"
+        ? `orch run answer ${run.id} ${task.id} --grant-scope <glob> | --deny [--reply <text>]`
+        : `orch run answer ${run.id} ${task.id} --reply <text> | --deny`;
+      return `${task.id} (${attempt.id}, request ${round.round} of at most ${MAX_INPUT_ROUNDS}) ${detail}. ` +
+        `Answer with: ${answer}`;
+    });
+}
+
 function renderList(items) {
   return items.length ? items.map((item) => `- ${item}`).join("\n") : "- none";
 }
@@ -2710,8 +3216,9 @@ export function renderSupervisorBriefing(cwd, run, lane) {
         attempt?.worktree?.path ? `worktree ${attempt.worktree.path}` : null
       ].filter(Boolean).join("; ");
       const attemptOutcomes = task.attempts.map(
-        (entry) => `${entry.id}: ${outcomeSummary(entry)}${retryLabel(entry)}`
+        (entry) => `${entry.id}: ${outcomeSummary(entry)}${retryLabel(entry)}${inputLabel(entry)}`
       );
+      const grants = renderScopeGrants(task);
       const pendingRetry = task.status === "pending" && task.pendingRetry
         ? `\n- next launch: ${task.pendingRetry.mode === "warm"
           ? `warm, resuming the thread of ${task.pendingRetry.previousAttemptId}`
@@ -2733,7 +3240,9 @@ export function renderSupervisorBriefing(cwd, run, lane) {
 - guidance items:
 ${renderList(guidanceItems)}
 - depends on: ${dependencies}
-- scope: ${task.scope.length ? task.scope.join(", ") : "read-only / no write scope"}
+- scope: ${task.scope.length ? task.scope.join(", ") : "read-only / no write scope"}${grants.length ? `
+- scope granted to this task:
+${renderList(grants)}` : ""}
 - objective: ${task.objective}
 - latest worker: ${workerHandle || "not dispatched"}
 - result: ${task.result?.summary || "none"}
@@ -2756,6 +3265,7 @@ ${renderList(task.acceptance)}`;
         .join("\n\n")
     : "No durable project facts have been recorded.";
   const substitutions = modelSubstitutionSummary(run);
+  const waiting = pendingInputRequests(run);
 
   return `# Supervisor briefing — ${run.id}
 
@@ -2786,6 +3296,10 @@ ${run.objective}
 ## Model availability and substitutions
 
 ${substitutions.pinned ? "A user-pinned model was substituted. Tell the user which model actually ran before reporting any result.\n\n" : ""}${renderList(substitutions.lines)}
+
+## Workers awaiting your answer
+
+${waiting.length ? "These workers are paused, not finished; each holds its pool slot until answered. Grant scope inside the lane on your own authority; anything outside the lane needs the user first (--user-approved). Never grant a path another active task may write.\n\n" : ""}${renderList(waiting)}
 
 ## Lane constraints
 

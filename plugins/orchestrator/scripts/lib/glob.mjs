@@ -74,6 +74,96 @@ export function matchesScope(filePath, patterns = []) {
   return matched;
 }
 
+const GLOB_CHARS = /[*?]/;
+
+function normalizePattern(pattern) {
+  const body = normalize(String(pattern).trim());
+  return body.endsWith("/") ? `${body}**` : body;
+}
+
+function literalPrefix(pattern) {
+  const index = pattern.search(GLOB_CHARS);
+  return index === -1 ? pattern : pattern.slice(0, index);
+}
+
+function literalSuffix(pattern) {
+  const match = /[*?]([^*?]*)$/.exec(pattern);
+  return match ? match[1] : pattern;
+}
+
+/**
+ * Whether two positive scope patterns could match a common path. A literal path
+ * is matched against the other pattern exactly. For two globs this is a
+ * conservative check: they are disjoint only when their literal prefixes or
+ * literal suffixes diverge, otherwise they are reported as overlapping. A false
+ * "overlap" refuses a grant the supervisor can rephrase; a false "disjoint"
+ * would let two workers write the same file, so the check errs one way only.
+ */
+export function patternsMayOverlap(left, right) {
+  const a = normalizePattern(left);
+  const b = normalizePattern(right);
+  if (!a || !b) {
+    return false;
+  }
+  if (!GLOB_CHARS.test(a)) {
+    return globToRegExp(b).test(a);
+  }
+  if (!GLOB_CHARS.test(b)) {
+    return globToRegExp(a).test(b);
+  }
+  const [prefixA, prefixB] = [literalPrefix(a), literalPrefix(b)];
+  if (!prefixA.startsWith(prefixB) && !prefixB.startsWith(prefixA)) {
+    return false;
+  }
+  const [suffixA, suffixB] = [literalSuffix(a), literalSuffix(b)];
+  return suffixA.endsWith(suffixB) || suffixB.endsWith(suffixA);
+}
+
+/** Every positive pattern of `patterns` that may overlap `pattern`. Negations only narrow a surface, so they are ignored. */
+export function overlappingPatterns(pattern, patterns = []) {
+  return patterns
+    .map((entry) => String(entry).trim())
+    .filter((entry) => entry && !entry.startsWith("!") && patternsMayOverlap(pattern, entry));
+}
+
+/**
+ * Whether `patterns` (an ordered scope list, negations allowed) certainly covers
+ * every path `pattern` can match. A literal path is checked exactly. A glob is
+ * covered only by a positive pattern that is identical to it or a `<dir>/**`
+ * ancestor of its literal prefix, with no later negation that could carve part
+ * of it out. Anything this cannot prove is reported as not covered.
+ */
+export function scopeCovers(patterns = [], pattern) {
+  const target = normalizePattern(pattern);
+  if (!target) {
+    return false;
+  }
+  if (!GLOB_CHARS.test(target)) {
+    return matchesScope(target, patterns);
+  }
+  let covered = false;
+  for (const raw of patterns) {
+    const entry = String(raw).trim();
+    if (!entry) {
+      continue;
+    }
+    if (entry.startsWith("!")) {
+      if (covered && patternsMayOverlap(entry.slice(1), target)) {
+        covered = false;
+      }
+      continue;
+    }
+    const outer = normalizePattern(entry);
+    const base = outer.endsWith("**") ? outer.slice(0, -2) : null;
+    if (outer === target ||
+        (base !== null && !GLOB_CHARS.test(base) && (base === "" || base.endsWith("/")) &&
+          literalPrefix(target).startsWith(base))) {
+      covered = true;
+    }
+  }
+  return covered;
+}
+
 export function partitionByScope(filePaths, patterns = []) {
   const inScope = [];
   const outOfScope = [];

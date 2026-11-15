@@ -5,6 +5,7 @@ import path from "node:path";
 import { parseFileList } from "./briefing.mjs";
 import { changedFiles, currentBranch, headSha } from "./git.mjs";
 import { partitionByScope } from "./glob.mjs";
+import { effectiveTaskScope } from "./runs.mjs";
 import { localDir } from "./state.mjs";
 
 function git(cwd, args) {
@@ -124,9 +125,13 @@ export function inspectTaskWorktree(task, attempt) {
         .filter(Boolean);
   const files = head === worktree.baseHead ? [] : diffFiles(worktree.path, worktree.baseHead, head);
   const dirty = changedFiles(worktree.path);
-  const { outOfScope } = task.scope.length
-    ? partitionByScope([...new Set([...files, ...dirty])], task.scope)
+  // The planned scope plus what the supervisor granted this task through
+  // `run answer`; anything else outside it is still refused.
+  const scope = effectiveTaskScope(task);
+  const { outOfScope } = scope.length
+    ? partitionByScope([...new Set([...files, ...dirty])], scope)
     : { outOfScope: [] };
+  const grantedScope = scope.filter((pattern) => !task.scope.includes(pattern));
   const declared = task.result?.structured?.files_touched ??
     parseFileList(task.result?.fields?.files_touched);
   const fileSet = new Set(files);
@@ -141,6 +146,8 @@ export function inspectTaskWorktree(task, attempt) {
     commits,
     files,
     outOfScope,
+    scope,
+    grantedScope,
     declared,
     undeclared: files.filter((file) => !declaredSet.has(file)),
     phantom: declared.filter((file) => !fileSet.has(file)),

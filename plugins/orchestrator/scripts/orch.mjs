@@ -44,7 +44,12 @@ import {
   retryTask,
   verifyTask
 } from "./lib/runs.mjs";
-import { launchTaskWorker, pollRunWorkers, stopTaskWorker } from "./lib/workers.mjs";
+import {
+  answerTaskWorker,
+  launchTaskWorker,
+  pollRunWorkers,
+  stopTaskWorker
+} from "./lib/workers.mjs";
 import {
   cleanupTaskWorktree,
   inspectTaskWorktree,
@@ -86,6 +91,7 @@ Usage:
   orch run verify <run-id> <task-id> --verdict <pass|fail> [--evidence <text>]... [--json]
   orch run decide <run-id> <task-id> --outcome <policy_refused|authority_escalated|integration_failed> --action <refuse|escalate|replan> --reason-code <code> [--evidence <text>]... [--json]
   orch run retry <run-id> <task-id> [--note <what to change>] [--fresh] [--json]
+  orch run answer <run-id> <task-id> (--grant-scope <glob>... [--user-approved] | --deny | --reply <text>) [--reply <text>] [--json]
   orch run cancel <run-id> [task-id] [--reason <text>] [--json]
   orch run recover <run-id> [--json]
   orch run launch <run-id> <task-id> [--json]
@@ -357,6 +363,16 @@ function commandLedger(argv, cwd) {
 }
 
 function renderPollUpdate(update) {
+  if (update.inputRequest) {
+    const request = update.inputRequest;
+    const detail = request.kind === "scope_extension"
+      ? `asks for scope: ${request.paths.join(", ")} — ${request.reason}`
+      : `asks: ${request.question}${request.options.length ? ` [${request.options.join(" | ")}]` : ""} — ${request.reason}`;
+    return `${update.taskId}\t${update.status}\trequest ${update.round}: ${detail}; answer with \`run answer\``;
+  }
+  if (update.inputCapReached) {
+    return `${update.taskId}\t${update.status}\tinput request cap reached; the further request was recorded as a blocker`;
+  }
   if (update.notice) {
     return `${update.taskId}\t${update.status}\t${update.notice} New attempt ${update.nextAttemptId}.`;
   }
@@ -493,8 +509,8 @@ function commandRun(argv, cwd) {
   }
 
   const { options, positionals } = parseArgs(rest, {
-    booleanOptions: ["json", "fresh"],
-    repeatableOptions: ["decision", "risk", "next", "evidence"],
+    booleanOptions: ["json", "fresh", "deny", "user-approved"],
+    repeatableOptions: ["decision", "risk", "next", "evidence", "grant-scope"],
     valueOptions: [
       "plan-file",
       "summary",
@@ -509,7 +525,8 @@ function commandRun(argv, cwd) {
       "action",
       "reason-code",
       "provenance",
-      "note"
+      "note",
+      "reply"
     ]
   });
   const runId = positionals[0];
@@ -670,6 +687,31 @@ function commandRun(argv, cwd) {
     return options.json
       ? emitJson(task)
       : emit(`Task ${taskId} is pending retry, ${how}; retry note: ${plan.note ? "recorded" : "none"}.${escalation}`);
+  }
+
+  if (action === "answer") {
+    const taskId = positionals[1];
+    if (!taskId) {
+      throw new Error("`orch run answer` requires a task id.");
+    }
+    const run = loadRun(cwd, runId);
+    const answered = answerTaskWorker(cwd, runId, taskId, requireLane(cwd, run.lane), {
+      grantScope: splitList(options["grant-scope"]),
+      deny: Boolean(options.deny),
+      reply: options.reply ?? null,
+      userApproved: Boolean(options["user-approved"])
+    });
+    const answer = answered.round.answer;
+    const decision = answer.mode === "grant"
+      ? `granted ${answer.patterns.join(", ")} to the task (${answer.insideLane ? "inside the lane" : "outside the lane, user-approved"})`
+      : answer.mode === "deny" ? "denied" : "replied";
+    return options.json
+      ? emitJson(answered)
+      : emit(
+          `Answered request ${answered.round.round} of ${taskId}: ${decision}. Resumed thread ` +
+          `${answered.resumeThreadId} on ${answered.model} (${answered.reasoningEffort}) in ` +
+          `${answered.worktree.path} as PID ${answered.runner.pid}.`
+        );
   }
 
   if (action === "cancel") {

@@ -42,6 +42,10 @@ writeStatus({ status: "running" });
 const output = fs.createWriteStream(spec.outputFile, { flags: "a", mode: 0o600 });
 const errors = fs.createWriteStream(spec.errorFile, { flags: "a", mode: 0o600 });
 const prompt = fs.readFileSync(spec.promptFile);
+// A resume after `run answer` sends only the answer, because the thread already
+// holds the briefing. A fresh thread started in its place needs the full
+// briefing instead, which the launcher writes to `fallbackPromptFile`.
+const fallbackPrompt = spec.fallbackPromptFile ? fs.readFileSync(spec.fallbackPromptFile) : prompt;
 const [command, ...prefixArgs] = spec.codexCommand;
 
 // A resumed thread does not inherit its model, effort, or sandbox (verified against
@@ -83,7 +87,7 @@ function stopChild(signal = "SIGTERM") {
 process.on("SIGTERM", () => stopChild("SIGTERM"));
 process.on("SIGINT", () => stopChild("SIGINT"));
 
-function runCodex(resumeThreadId) {
+function runCodex(resumeThreadId, input = prompt) {
   return new Promise((resolve) => {
     const child = spawn(command, codexArgs(resumeThreadId), {
       cwd: spec.worktreePath,
@@ -131,7 +135,7 @@ function runCodex(resumeThreadId) {
     child.stdin.on("error", () => {
       // A child that exits before reading the prompt is reported by its exit code.
     });
-    child.stdin.end(prompt);
+    child.stdin.end(input);
     child.on("error", (error) => resolve({ error }));
     // `close` rather than `exit`: stderr must be fully read before deciding
     // whether a failed resume reported a missing thread.
@@ -148,16 +152,17 @@ if (
   !result.sawThread &&
   MISSING_THREAD.test(result.stderrText)
 ) {
-  // The thread to resume is gone. The briefing is self-contained, so the same
-  // prompt runs as a fresh thread in the same worktree; the fallback is recorded
-  // in the status file and surfaced as a `task.resume_fallback` run event.
+  // The thread to resume is gone. The briefing is self-contained, so it runs as a
+  // fresh thread in the same worktree (the full briefing when the resume carried
+  // only an answer); the fallback is recorded in the status file and surfaced as
+  // a `task.resume_fallback` run event.
   resumeFallback = {
     reason: "thread_missing",
     message: result.stderrText.trim().split("\n").at(-1).slice(0, 500)
   };
   errors.write("\n[orchestrator] resume failed; relaunching as a fresh thread.\n");
   writeStatus({ status: "running" });
-  result = await runCodex(null);
+  result = await runCodex(null, fallbackPrompt);
 }
 
 if (result.error) {

@@ -18,6 +18,8 @@ lane constraints, durable ledger facts, and an output schema. For each completed
 also receives that task's summary, decisions, assumptions, changed files, and supervisor-verified
 evidence, so it builds on settled choices instead of re-deriving or contradicting them. A worker
 may not spawn a subordinate pool, widen scope, integrate other work, or alter orchestration state.
+It may ask: a typed `needs_input` request for a scope extension or a decision pauses the attempt
+until the supervisor answers (see "Worker requests").
 
 New runs auto-route by default. During planning, the Claude supervisor assigns each task a model,
 effort, and routing reason. The aliases `astra`, `sol`, `terra`, and `luna` normalize to the exact
@@ -87,8 +89,14 @@ A task progresses through:
 ```text
 pending -> dispatching -> running -> reported -> completed
                               \-> blocked | failed | cancelled
+running -> needs_input -> dispatching -> running (run answer; same attempt, same thread)
+needs_input -> cancelled
 blocked | failed | cancelled -> pending (explicit retry, warm or fresh)
 ```
+
+`needs_input` means the worker returned a typed request instead of a result. The attempt stays
+open with no outcome, keeps its pool slot, and blocks plan and guidance revisions like a running
+worker; for run status it counts as running.
 
 `reported` means a structured worker result exists. It is deliberately separate from
 `completed`. Read and verification tasks require a supervisor verdict. Write tasks require
@@ -108,6 +116,11 @@ verification while preserving every earlier attempt and its outcome; the cleared
 verification, and disposition are first copied onto the attempt as `review`. Version 3 and version 4 run
 files without outcomes remain readable and are shown as unclassified legacy state rather than
 being guessed or backfilled.
+
+`needs_input` is deliberately not an outcome. `lib/outcomes.mjs` lists it in
+`NON_TERMINAL_OUTCOMES`, and `validateOutcomeRecord` rejects it as a terminal value. A paused
+attempt has no outcome, so learning collection skips it like any in-flight attempt; once answered,
+the same attempt ends with exactly one outcome, which is the only thing learning data sees.
 
 Worker reports do not create accepted outcomes. Only supervisor verification or successful
 integration can record `accepted`. Policy refusal and authority escalation are explicit supervisor
@@ -365,6 +378,79 @@ collected before this feature existed stay valid. `run retry` advises escalating
 warm retries of the same task have failed. No state version bump was needed: every new field is
 optional, and version-3 through version-5 runs retry the same way.
 
+## Worker requests
+
+Before 0.6.0 a worker that needed one file outside its scope, or faced a genuinely ambiguous
+objective, could only report a blocker, which ended the attempt and cost a retry. Now the result
+schema has a `needs_input` field. It is nullable and, like every property, required: structured
+outputs reject a declared property missing from `required`, and its nested object sets
+`additionalProperties: false` with all five keys required.
+
+```text
+needs_input: null
+  | { kind: "scope_extension", paths: [<repo-relative path>...], reason, question: null, options: [] }
+  | { kind: "question",        paths: [], reason, question: <text>, options: [<reading>...] }
+```
+
+A malformed request (unknown kind, no reason, an absolute or `..` path, a question without text)
+fails the result contract. A well-formed one makes `run poll` record the round on
+`attempt.inputRequests` (request, thread id, the paused result) and set the task and attempt to
+`needs_input`, with a `task.needs_input` event. The worker prompt's "Required behavior" block tells
+write workers to request an extension for a necessary adjacent change instead of editing it,
+working around it, or stopping, and every worker to ask when the objective admits two materially
+different readings instead of guessing, and to report a blocker only when neither would help.
+
+`run answer <run-id> <task-id>` takes exactly one decision: `--grant-scope <glob>` (repeatable;
+write tasks answering a scope request only), `--deny`, or `--reply <text>`; a reply may accompany
+a grant or denial. It records the answer on the round and a `task.input_answered` event, then
+resumes the attempt through the warm-retry path: `codex exec -C <worktree> --sandbox <mode> resume
+--model <m> -c model_reasoning_effort=<e> ... <thread-id> -`, with the attempt's own model and
+effort (so a substituted model stays substituted) and the task's sandbox, all passed explicitly.
+The resumed thread receives a short "Supervisor answer" message; the wrapper's fresh-thread
+fallback receives the full briefing instead (`fallbackPromptFile`), whose "Supervisor answers"
+section lists every answered round. A fallback is recorded on that round's answer and as a
+`task.resume_fallback` event with `inputRound`. Each round's prompt, spec, status, and output live
+under `workers/<task>/<attempt>/round-<n>/`; the previous runner is kept on the answer. If the
+resume cannot be launched the answer is reverted and the task returns to `needs_input`.
+
+Rules the runtime enforces:
+
+- **A grant belongs to the task.** It is appended to `task.scopeGrants` (patterns, round, attempt,
+  the requested paths and reason, whether it lies inside the lane, and user approval). The lane and
+  the planned `task.scope` never change. `effectiveTaskScope` (planned scope plus grants) is what
+  the briefing shows and what `run inspect` and `run integrate` check; the inspection reports
+  `grantedScope`. Every other out-of-scope path is still refused. Grants persist for the task's
+  later attempts and survive a plan revision of the task.
+- **No shared write surface.** A grant is refused when any of its patterns may overlap the
+  planned-plus-granted scope of another write task that is `dispatching`, `running`,
+  `needs_input`, or `reported` (not yet integrated). Overlap is exact for literal paths and
+  conservative for two globs: they are treated as disjoint only when their literal prefixes or
+  literal suffixes diverge, so the check can refuse a grant that was safe but never admits one
+  that was not.
+- **Authority ends at the lane.** A grant whose patterns the lane's scope does not provably cover
+  is refused unless `--user-approved` is passed, which is recorded. The supervisor may grant
+  inside the lane on its own authority; outside it, the user decides.
+- **Round trips are capped.** A task gets at most 3 answered round trips, counted across all its
+  attempts. A further request is recorded on the attempt with `capped: true` and closes it as an
+  ordinary blocker: `worker_blocked` with `scope_required` (scope request) or
+  `ambiguous_objective` (question), the request appended to the blockers.
+
+**Same attempt, not a new one.** An answered task continues the attempt it paused in rather than
+starting a linked attempt. The attempt and outcome model records one outcome per attempt, and
+retries, `retryCount`, warm-failure escalation, and learning samples are all attempt-based; a
+linked attempt would need a terminal outcome for the paused one (a fake failure, or a new
+"needs_input" outcome every consumer would have to exclude) and would count as a retry. Continuing
+the attempt keeps one thread, one worktree, one route, and one outcome. The costs are that the
+attempt's duration includes the time spent waiting for the answer, and that several runner records
+belong to one attempt, which `inputRequests[].answer.previousRunner` and the per-round directories
+keep auditable.
+
+**No state version bump.** Every new field (`attempt.inputRequests`, `task.scopeGrants`,
+`runner.inputRound`, `runner.fallbackPromptFile`) is optional, and runs saved by versions 3 to 5
+load, pause, answer, resume, and retry unchanged. The new `needs_input` status is written only by a
+version-6 build; version 6 is itself new in 0.6.0, so no released build reads version-6 state, and
+0.5.x already refuses it.
+
 ## Collection and integration
 
 `run poll` reads status files for active tasks. Successful final JSON is recorded as task
@@ -374,7 +460,8 @@ For write tasks, `run inspect` checks:
 
 - the worktree has no uncommitted changes
 - at least one task commit exists
-- every changed path matches task scope
+- every changed path matches the task's planned scope plus any scope granted to it through
+  `run answer`
 - every changed path was declared by the worker
 - every declared path actually changed
 
@@ -441,6 +528,9 @@ memory.
 | Codex process exits non-zero | Task `failed`, stderr tail or event-stream error retained | Inspect, then explicit retry or replan |
 | Codex rejects the model as unavailable | Attempt `execution_failed`/`model_unavailable`; model recorded unavailable | Automatic relaunch one rung down the ladder, recorded and surfaced; escalate when the ladder is exhausted |
 | Worker reports blockers | Task `blocked`, structured result retained | Expand authorized scope, resolve prerequisite, or replan |
+| Worker returns `needs_input` | Task and attempt `needs_input`; no outcome; pool slot held | `run answer` with a grant, denial, or reply; the same attempt resumes |
+| Grant overlaps another active task, or lies outside the lane without `--user-approved` | Grant refused; task stays `needs_input` | Deny, narrow the grant, wait for the other task, or ask the user |
+| Fourth request on one task | Attempt `worker_blocked` (`scope_required` or `ambiguous_objective`) | Retry with a note or replan |
 | Malformed result | Task `failed` | Retry once if transient; otherwise report |
 | Warm retry's thread missing or replaced | Same attempt continues on a fresh thread in the same worktree; `resumeFallback` and `task.resume_fallback` recorded | Review as usual; the briefing was self-contained |
 | Scope/declaration mismatch | Integration refused | Reject result and replan; do not cherry-pick |

@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { matchesScope, partitionByScope } from "../plugins/orchestrator/scripts/lib/glob.mjs";
+import {
+  matchesScope,
+  overlappingPatterns,
+  partitionByScope,
+  patternsMayOverlap,
+  scopeCovers
+} from "../plugins/orchestrator/scripts/lib/glob.mjs";
 
 test("* does not cross path separators", () => {
   assert.equal(matchesScope("src/a.js", ["src/*.js"]), true);
@@ -63,4 +69,31 @@ test("partitionByScope splits on the same rules", () => {
   );
   assert.deepEqual(inScope, ["src/a.js"]);
   assert.deepEqual(outOfScope, ["docs/b.md", "src/generated/c.js"]);
+});
+
+test("pattern overlap is exact for literal paths and conservative for globs", () => {
+  assert.equal(patternsMayOverlap("lib/helper.js", "lib/**"), true);
+  assert.equal(patternsMayOverlap("lib/helper.js", "src/**"), false);
+  assert.equal(patternsMayOverlap("lib/a.js", "lib/b.js"), false);
+  assert.equal(patternsMayOverlap("lib/*.js", "lib/**"), true);
+  assert.equal(patternsMayOverlap("lib/", "lib/deep/x.ts"), true);
+  assert.equal(patternsMayOverlap("src/**", "lib/**"), false);
+  // Divergent literal suffixes cannot match the same path.
+  assert.equal(patternsMayOverlap("src/*.js", "src/*.css"), false);
+  // Unprovable cases are reported as overlapping.
+  assert.equal(patternsMayOverlap("src/*/a.js", "src/x/*"), true);
+  // Negations only narrow a surface and are ignored.
+  assert.deepEqual(overlappingPatterns("lib/a.js", ["src/**", "!lib/a.js", "lib/**"]), ["lib/**"]);
+});
+
+test("scope coverage proves containment or reports it as not covered", () => {
+  assert.equal(scopeCovers(["src/**", "lib/**"], "lib/helper.js"), true);
+  assert.equal(scopeCovers(["src/**"], "lib/helper.js"), false);
+  assert.equal(scopeCovers(["src/**"], "src/deep/*.js"), true);
+  assert.equal(scopeCovers(["src/"], "src/**"), true);
+  assert.equal(scopeCovers(["src/*.js"], "src/*.js"), true);
+  assert.equal(scopeCovers(["src/*.js"], "src/**"), false);
+  assert.equal(scopeCovers(["src/**", "!src/secret/**"], "src/secret/key.js"), false);
+  assert.equal(scopeCovers(["src/**", "!src/secret/**"], "src/*.js"), false);
+  assert.equal(scopeCovers([], "src/a.js"), false);
 });
