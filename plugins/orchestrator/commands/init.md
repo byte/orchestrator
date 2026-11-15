@@ -3,7 +3,7 @@ description: Set up orchestrator in this repository and check that Codex is read
 allowed-tools: Bash(node:*), AskUserQuestion
 ---
 
-Initialize orchestrator and report whether delegation will actually work.
+Initialize orchestrator and report whether Codex workers will actually be able to launch.
 
 ```bash
 node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" init
@@ -21,6 +21,6 @@ Present the output, then:
   committed, and that `.orchestrator/local/` is self-ignored because run state, worker handles,
   and worktrees only mean anything on this machine.
 
-Also note, once: orchestrator compiles briefings in whatever model is running the main
-thread. It is worth the overhead when that model is a strong supervising model, and much
-less so otherwise.
+Also note, once: the model running this main thread is the supervisor that plans, routes,
+reviews, and integrates every run, and the plugin never selects it. Claude Opus 5.5 and Claude
+Fable 5.2 are the supported supervisors; start `/orchestrator:run` from a session on one of them.

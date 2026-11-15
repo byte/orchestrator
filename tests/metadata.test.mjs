@@ -32,7 +32,7 @@ test("release metadata stays synchronized", () => {
   const packageManifest = json("package.json");
   const pluginManifest = json("plugins/orchestrator/.claude-plugin/plugin.json");
   const marketplace = json(".claude-plugin/marketplace.json");
-  assert.equal(packageManifest.version, "0.5.1");
+  assert.equal(packageManifest.version, "0.6.0");
   assert.equal(pluginManifest.version, packageManifest.version);
   assert.equal(marketplace.metadata.version, packageManifest.version);
   assert.equal(marketplace.plugins[0].version, packageManifest.version);
@@ -55,4 +55,27 @@ test("release documentation describes the supervisor pool and recovery surface",
   assert.match(readme, /\/orchestrator:resume/);
   assert.match(readme, /finalizing/);
   assert.match(readme, /fake Codex\s+processes/);
+});
+
+test("the 0.6.0 release notes and README describe the migration and current retry behavior", () => {
+  const readme = fs.readFileSync(path.join(root, "README.md"), "utf8");
+  const changelog = fs.readFileSync(path.join(root, "CHANGELOG.md"), "utf8");
+  assert.match(readme, /### Upgrading from 0\.5\.x/);
+  assert.match(readme, /`sol` and `terra` now resolve to `gpt-6\.1-sol` and `gpt-6\.1-terra`/);
+  assert.match(readme, /`astra` \(`gpt-6-astra`\) is new/);
+  assert.match(readme, /Retries resume the previous attempt's Codex thread by default/);
+  assert.doesNotMatch(readme, /retries currently start a fresh/);
+  assert.match(readme, /orch run routes/);
+  const entry = changelog.slice(changelog.indexOf("## 0.6.0"), changelog.indexOf("## 0.5.1"));
+  for (const phrase of [
+    /`gpt-6\.1-sol` and `gpt-6\.1-terra`/,
+    /`astra`\s+\(`gpt-6-astra`\) is new/,
+    /bare `gpt-5\.6` alias is gone/,
+    /`\/orchestrator:do`, `\/orchestrator:accept`, `orch brief`, `orch accept`/,
+    /one rung down/,
+    /default to 5 concurrent workers instead of 3/,
+    /run routes/
+  ]) {
+    assert.match(entry, phrase);
+  }
 });

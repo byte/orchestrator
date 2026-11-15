@@ -5,9 +5,8 @@ A Claude Code supervisor for a pool of Codex workers.
 `orchestrator` keeps Claude in the main thread as planner, scheduler, reviewer, replanner,
 integrator, and user-facing manager. Bounded execution tasks run in parallel through detached
 Codex CLI processes routed to `gpt-6-astra`, `gpt-6.1-sol`, `gpt-6.1-terra`, or `gpt-5.6-luna`.
-Durable run
-state, checkpoints, evidence, and project memory let the supervisor recover after context
-compaction, interruption, or a new Claude Code session.
+Durable run state, checkpoints, evidence, and project memory let the supervisor recover after
+context compaction, interruption, or a new Claude Code session.
 
 The supervisor is whichever Claude model owns the Claude Code session — Claude Opus and Claude
 Fable are both supported, specifically Claude Opus 5.5 and Claude Fable 5.2.
@@ -39,6 +38,11 @@ what should happen, what is acceptable, what gets integrated, and when the whole
 - A committed ledger for stable project facts that should survive across machines
 - Warm retries that resume the failed worker's Codex thread and tell it what the supervisor found
   wrong, with `--fresh` for a cold start
+- Worker questions: a worker that needs an adjacent file or faces an ambiguous objective pauses
+  with a typed request, and the supervisor's answer resumes the same attempt
+- A blocking `run wait` that wakes the supervisor when a worker changes state, instead of polling
+- A read-only route-evidence table (`run routes`) showing how each model and effort actually
+  performed in this repository's saved runs
 - Deliberate retry, cancellation, replanning, conflict abort, and cleanup paths
 
 ## Requirements
@@ -134,13 +138,15 @@ done — for you to confirm. You do not have to define one first.
 
 From there Claude proposes a dependency-aware plan, records a checkpoint capturing the reasoning
 and model-routing choices behind it, and asks for confirmation when new authority is needed.
-Independent ready tasks launch into separate worktrees. The supervisor remains responsive: it
+Independent ready tasks launch into separate worktrees, up to 5 at a time by default
+(`--max-workers` changes it). The supervisor remains responsive: it
 starts one background `run wait` that wakes it when a worker changes state, instead of polling,
 reviews their structured evidence, integrates passing write tasks, and
 replans or retries when evidence invalidates the current route.
 
 Model and effort are automatic by default. During planning, Fable or Opus must assign every task
-an exact `model`, `effort`, and concise `routingReason`:
+an exact `model`, `effort`, and concise `routingReason`, after reading `run routes` for what each
+route actually achieved in this repository:
 
 | Alias | Exact slug | Use it for |
 | --- | --- | --- |
@@ -190,10 +196,28 @@ Resume the same manager after interruption or compaction:
 This polls workers first and reconstructs the supervisor briefing from disk. It does not create a
 replacement run or rely on conversational memory.
 
+### Upgrading from 0.5.x
+
+- The aliases `sol` and `terra` now resolve to `gpt-6.1-sol` and `gpt-6.1-terra`, not the GPT-5.6
+  models. `astra` (`gpt-6-astra`) is new. The bare `gpt-5.6` alias is gone, and family names such
+  as `gpt-6` or `gpt-6.1` are rejected because they do not name a tier.
+- Runs saved by 0.5.x, including in-flight ones, keep their persisted `gpt-5.6-sol` or
+  `gpt-5.6-terra` slugs on resume and retry. New plans cannot select those slugs. Any change to an
+  old run rewrites it as state version 6, which 0.5.x refuses to open, so finish or abandon a run
+  with one release.
+- A model Codex rejects as unavailable is no longer a plain failure: the task relaunches one rung
+  down the ladder and the substitution is recorded and shown, including for a pinned model.
+- New runs default to 5 concurrent workers instead of 3.
+- The legacy single-task `do` and `accept` slash commands are removed, together with
+  `orch brief`, `orch accept`, and `orch lane bind|unbind`. Use `/orchestrator:run` for single
+  tasks too. Existing
+  `.orchestrator/local/threads.json` files still load; nothing writes lane thread pointers any more.
+
 ## Lifecycle
 
 1. **Plan.** Claude turns the objective into bounded `write`, `read`, and `verify` tasks with scope,
-   dependencies, constraints, and checkable acceptance criteria.
+   dependencies, constraints, and checkable acceptance criteria, and routes each one using the
+   lane's route evidence when there is enough of it.
 2. **Launch.** Ready tasks claim pool capacity. Each gets a fresh worktree (a warm retry reuses its
    task's), exact model and effort,
    least-privilege sandbox, authoritative briefing, and required result schema.
@@ -255,6 +279,20 @@ the platform drops only delays the wake; `--no-watch` relies on the interval alo
 wall-clock limit — the plan's `timeoutMinutes`, else 120 minutes on `astra`, 90 on `sol`, 60 on
 `terra`, and 30 on `luna` — and a worker past it is reported once, never stopped; stopping it is
 the supervisor's `run cancel`. `run poll` remains for a one-off, non-blocking look.
+
+Show how each model and effort has performed in this repository's saved runs:
+
+```text
+orch run routes [--lane <lane>] [--include-legacy] [--json]
+```
+
+It reads local run state only and changes nothing. Per actual model and effort it shows finished
+attempts, first-attempt acceptance, retries, substitutes, and median duration. An attempt counts
+for the model it ran on; a launch Codex rejected as unavailable counts for neither model, answered
+worker requests are part of their attempt, and the retired `gpt-5.6-sol` and `gpt-5.6-terra`
+attempts are left out unless `--include-legacy` is passed. Counts sit beside every rate, and no rate
+is printed for fewer than 5 samples. `run plan`, `run briefing`, and `run resume` show the table
+for the run's lane once it holds at least 5 counted attempts.
 
 Retry a failed or blocked task with a correction for the worker:
 
@@ -410,12 +448,17 @@ finalization, and cleanup without consuming model quota.
   machines.
 - Integration uses cherry-pick. Conflicts abort and require the supervisor to replan or request
   direction.
-- Codex thread IDs are retained for diagnosis and handoff; retries currently start a fresh bounded
-  worker with reconstructed context rather than resuming an old task thread.
+- Retries resume the previous attempt's Codex thread by default. That depends on Codex still
+  holding the thread on this machine; when it does not, the retry falls back to a fresh thread with
+  the full briefing and records that it did. `run retry --fresh` always starts a new thread.
 - The plugin validates supported model names and effort combinations, but actual model entitlement
-  belongs to the account authenticated in Codex CLI. A model Codex rejects as unavailable is
-  recorded as a failed attempt and the task relaunches on the next model down the ladder; only
-  when no model is left does the task fail for the supervisor to escalate.
+  belongs to the account authenticated in Codex CLI. A launch Codex rejects as unavailable is
+  closed with a `model_unavailable` outcome (it never reached a worker, so route evidence does not
+  count it) and the task relaunches on the next model down the ladder; only when no model is left
+  does the task fail for the supervisor to escalate. Only the ChatGPT-account rejection wording has
+  been observed; detection on an API-key login is inferred.
+- Route evidence is local history, not a benchmark. It covers only this machine's saved runs and
+  says nothing about tasks unlike the ones that produced it.
 - Automated tests validate the complete process protocol with fake workers. A real authenticated
   Codex smoke test is still the environment-level proof for a particular installation.
 

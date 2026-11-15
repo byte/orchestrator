@@ -155,7 +155,7 @@ function commandInit(cwd) {
   const lines = [`Initialized orchestrator at ${dir}`, ""];
   lines.push(created.length ? `Created:\n${created.map((file) => `- ${file}`).join("\n")}` : "Nothing to create; already initialized.");
   lines.push("");
-  lines.push("`local/` is self-ignored: thread bindings stay on this machine, lanes and the ledger are meant to be committed.");
+  lines.push("`local/` is self-ignored: run state, worker handles, and worktrees stay on this machine; lanes and the ledger are meant to be committed.");
   lines.push("");
   lines.push(renderPreflight(preflight(cwd)));
   if (!report.ok) {

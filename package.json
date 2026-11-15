@@ -1,6 +1,6 @@
 {
   "name": "orchestrator-plugin",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "private": true,
   "type": "module",
   "description": "A durable Claude supervisor for a routed Codex worker pool.",

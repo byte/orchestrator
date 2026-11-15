@@ -1,5 +1,70 @@
 # Changelog
 
+## 0.6.0
+
+This release changes the worker roster and removes the single-task commands.
+Read "Upgrading from 0.5.x" in the README before resuming a 0.5.x run.
+
+Breaking changes:
+
+- The worker roster is now GPT-6 based. `sol` and `terra` resolve to
+  `gpt-6.1-sol` and `gpt-6.1-terra`, no longer the GPT-5.6 models. `astra`
+  (`gpt-6-astra`) is new, for work where a wrong result is expensive or hard to
+  catch, and `luna` stays `gpt-5.6-luna`. Every model accepts every effort from
+  `low` through `ultra`, including `luna` with `ultra`, which 0.5.x rejected.
+- The bare `gpt-5.6` alias is gone, and family names such as `gpt-6` and
+  `gpt-6.1` are rejected because they do not name a tier. New plans cannot
+  select the retired `gpt-5.6-sol` or `gpt-5.6-terra` slugs; runs saved by
+  0.5.x keep them on resume and retry.
+- Run state is now version 6. A 0.5.x build refuses a run this release has
+  written, so finish or abandon a run with one release.
+- A model Codex rejects as unavailable to your account no longer fails the
+  task. The task relaunches one rung down `astra` → `sol` → `terra` → `luna`
+  with the same effort, the rest of the run skips that model, and the
+  substitution is recorded on the attempt, in the run events, in `run poll`,
+  and in the supervisor briefing. A substituted user pin is flagged and Claude
+  is told to say which model ran. The task fails only when no rung is left.
+- New runs default to 5 concurrent workers instead of 3.
+- `/orchestrator:do`, `/orchestrator:accept`, `orch brief`, `orch accept`, and
+  `orch lane bind|unbind` are removed, along with lane thread pointers. Use
+  `/orchestrator:run` for single tasks as well. Existing `threads.json` files
+  still load.
+
+New:
+
+- Retries are warm by default. A failed or blocked task resumes its worker's
+  own Codex thread, in its previous worktree, with a "Previous attempt" section
+  carrying the outcome, the supervisor's evidence, and the files it changed.
+  `run retry --note "<what to change>"` adds a correction for the worker, and
+  `--fresh` starts a new thread. If Codex no longer has the thread, the retry
+  falls back to a fresh one and records that it did.
+- Workers can ask instead of stopping. A worker that needs one adjacent file
+  outside its scope, or faces an objective with two readings, pauses with a
+  typed `needs_input` request. `run answer` grants scope to that task only,
+  denies, or replies, and the same attempt continues on the same thread. Claude
+  may grant inside the lane; anything outside it needs the user's approval. A
+  task gets at most 3 answered requests, and they do not count as retries.
+- `run wait` blocks until a worker changes state and prints the `run poll`
+  payload, so the supervisor runs it in the background and is woken instead of
+  polling. Each task also has a wall-clock limit (plan field `timeoutMinutes`,
+  else 30 to 120 minutes by model) that is reported, never enforced.
+- `run routes` shows, per model and effort, how many attempts ran in this
+  repository's saved runs, how many first attempts were accepted, retries, and
+  median duration. It reads local run state only. Rates are withheld below 5
+  samples, rejected launches count for no model, and retired GPT-5.6 attempts
+  are excluded unless `--include-legacy` is passed. `run plan`, `run briefing`,
+  and `run resume` show the lane's table once it has 5 counted attempts.
+- The routing guidance in `/orchestrator:run` was rewritten: `sol` at `high` by
+  default for non-trivial work, `astra` for independent verification of work
+  done on `sol` or below, `luna` only for mechanical leaf tasks with a stated
+  reason, and tasks sized by write-surface independence rather than a target
+  count. Claude Opus 5.5 and Claude Fable 5.2 are the supported supervisors.
+
+None of the new behavior has yet been exercised in a real `/orchestrator:run`
+against Codex; it is covered by tests with fake Codex processes. The Codex CLI
+behavior it relies on (resume flags, model changes on resume, missing-thread
+and unavailable-model errors) was probed directly against Codex CLI 0.169.0.
+
 ## 0.5.1
 
 - Fixed a defect that made every 0.5.0 worker launch fail. `blocker_code` was

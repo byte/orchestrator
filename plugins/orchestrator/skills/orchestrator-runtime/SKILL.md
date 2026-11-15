@@ -62,6 +62,16 @@ All support `--json` where structured output is useful.
 - New runs auto-route by default. The supervisor must save an exact model, effort, and concise
   routing reason on each planned task unless the user explicitly pinned that dimension. The
   runtime rejects unresolved automatic routes and conflicts with explicit pins.
+- Before routing, read `run routes [--lane <lane>] [--include-legacy] [--json]`: a read-only
+  table over local run state of finished attempts per actual model and effort, with first-attempt
+  acceptance, retries, substitutes, and median duration. Attempts count for the model they ran
+  on; a launch Codex rejected as unavailable counts for neither model; answered `needs_input`
+  rounds are part of their attempt; retired `gpt-5.6-sol`/`gpt-5.6-terra` attempts are excluded
+  unless `--include-legacy`. No rate is printed below 5 samples. `run plan`, `run briefing`, and
+  `run resume` show the lane's table once it has at least 5 counted attempts. It is evidence, not
+  a rule; cite it in `routingReason` when it changed a route. It never reads the learning store.
+- New runs default to 5 concurrent workers (`run create --max-workers <n>`). Size tasks by
+  write-surface independence; do not invent tasks to fill the pool.
 - Use `run resume` after interruption or compaction. It polls workers and reconstructs the
   briefing from durable state. Never continue from conversation memory alone.
 - Use `run checkpoint` after approving a plan and at every wave boundary. `run launch` refuses to

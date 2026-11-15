@@ -1,6 +1,6 @@
 ---
 name: briefing-compiler
-description: How to write the task text handed to Codex so it does not need supervision — use when planning `/orchestrator:run` tasks, writing a lane definition, or when a worker came back out of scope or having re-derived known context
+description: How to write the task text handed to Codex so it does not need supervision — use when planning `/orchestrator:run` tasks, writing a lane definition, writing a retry note, answering a worker's scope request or question, or when a worker came back out of scope or having re-derived known context
 ---
 
 # Briefing compiler
@@ -41,6 +41,40 @@ Worktree inspection is only as useful as the boundary it enforces.
   `kind` to match.
 - **Vague acceptance criteria.** "Works correctly" cannot be checked. "`npm test` passes and
   `run inspect` reports the declared files only" can.
+
+## Retry notes
+
+A retry is warm by default: the worker resumes its own thread and sees a "Previous attempt"
+section with its outcome, your verification evidence, and the files it changed. The note you pass
+with `run retry --note` is the one thing it cannot work out for itself, so spend it on that:
+
+- **Say what to change, not what went wrong.** The evidence already says what failed. "Keep the
+  public signature; move the validation into the parser" beats "tests failed".
+- **Name the decision you made.** If you chose between two readings, or ruled an approach out,
+  say which and why, so the worker does not reopen it.
+- **Keep it to the delta.** Do not restate the objective, scope, or acceptance criteria; they are
+  still in the briefing.
+- **Use `--fresh` instead of a longer note** when the earlier thread is anchored on an approach you
+  want dropped. A warm worker tends to defend what it already built.
+- **Two failed warm retries mean the briefing or the tier is wrong**, not that a third note will
+  help. Fix the task or escalate the route.
+
+## Answering worker requests
+
+A worker that needs an adjacent file or faces an ambiguous objective pauses with `needs_input`
+instead of guessing. Each request is a signal about the briefing.
+
+- **Grant scope** (`run answer --grant-scope <path>`) when the change is necessary, adjacent, and
+  small, and the path lies inside the lane. Grant the narrowest literal path that covers it, not a
+  glob. The grant belongs to that task only.
+- **Ask the user first** for anything outside the lane, then pass `--user-approved`.
+- **Deny** (`--deny --reply "<how to proceed>"`) when the change belongs to another task, would
+  widen the task's purpose, or overlaps work another active task owns.
+- **Reply** (`--reply`) to a question with the reading you chose and, briefly, why. If the user
+  must settle it, ask them, then reply.
+- A request the briefing should have prevented is a briefing finding: a missing path in the
+  planned scope, or an objective with two readings. Fix the plan for the tasks that have not run
+  yet.
 
 ## After the run
 

@@ -79,7 +79,7 @@ Depends on: M0.
 
 ### Runtime
 
-- [x] **M1.1** Replace `WORKER_MODELS` in `scripts/lib/runs.mjs:32` with the
+- [x] **M1.1** Replace `WORKER_MODELS` in `scripts/lib/runs.mjs` with the
   four confirmed slugs, aliases `astra`, `sol`, `terra`, `luna`, and the effort
   lists from M0.2.
 - [x] **M1.2** Drop the bare `gpt-5.6` alias. Do not add bare `gpt-6` or
@@ -90,14 +90,16 @@ Depends on: M0.
 - [x] **M1.4** Bump `RUN_STATE_VERSION` to 6 in `scripts/lib/state.mjs` so a
   0.5.x build refuses a run that routes to slugs it does not know. Version-3
   through version-5 runs keep their persisted exact slugs on resume and retry.
-- [x] **M1.5** Make the unsupported-model error at `runs.mjs:415` list the new
-  aliases, and add a specific message when a new plan names a legacy slug.
-- [x] **M1.6** Update the worker prompt header at `runs.mjs:1047` so it no
-  longer says "GPT-5.6 pool".
+- [x] **M1.5** Make the unsupported-model error in `normalizeWorkerModel`
+  (`runs.mjs`) list the new aliases, and add a specific message when a new plan
+  names a legacy slug.
+- [x] **M1.6** Update the worker prompt header in `renderWorkerBriefing`
+  (`runs.mjs`) so it no longer says "GPT-5.6 pool".
 - [x] **M1.7** Replace the hardcoded model and effort lists in
-  `scripts/lib/learning.mjs:1209` with values derived from `WORKER_MODELS` plus
-  the legacy set, so learning examples from old runs still validate.
-- [x] **M1.8** Update `--model` help text in `scripts/orch.mjs:88` to
+  `scripts/lib/learning.mjs` (now `LEARNING_MODELS` and `LEARNING_EFFORTS`) with
+  values derived from `WORKER_MODELS` plus the legacy set, so learning examples
+  from old runs still validate.
+- [x] **M1.8** Update `--model` help text in `USAGE` (`scripts/orch.mjs`) to
   `<auto|astra|sol|terra|luna>`.
 
 ### Routing guidance
@@ -210,8 +212,8 @@ Depends on: M0.
 
 Depends on: M0. This is the highest-value change in the list.
 
-Today `retryTask` (`runs.mjs:1832`) clears the result and the verification and
-relaunches a fresh `codex exec` with the original prompt. The worker learns
+Before M2, `retryTask` (`runs.mjs`) cleared the result and the verification and
+relaunched a fresh `codex exec` with the original prompt. The worker learned
 nothing from the failure.
 
 - [x] **M2.1** Persist the supervisor's failed-verification evidence and the
@@ -301,8 +303,9 @@ nothing from the failure.
 
 Depends on: M2 (uses thread resume).
 
-Today the prompt at `runs.mjs:1076` tells a worker to report a blocker if it
-needs any file outside scope, which ends the attempt.
+Before M3, the worker prompt in `renderWorkerBriefing` (`runs.mjs`) told a
+worker to report a blocker if it needed any file outside scope, which ended the
+attempt.
 
 - [x] **M3.1** Add a `needs_input` terminal state to the worker result schema
   with a typed request: `scope_extension` (paths plus reason) or `question`
@@ -486,7 +489,7 @@ learning plan; this only shows the supervisor what already happened.
   routing and to cite it in `routingReason` when it changed a route.
 - [x] **M5.4** Exclude legacy-slug attempts from the table by default so
   GPT-5.6 history does not bias routes on the new roster.
-- [x] **M5.5** Raise `DEFAULT_MAX_WORKERS` (`runs.mjs:31`) from 3 to 5, and
+- [x] **M5.5** Raise `DEFAULT_MAX_WORKERS` (`runs.mjs`) from 3 to 5, and
   replace "Prefer 3–5 substantial parallel tasks" with guidance to size tasks
   by write-surface independence.
 - [x] **M5.6** Tests for the aggregation, the five-attempt threshold, and the
@@ -539,21 +542,70 @@ learning plan; this only shows the supervisor what already happened.
 
 ## Milestone 6 — Release 0.6.0
 
-- [ ] **M6.1** Update `skills/briefing-compiler/SKILL.md` for warm retries and
+- [x] **M6.1** Update `skills/briefing-compiler/SKILL.md` for warm retries and
   worker questions: what belongs in a retry note, when to grant scope.
-- [ ] **M6.2** Update `skills/orchestrator-runtime/SKILL.md` with `run wait`,
+- [x] **M6.2** Update `skills/orchestrator-runtime/SKILL.md` with `run wait`,
   `run answer`, `run routes`, and the retry options.
-- [ ] **M6.3** Add a migration note to `README.md`: alias `sol` and `terra` now
+- [x] **M6.3** Add a migration note to `README.md`: alias `sol` and `terra` now
   resolve to GPT-6.1, in-flight 0.5.x runs keep their slugs, and `astra` is
   new.
-- [ ] **M6.4** Write the 0.6.0 `CHANGELOG.md` entry.
-- [ ] **M6.5** Bump the version in `package.json`, `plugin.json`, and
+- [x] **M6.4** Write the 0.6.0 `CHANGELOG.md` entry.
+- [x] **M6.5** Bump the version in `package.json`, `plugin.json`, and
   `marketplace.json`.
 - [ ] **M6.6** Update the project memory file, which still describes the v0.1.0
-  compose-over-`/codex:rescue` design.
+  compose-over-`/codex:rescue` design. (Skipped here: the file lives outside the
+  repository; the owner will update it.)
 - [ ] **M6 gate** `npm test` passes; a fresh install from the local checkout
   runs one full `/orchestrator:run` that exercises a warm retry, a scope
-  request, and `run wait`.
+  request, and `run wait`. (`npm test` part met; the real run is outstanding,
+  see evidence.)
+
+### Milestone 6 evidence
+
+- Read end to end on 2026-11-15 against what M1–M5 built: `README.md`,
+  `docs/architecture.md`, every file in `plugins/orchestrator/commands/`, both
+  skills, and `CHANGELOG.md`.
+- M6.1: `briefing-compiler` gained "Retry notes" (say what to change, name the
+  decision, keep to the delta, `--fresh` over a longer note, stop after two
+  failed warm retries) and "Answering worker requests" (grant the narrowest
+  in-lane path, ask the user outside the lane, deny, reply, treat a request as a
+  briefing finding); its description names both uses.
+- M6.2: the runtime skill already covered `run wait`, `run answer`, and `run
+  retry --note/--fresh`; it gained `run routes` and the default pool of 5.
+- M6.3: README "Upgrading from 0.5.x": `sol`/`terra` now GPT-6.1, `astra` new,
+  bare `gpt-5.6` gone, 0.5.x runs keep their slugs, a mutated old run becomes
+  version 6 (which 0.5.x refuses), substitution instead of failure, pool of 5,
+  and the removed single-task commands. The README test forbids naming the
+  retired slash commands, so the note calls them the `do` and `accept` commands.
+- M6.4: 0.6.0 CHANGELOG entry with the breaking changes listed first. It says
+  that no real `/orchestrator:run` has exercised the release yet.
+- M6.5: version 0.6.0 in `package.json`, `plugin.json`, and both
+  `marketplace.json` fields; `tests/metadata.test.mjs` updated.
+- Stale or contradictory, and fixed: README "Operational limits" said retries
+  start fresh and called a model-unavailable rejection a failed attempt; README
+  lacked worker requests, `run wait`, and `run routes` in "What it provides" and
+  had a broken line in its intro; `init.md` described the retired
+  briefing-and-delegation flow ("report whether delegation will actually work",
+  "compiles briefings"); the `orch init` output still said "thread bindings stay
+  on this machine"; the `lanes.md` description said lanes "carry context between
+  Codex tasks" (that was the lane thread pointer); `resume.md` did not mention
+  route evidence; `docs/architecture.md`'s recovery list omitted retry labels,
+  paused requests, wall-clock limits, and route evidence, and its failure table
+  advised expanding scope for blockers and "retry once" for a malformed result
+  (now a warm retry); the tasklist cited line numbers (`runs.mjs:32`, `:415`,
+  `:1047`, `:1076`, `:1832`, `:31`, `learning.mjs:1209`, `orch.mjs:88`) that no
+  longer match and described M2/M3 "today" behaviour that is gone; they now name
+  symbols and use past tense.
+- Left as is: the ledger template's "carried into every delegated task"
+  (`state.mjs`) is still accurate and only seeds new repositories; the 0.1.0 and
+  0.2.0 CHANGELOG entries describe `/orchestrator:do` as history.
+- `claude plugin validate .` (Claude Code 2.1.325): "Validation passed" for the
+  marketplace manifest. `claude plugin validate plugins/orchestrator`:
+  "Validation passed" with one directory warning, `ICON_MISSING` (no plugin
+  icon), which does not affect the result.
+- Not done: M6.6 (outside the repository) and the real-run gate.
+- Full repository gate: `npm test` passed 204 tests with 0 failures on
+  2026-11-15.
 
 ## Open decisions
 
@@ -568,3 +620,21 @@ learning plan; this only shows the supervisor what already happened.
 4. **Open: unavailability on API-key logins.** Only the ChatGPT-account
    rejection text was observed. The detector also accepts `model_not_found`,
    which is inferred. Confirm on an API-key login if one is supported.
+
+## Outstanding real-run checks
+
+None of these has been performed. Items 1 to 5 need the owner to run
+`/orchestrator:run` from a fresh install of the local checkout with an
+authenticated Codex CLI; item 6 needs a Codex CLI logged in with an API key.
+
+1. **M1 gate** One run completes with at least one task on each of `astra`,
+   `sol`, and `terra`.
+2. **M2 gate** A deliberately failed verification is retried, and the worker's
+   second attempt references the supervisor's evidence.
+3. **M3 gate** A worker requests one adjacent file, receives it, and integrates
+   cleanly without a retry.
+4. **M4 gate** A three-worker wave completes with one `run wait` per state
+   change and no polling calls in the transcript.
+5. **M6 gate** One full run exercises a warm retry, a scope request, and `run
+   wait`.
+6. **Open decision 4** Model-unavailable detection on an API-key login.

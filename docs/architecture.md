@@ -302,9 +302,9 @@ real resume reports the same thread id it was given.
 
 `run launch` performs these steps:
 
-1. Lock and claim a ready task while enforcing `maxWorkers`, requiring a fully resolved exact
-   model and effort, and requiring a checkpoint that covers the current plan and guidance
-   revisions.
+1. Lock and claim a ready task while enforcing `maxWorkers` (default 5), requiring a fully
+   resolved exact model and effort, and requiring a checkpoint that covers the current plan and
+   guidance revisions.
 2. Require a committed, clean supervisor checkout on the run's branch and integration head.
 3. Create `.orchestrator/local/worktrees/<run>/<task-attempt>` and a dedicated task branch, or,
    for a warm retry, reuse the previous attempt's worktree and branch (see "Warm retries").
@@ -561,8 +561,9 @@ it.
 
 ## Collection and integration
 
-`run poll` (and `run wait`, `run resume`) reads status files for active tasks. Successful final JSON is recorded as task
-evidence; malformed output, a non-zero exit, or a missing result becomes a failed attempt.
+`run poll` (and `run wait`, `run resume`) reads status files for active tasks. Successful final
+JSON is recorded as task evidence; malformed output, a non-zero exit, or a missing result becomes a
+failed attempt.
 
 For write tasks, `run inspect` checks:
 
@@ -618,7 +619,12 @@ a block.
 - every model found unavailable during the run and every substituted attempt, user pins first
 - the frozen provisional guidance policy hash and item IDs selected for each attempt
 - the supervisor's saved routing reason for every automatically routed task
-- worker summaries, checks, blockers, confidence, and attempts
+- worker summaries, checks, blockers, confidence, and attempts, each labelled as a warm resume,
+  a resume fallback, or a fresh retry, with any pending retry's mode and note
+- workers paused on a `needs_input` request, with the exact `run answer` command, and the scope
+  granted to each task
+- each worker's wall-clock limit and whether it is over it
+- the lane's route evidence table, once the lane has at least 5 counted attempts
 - supervisor evidence and integrated commits
 - repository base and integration head
 - latest checkpoint
@@ -635,13 +641,13 @@ memory.
 | --- | --- | --- |
 | Codex process exits non-zero | Task `failed`, stderr tail or event-stream error retained | Inspect, then explicit retry or replan |
 | Codex rejects the model as unavailable | Attempt `execution_failed`/`model_unavailable`; model recorded unavailable | Automatic relaunch one rung down the ladder, recorded and surfaced; escalate when the ladder is exhausted |
-| Worker reports blockers | Task `blocked`, structured result retained | Expand authorized scope, resolve prerequisite, or replan |
+| Worker reports blockers | Task `blocked`, structured result retained | Resolve the prerequisite, then retry warm with a note, or replan |
 | Worker returns `needs_input` | Task and attempt `needs_input`; no outcome; pool slot held | `run answer` with a grant, denial, or reply; the same attempt resumes |
 | Worker runs past its wall-clock limit | `attempt.overLimit` and `task.over_limit` recorded; worker keeps running | Keep waiting, or `run cancel` the task and retry or replan |
 | `fs.watch` unavailable or drops an event | `run wait` wakes on its fallback poll instead | None; the wake is delayed by at most `--interval` |
 | Grant overlaps another active task, or lies outside the lane without `--user-approved` | Grant refused; task stays `needs_input` | Deny, narrow the grant, wait for the other task, or ask the user |
 | Fourth request on one task | Attempt `worker_blocked` (`scope_required` or `ambiguous_objective`) | Retry with a note or replan |
-| Malformed result | Task `failed` | Retry once if transient; otherwise report |
+| Malformed result | Task `failed` (`contract_failed`) | Retry (warm when a thread id exists); otherwise report |
 | Warm retry's thread missing or replaced | Same attempt continues on a fresh thread in the same worktree; `resumeFallback` and `task.resume_fallback` recorded | Review as usual; the briefing was self-contained |
 | Scope/declaration mismatch | Integration refused | Reject result and replan; do not cherry-pick |
 | Dirty worker checkout | Inspection and cleanup refused | Ask worker/reviewer to resolve or preserve for diagnosis |

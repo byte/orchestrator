@@ -1,5 +1,5 @@
 ---
-description: List, create, or edit the workstream lanes that carry context between Codex tasks
+description: List, create, or edit the workstream lanes that bound runs with scope, constraints, and a definition of done
 argument-hint: "[list|add|show|remove] [name] [--scope <glob>]... [--constraint <text>]... [--done <text>]"
 allowed-tools: Bash(node:*), AskUserQuestion
 ---
