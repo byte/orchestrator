@@ -12,11 +12,13 @@ import path from "node:path";
 //   --log=<file>       append {argv, cwd, prompt} for every invocation as JSONL
 //   --missing=<id>     treat this thread id as having no rollout
 //   --write            append a line to src/notes.txt and commit it
+//   --fresh-delay=<ms> a fresh (non-resumed) thread runs this long before finishing
 const args = process.argv.slice(2);
 const option = (name) => args.find((arg) => arg.startsWith(`--${name}=`))?.split("=").slice(1).join("=");
 const log = option("log");
 const missing = option("missing");
 const write = args.includes("--write");
+const freshDelay = Number(option("fresh-delay") ?? 0);
 const execIndex = args.indexOf("exec");
 const resumeIndex = args.indexOf("resume");
 const resumeThreadId = resumeIndex === -1 ? null : args.at(-2);
@@ -42,6 +44,10 @@ process.stdin.on("end", () => {
   const threadId = resumeThreadId ?? `thread-fresh-${process.pid}`;
   emit({ type: "thread.started", thread_id: threadId });
   emit({ type: "turn.started" });
+  setTimeout(finish, resumeThreadId ? 0 : freshDelay);
+});
+
+function finish() {
   const files = [];
   if (write) {
     const target = path.join(process.cwd(), "src", "notes.txt");
@@ -66,4 +72,4 @@ process.stdin.on("end", () => {
     "utf8"
   );
   emit({ type: "turn.completed" });
-});
+}

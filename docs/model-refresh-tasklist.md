@@ -389,24 +389,87 @@ needs any file outside scope, which ends the attempt.
 
 Independent of M2 and M3.
 
-- [ ] **M4.1** Add `run wait <run-id> [--timeout <seconds>]`. It blocks until
+- [x] **M4.1** Add `run wait <run-id> [--timeout <seconds>]`. It blocks until
   any active worker changes state, then prints the same payload as `run poll`
   and exits.
-- [ ] **M4.2** Implement it with `fs.watch` on the status files plus a slow
+- [x] **M4.2** Implement it with `fs.watch` on the status files plus a slow
   fallback interval, so it costs nothing while idle.
-- [ ] **M4.3** Exit with a distinct code and message on timeout, and when no
+- [x] **M4.3** Exit with a distinct code and message on timeout, and when no
   worker is active.
-- [ ] **M4.4** Rewrite `run.md` section 5: after launching a wave, start
+- [x] **M4.4** Rewrite `run.md` section 5: after launching a wave, start
   `run wait` as a background command and continue with verification of anything
   already reported; the harness wakes the supervisor when it exits. Remove the
   instruction to poll in a loop.
-- [ ] **M4.5** Add a per-task wall-clock limit (plan field `timeoutMinutes`,
+- [x] **M4.5** Add a per-task wall-clock limit (plan field `timeoutMinutes`,
   with a default per model tier) and have `run wait` report a worker that
   exceeds it instead of waiting forever.
-- [ ] **M4.6** Tests with `fake-codex-slow.mjs` for wake-on-completion,
+- [x] **M4.6** Tests with `fake-codex-slow.mjs` for wake-on-completion,
   timeout, and the over-limit report.
 - [ ] **M4 gate** A three-worker wave completes with one `run wait` per state
-  change and no polling calls in the transcript.
+  change and no polling calls in the transcript. (`npm test` part
+  met; the real run is outstanding, see evidence.)
+
+### Milestone 4 evidence
+
+- Built (2026-11-15): `orch run wait <run-id> [--timeout <seconds>] [--interval
+  <seconds>] [--no-watch] [--json]` in `scripts/lib/wait.mjs`. It prints the
+  `run poll` payload on stdout and a one-line reason on stderr. `pollRunWorkers`
+  now marks every update the supervisor must act on with `changed: true`:
+  finished (`reported`/`blocked`), `failed`, `cancelled`, `needs_input`,
+  `substituted` (M1), a still-running worker whose warm resume newly fell back
+  to a fresh thread (M2), and a newly over-limit worker. Paused tasks are listed
+  on every poll with `awaitingAnswer: true` until answered.
+- M4.3 exit codes: `0` changed, `2` timed out (default 1800 s), `3` no task
+  `dispatching`, `running`, or `needs_input`, `4` no worker running and at least
+  one paused on a request, `1` error. A paused task holds its slot and counts as
+  running for the run, but `run wait` does not wait on it: with only paused
+  workers left it returns `4` at once instead of blocking on the supervisor. It
+  polls once on start, so a change already on disk returns at once.
+- M4.2: it watches each active attempt's runner directory and the run directory
+  (directories, because status files are replaced by rename and a file watcher
+  goes silent on the old inode), filtered to `status.json`/`result.json`/
+  `run.json` and debounced by 100 ms. Every newly armed watcher triggers one
+  more poll, closing the gap between a poll and the watcher starting (found by a
+  test that intermittently waited 15 s). Correctness never depends on `fs.watch`:
+  a fallback poll runs every 15 s (`--interval`), a watcher that errors is
+  dropped, and a missed event only delays the wake by at most one interval.
+- M4.5: plan field `timeoutMinutes` (positive, at most 1440, fractions allowed),
+  else the default for the model the attempt actually runs on: `astra` 120,
+  `sol` 90, `terra` 60, `luna` 30 minutes (legacy `gpt-5.6-sol` 90,
+  `gpt-5.6-terra` 60). The clock is the current runner's `launchedAt`, so an
+  answered round starts a new clock. Over the limit, the poll records
+  `attempt.overLimit` and a `task.over_limit` event once per runner and marks
+  the update changed; the worker is never stopped, and the briefing shows each
+  task's limit and OVER LIMIT. Stopping stays `run cancel`. A timer at the next
+  deadline wakes the wait even when the worker's files are quiet.
+- M4.4: `run.md` section 5 rewritten around one background `run wait`
+  (`run_in_background: true`); the poll-without-blocking instruction is gone and
+  `run poll` is described as a one-off check. The `allowed-tools` list is
+  unchanged (`run wait` is a `node` command). `resume.md`, the runtime skill,
+  README, and `docs/architecture.md` ("Waiting for workers") updated.
+- Robustness: `pollRunWorkers` re-reads each task before collecting it, which
+  narrows (does not close) the window in which a background wait and a one-off
+  `run poll` both try to collect one result; the loser throws, and a wait
+  retries a failed poll and gives up only after three in a row.
+- No state version bump: `task.timeoutMinutes` and `attempt.overLimit` are
+  optional; a version-5 run on `gpt-5.6-sol` waits on its tier default (tested).
+- M4.6: `tests/wait.test.mjs` (12 tests). `fake-codex-slow.mjs` gained
+  `--delay=<ms>` and `--complete` (defaults unchanged); `fake-codex-resume.mjs`
+  gained `--fresh-delay=<ms>`. Covered: wake on completion by file event with a
+  60 s fallback (so only the watch can wake it), the fallback path with watching
+  off, a change already pending at start, timeout, idle, over-limit reported once
+  by the deadline timer (watching off, 60 s fallback) and left running, then
+  cancelled, tier defaults and validation, a paused worker
+  (wake, listed while another runs, exit 4 when alone), substitution, a resume
+  fallback while running, the CLI exit codes and payload, and a version-5 run.
+  Doc assertions added to `tests/commands.test.mjs`.
+- Not done: the real-run gate. The implementer could not invoke slash commands;
+  the owner must run a three-worker wave and check the transcript.
+- Full repository gate: `npm test` passed 193 tests with 0 failures on
+  2026-11-15, three runs in a row (13 new: 12 in `tests/wait.test.mjs`, 1 in
+  `tests/commands.test.mjs`). Wall time 64–67 s against 57 s for the M3 suite
+  on the same machine; the new file runs in parallel with the others, and each
+  of its tests takes about 2–4 s.
 
 ## Milestone 5 — Routing that uses its own evidence
 

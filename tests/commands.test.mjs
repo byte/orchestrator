@@ -126,3 +126,25 @@ test("the run command lets workers ask and limits who may grant scope", () => {
   assert.match(read("commands", "resume.md"), /Workers awaiting your answer/);
   assert.match(read("skills", "orchestrator-runtime", "SKILL.md"), /run answer <run-id> <task-id>/);
 });
+
+test("the supervisor waits on a background run wait instead of polling in a loop", () => {
+  const read = (...parts) => fs.readFileSync(path.join(root, "plugins", "orchestrator", ...parts), "utf8");
+  const command = read("commands", "run.md");
+  // `run wait` is a node command, so the existing tool list already allows it.
+  assert.match(command, /^allowed-tools: Read, Grep, Glob, Write, Bash\(node:\*\), AskUserQuestion$/m);
+  const monitor = command.slice(command.indexOf("## 5. Monitor and collect"), command.indexOf("## 6. Verify"));
+  assert.match(monitor, /Do not poll in a loop/);
+  assert.match(monitor, /run wait <run-id> --json/);
+  assert.match(monitor, /run_in_background: true/);
+  assert.doesNotMatch(monitor, /Poll without blocking/);
+  for (const code of ["`0`", "`2`", "`3`", "`4`"]) {
+    assert.ok(monitor.includes(code), `section 5 documents exit code ${code}`);
+  }
+  assert.match(monitor, /it is \*\*not\*\* stopped/);
+  assert.match(monitor, /run poll <run-id> --json` only for a one-off look/);
+  assert.match(command, /`timeoutMinutes` \(optional\)/);
+  assert.match(read("commands", "resume.md"), /start one `run wait <run-id> --json` as a background command/);
+  const skill = read("skills", "orchestrator-runtime", "SKILL.md");
+  assert.match(skill, /never by calling `run poll` in a loop/);
+  assert.match(skill, /`0` changed, `2` timed out \(default 1800 s\), `3` no worker running or\s+paused, `4`/);
+});

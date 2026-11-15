@@ -80,6 +80,8 @@ Produce a small task DAG. Each task must have:
 - `effort`: the selected per-task reasoning effort unless the run pins an effort
 - `routingReason`: one concise explanation of why the selected route fits the task whenever either
   dimension is supervisor-routed
+- `timeoutMinutes` (optional): the task's wall-clock limit when the tier default in section 5 does
+  not fit; exceeding it is reported, never enforced
 
 Route by the demands of each bounded task:
 
@@ -214,11 +216,43 @@ named; read its notice.
 
 ## 5. Monitor and collect
 
-Remain responsive while workers run. Poll without blocking:
+Do not poll in a loop. After launching a wave, start one blocking wait as a **background** Bash
+command (`run_in_background: true`):
 
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" run poll <run-id> --json
+node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" run wait <run-id> --json
 ```
+
+Then carry on with anything that does not depend on the running workers: verifying and
+integrating work that was already reported, answering requests, checkpointing. Claude Code wakes
+you when the background command exits, and `run wait` exits exactly when something needs you. Read
+its output; it is the same payload `run poll` returns, so no second call is needed. The exit code
+says why it returned:
+
+- `0` — a worker changed state. Act on every update marked `"changed": true`: `reported` or
+  `blocked` (review it, section 6), `failed` or `cancelled`, `needs_input` (answer it, section 6),
+  `substituted` (read the notice; tell the user if a pin was overridden), a `running` update with
+  `resumeFallback` (a warm resume fell back to a fresh thread; nothing to do but note it), or a
+  `running` update with `overLimit` (see below). Updates without `changed` are context: workers
+  still running, and paused workers still awaiting an answer (`awaitingAnswer: true`).
+- `2` — timed out (default 30 minutes, `--timeout <seconds>`) with workers still running and
+  nothing changed. Start another `run wait` if you have nothing else to do.
+- `3` — no worker is running or paused. Dispatch the next ready wave, or finish.
+- `4` — no worker is running and every remaining one is paused on a request. Nothing can change
+  until you answer; `run wait` returns at once rather than blocking on you.
+
+After handling a wake, start the next `run wait` whenever workers are still running, including
+right after each `run launch` or `run answer`; keep exactly one wait in flight per run. `run wait`
+polls once when it starts, so a change that landed while you were busy is returned at once, never
+missed. Use `run poll <run-id> --json` only for a one-off look; it does not block.
+
+Every task has a wall-clock limit: the plan's optional `timeoutMinutes`, else the default for the
+model the attempt runs on (`astra` 120, `sol` 90, `terra` 60, `luna` 30 minutes). Set
+`timeoutMinutes` in the plan for a task you expect to run unusually long or short. A worker past its
+limit is reported once with `overLimit`; it is **not** stopped. Decide: keep waiting if the work is
+plausibly still progressing (its `events.jsonl` keeps growing), or stop it with
+`run cancel <run-id> <task-id> --reason "<why>"` and retry or replan. An answered request starts a
+new clock, because time spent waiting for you is not the worker's.
 
 Use the durable recovery view after compaction or interruption:
 
@@ -228,7 +262,9 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" run resume <run-id> --json
 
 This polls detached workers before returning the complete supervisor briefing, active handles,
 results, checkpoints, provisional-guidance revisions and attempt snapshots, model substitutions,
-and memory. Polling collects finished structured output into the task automatically, and relaunches
+and memory. After it, start a background `run wait` again if workers are still running; a wait
+started before the interruption may have ended unseen. Polling (by `run wait`, `run poll`, or
+`run resume`) collects finished structured output into the task automatically, and relaunches
 a task whose model Codex rejected as unavailable; a poll update with status `substituted` names
 the requested and actual model. A worker report is not completion. It is evidence awaiting
 supervisor verification. A poll update with status `needs_input` is neither: the worker paused to
@@ -444,4 +480,6 @@ created, and any residual risk. Distinguish built, verified, and unverified work
 - Every task runs in its own isolated worktree; a warm retry continues in that task's previous
   worktree unless integration failed on a conflict.
 - Never bypass the run state because the manual path seems faster.
+- Wait for workers with one background `run wait`, never with a loop of `run poll` calls or
+  sleeps. A worker over its wall-clock limit is stopped only by your explicit `run cancel`.
 - Never continue from memory alone when `run briefing` or `run recover` can restore exact state.

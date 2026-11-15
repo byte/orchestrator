@@ -73,6 +73,22 @@ export const MODEL_FALLBACK_LADDER = Object.freeze([
   "gpt-5.6-luna"
 ]);
 
+// Per-task wall-clock limits, in minutes, applied to the model an attempt actually
+// runs on when the plan sets no `timeoutMinutes`. Higher tiers get longer: they
+// take the hardest work and the highest efforts. Exceeding a limit is reported by
+// `run poll` and `run wait`, never enforced; stopping a worker stays a supervisor
+// decision through `run cancel`. Legacy 0.5.x slugs take their tier's default.
+export const DEFAULT_TASK_TIMEOUT_MINUTES = Object.freeze({
+  "gpt-6-astra": 120,
+  "gpt-6.1-sol": 90,
+  "gpt-6.1-terra": 60,
+  "gpt-5.6-luna": 30,
+  "gpt-5.6-sol": 90,
+  "gpt-5.6-terra": 60
+});
+const FALLBACK_TASK_TIMEOUT_MINUTES = 90;
+const MAX_TASK_TIMEOUT_MINUTES = 24 * 60;
+
 const WORKER_ALIASES = "astra, sol, terra, luna";
 const WORKER_SLUGS = Object.keys(WORKER_MODELS).join(", ");
 const FAMILY_NAMES = new Set(["gpt-6", "gpt-6.1", "gpt-5.6"]);
@@ -700,6 +716,42 @@ function stringList(value, label) {
   return value.map((entry) => entry.trim()).filter(Boolean);
 }
 
+function optionalTimeoutMinutes(value, taskId) {
+  if (value === undefined || value === null || String(value).trim() === "") {
+    return null;
+  }
+  const minutes = Number(value);
+  if (!Number.isFinite(minutes) || minutes <= 0 || minutes > MAX_TASK_TIMEOUT_MINUTES) {
+    throw new Error(
+      `Task "${taskId}" timeoutMinutes must be a positive number of minutes no greater than ` +
+        `${MAX_TASK_TIMEOUT_MINUTES}; omit it to use the default for the task's model tier.`
+    );
+  }
+  return minutes;
+}
+
+/**
+ * The wall-clock limit for an attempt: the plan's `timeoutMinutes`, else the
+ * default for the model the attempt actually runs on (a substituted attempt gets
+ * its substitute's default), else a conservative fallback for unknown slugs.
+ */
+export function taskTimeoutMinutes(task, attempt = null) {
+  if (task.timeoutMinutes !== undefined && task.timeoutMinutes !== null) {
+    return task.timeoutMinutes;
+  }
+  const model = attempt?.model ?? task.model;
+  return DEFAULT_TASK_TIMEOUT_MINUTES[model] ?? FALLBACK_TASK_TIMEOUT_MINUTES;
+}
+
+/**
+ * The instant an attempt's current worker process started: the runner's launch
+ * time, so an answered `needs_input` round (a new runner) starts a new clock and
+ * time spent waiting for the supervisor never counts against the worker.
+ */
+export function workerClockStart(attempt) {
+  return attempt?.runner?.launchedAt ?? attempt?.startedAt ?? attempt?.claimedAt ?? null;
+}
+
 function normalizeTask(raw, defaultScope, workerPolicy, { allowLegacy = [] } = {}) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
     throw new Error("Every task must be an object.");
@@ -768,6 +820,7 @@ function normalizeTask(raw, defaultScope, workerPolicy, { allowLegacy = [] } = {
   });
   const exactEffort = normalizeReasoningEffort(resolvedEffort);
   validateWorkerRoute(exactModel, exactEffort, `Task "${id}"`);
+  const timeoutMinutes = optionalTimeoutMinutes(raw.timeoutMinutes, id);
   const routingReason = String(raw.routingReason ?? "").trim();
   if (
     !legacyPolicy &&
@@ -792,6 +845,9 @@ function normalizeTask(raw, defaultScope, workerPolicy, { allowLegacy = [] } = {
     model: exactModel,
     reasoningEffort: exactEffort,
     routingReason: routingReason || null,
+    // Optional: tasks without it (and every task saved before 0.6.0) use the
+    // per-tier default in DEFAULT_TASK_TIMEOUT_MINUTES.
+    ...(timeoutMinutes === null ? {} : { timeoutMinutes }),
     status: "pending",
     guidanceSelection: null,
     attempts: [],
@@ -2340,6 +2396,46 @@ export function syncExecutionStatus(cwd, runId, taskId, { attemptId, status }) {
   });
 }
 
+/**
+ * Record, once per worker process, that a running attempt exceeded its wall-clock
+ * limit. This only reports: the worker keeps running, and the task and attempt
+ * keep their status. Stopping it is the supervisor's decision (`run cancel`).
+ * `recorded` is true only the first time, so a poll surfaces it exactly once as a
+ * change while every later poll still shows the flag.
+ */
+export function recordOverLimit(cwd, runId, taskId, { attemptId, clockStart, elapsedMinutes, timeoutMinutes }) {
+  const id = assertId(runId, "run");
+  const filePath = runFile(cwd, id);
+  return withFileLock(filePath, () => {
+    const run = loadRun(cwd, id);
+    const task = requireTask(run, taskId);
+    const attempt = currentAttempt(task, attemptId);
+    if (!ACTIVE_TASK_STATUSES.has(task.status) || workerClockStart(attempt) !== clockStart) {
+      return { recorded: false, overLimit: null };
+    }
+    if (attempt.overLimit?.clockStart === clockStart) {
+      return { recorded: false, overLimit: attempt.overLimit };
+    }
+    attempt.overLimit = {
+      timeoutMinutes,
+      elapsedMinutes,
+      clockStart,
+      detectedAt: nowIso(),
+      ...(attempt.runner?.inputRound ? { inputRound: attempt.runner.inputRound } : {})
+    };
+    task.updatedAt = nowIso();
+    writeRun(cwd, run);
+    appendEvent(cwd, id, {
+      type: "task.over_limit",
+      taskId: task.id,
+      attemptId: attempt.id,
+      model: attempt.model ?? null,
+      ...attempt.overLimit
+    });
+    return { recorded: true, overLimit: attempt.overLimit };
+  });
+}
+
 export function failTaskAttempt(
   cwd,
   runId,
@@ -3002,6 +3098,7 @@ export function recoveryReport(run) {
         substitution: attempt.substitution ?? null,
         resumedFromAttemptId: attempt.resumedFromAttemptId ?? null,
         resumeFallback: attempt.resumeFallback ?? null,
+        ...(attempt.overLimit ? { overLimit: attempt.overLimit } : {}),
         routingReason: task.routingReason ?? null,
         runnerPid: attempt.runner?.pid ?? null,
         runnerStatusFile: attempt.runner?.statusFile ?? null,
@@ -3236,6 +3333,7 @@ export function renderSupervisorBriefing(cwd, run, lane) {
 - kind: ${task.kind}
 - worker route: ${route.model} (${route.reasoningEffort})${substituted}
 - routing reason: ${task.routingReason || "legacy or explicitly pinned run"}
+- wall-clock limit: ${taskTimeoutMinutes(task, task.status === "pending" ? { model: route.model } : attempt)} min${task.timeoutMinutes ? " (planned)" : " (tier default)"}${attempt?.overLimit && ACTIVE_TASK_STATUSES.has(task.status) ? ` — OVER LIMIT since ${attempt.overLimit.detectedAt}; still running, cancel or keep waiting` : ""}
 - provisional guidance: ${guidance?.enabled ? `${guidance.policyVersion} / ${guidance.policyHash}` : "disabled"}
 - guidance items:
 ${renderList(guidanceItems)}

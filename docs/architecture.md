@@ -336,7 +336,8 @@ real resume reports the same thread id it was given.
    Codex thread ID when `thread.started` arrives.
 
 The wrapper owns signal forwarding and atomic status updates. Claude never needs to block on a
-worker process.
+worker process; it blocks only on `run wait`, run as a background command (see "Waiting for
+workers").
 
 ## Warm retries
 
@@ -451,9 +452,88 @@ load, pause, answer, resume, and retry unchanged. The new `needs_input` status i
 version-6 build; version 6 is itself new in 0.6.0, so no released build reads version-6 state, and
 0.5.x already refuses it.
 
+## Waiting for workers
+
+Workers are detached processes that report only through files: the wrapper rewrites
+`workers/<task>/<attempt>/status.json` (or `round-<n>/status.json` for an answered round) by
+writing a temporary file and renaming it over the old one. Before 0.6.0 the supervisor learned that
+a worker had finished only by calling `run poll` again and again. Now it starts one
+`run wait <run-id> [--timeout <seconds>] [--interval <seconds>] [--no-watch] [--json]` as a
+background Bash command; Claude Code re-invokes the supervisor when a background command exits,
+so it is woken exactly when something changed. `run wait` is a `node` command, so `run.md`'s
+`Bash(node:*)` tool permission already covers it.
+
+**What wakes it.** `run wait` uses the same collection code as `run poll` (`pollRunWorkers`), which
+marks every update the supervisor must act on with `changed: true`:
+
+| Change | How it shows on disk | Update |
+| --- | --- | --- |
+| Worker finished | status `completed` and `result.json` | `reported` or `blocked`; `failed` for a malformed or missing result |
+| Worker paused with a request | completed turn whose result has `needs_input` | `needs_input` with `round` and `inputRequest` |
+| Worker failed or was cancelled | status `failed` or `cancelled` | `failed` or `cancelled` |
+| Model substituted | status `failed` with an unavailability rejection naming the slug | `substituted` (or `failed`/`pending` when no rung is left or the relaunch failed) |
+| Warm resume fell back to a fresh thread | status still `running`, `resumeFallback` newly present | `running` with `resumeFallback` |
+| Worker over its wall-clock limit | nothing; detected from the runner's `launchedAt` | `running` (or `dispatching`) with `overLimit` |
+
+A substitution, fallback, or over-limit flag is surfaced once: the poll that records it marks it
+changed, later polls list it without the mark. Unchanged running workers and paused workers still
+awaiting an answer (`awaitingAnswer: true`, repeated on every poll until answered) are listed for
+context. `run wait` prints exactly this payload, so the supervisor never needs a second call, and
+writes a one-line reason to stderr.
+
+**Exit codes.**
+
+| Code | Outcome | Meaning |
+| --- | --- | --- |
+| 0 | `changed` | At least one update has `changed: true`. |
+| 1 | error | Unknown run, bad option, or three consecutive failed polls. |
+| 2 | `timeout` | `--timeout` elapsed (default 1800 s) and nothing changed; workers are still running. |
+| 3 | `idle` | No task is `dispatching`, `running`, or `needs_input`. |
+| 4 | `awaiting_answer` | No worker is running, and at least one is paused on a `needs_input` request. |
+
+A paused task holds its pool slot and counts as running for run status, but only the supervisor
+can move it, so `run wait` does not count it as something to wait on. With other workers running
+it waits for them and lists the paused one as awaiting an answer; with only paused workers left it
+returns `4` at once instead of blocking forever on the supervisor.
+
+**How it waits.** It polls once on start, so a change already on disk (a worker that finished
+while the supervisor was busy) returns at once. It then watches each active attempt's runner
+directory and the run directory with `fs.watch`. Directories, not files, are watched: a file
+watcher stays attached to the replaced inode after a rename and goes silent, while a directory
+watcher sees the rename. Events are filtered to `status.json`/`result.json` (and `run.json` in the
+run directory, which picks up launches, answers, and cancellations made while it waits; a
+filename-less event counts) and debounced by 100 ms, so the stream of `events.jsonl` appends from a
+busy worker does not cause polls. Every newly armed watcher triggers one more poll, closing the gap
+between a poll and its watcher starting. A timer fires at the earliest wall-clock deadline of a
+running worker, because an over-limit worker may write nothing.
+
+**Fallback.** `fs.watch` is unavailable on some platforms and file systems (network mounts, some
+containers), can error, and can drop or coalesce events. Correctness therefore never depends on
+it: a fallback poll runs every `--interval` seconds (default 15), and a watcher that errors is
+dropped and left to the fallback. A missed event only delays the wake by at most one interval.
+`--no-watch` disables watching entirely. While idle the cost is one cheap poll per interval; while
+workers run, polls happen only on their status changes. Polls race safely with a concurrent
+`run poll` or `run resume`: each task is re-read before it is collected, and a failed poll is
+retried on the next trigger.
+
+**Wall-clock limits.** A plan task may set `timeoutMinutes` (a positive number up to 1440).
+Without it the limit is the default for the model the attempt actually runs on, so a substituted
+attempt gets its substitute's limit: `gpt-6-astra` 120, `gpt-6.1-sol` 90, `gpt-6.1-terra` 60,
+`gpt-5.6-luna` 30 minutes; legacy `gpt-5.6-sol` 90 and `gpt-5.6-terra` 60. The clock starts at the
+current runner's `launchedAt`, so an answered `needs_input` round starts a new clock and time spent
+waiting for the supervisor never counts. When a running worker passes its limit, the poll records
+`attempt.overLimit` (limit, elapsed minutes, clock start, detection time) and a `task.over_limit`
+event, once per runner. Nothing is stopped and no status changes: the supervisor decides whether
+to keep waiting or `run cancel` the task. The supervisor briefing shows each task's limit and marks
+an over-limit worker. `timeoutMinutes` is not part of a completed task's definition, so resubmitting
+a completed task with a different limit is not a redefinition.
+
+No state version bump: `task.timeoutMinutes` and `attempt.overLimit` are optional, and runs saved
+by versions 3 to 5 wait on their tier defaults (tested with a version-5 run on `gpt-5.6-sol`).
+
 ## Collection and integration
 
-`run poll` reads status files for active tasks. Successful final JSON is recorded as task
+`run poll` (and `run wait`, `run resume`) reads status files for active tasks. Successful final JSON is recorded as task
 evidence; malformed output, a non-zero exit, or a missing result becomes a failed attempt.
 
 For write tasks, `run inspect` checks:
@@ -529,6 +609,8 @@ memory.
 | Codex rejects the model as unavailable | Attempt `execution_failed`/`model_unavailable`; model recorded unavailable | Automatic relaunch one rung down the ladder, recorded and surfaced; escalate when the ladder is exhausted |
 | Worker reports blockers | Task `blocked`, structured result retained | Expand authorized scope, resolve prerequisite, or replan |
 | Worker returns `needs_input` | Task and attempt `needs_input`; no outcome; pool slot held | `run answer` with a grant, denial, or reply; the same attempt resumes |
+| Worker runs past its wall-clock limit | `attempt.overLimit` and `task.over_limit` recorded; worker keeps running | Keep waiting, or `run cancel` the task and retry or replan |
+| `fs.watch` unavailable or drops an event | `run wait` wakes on its fallback poll instead | None; the wake is delayed by at most `--interval` |
 | Grant overlaps another active task, or lies outside the lane without `--user-approved` | Grant refused; task stays `needs_input` | Deny, narrow the grant, wait for the other task, or ask the user |
 | Fourth request on one task | Attempt `worker_blocked` (`scope_required` or `ambiguous_objective`) | Retry with a note or replan |
 | Malformed result | Task `failed` | Retry once if transient; otherwise report |

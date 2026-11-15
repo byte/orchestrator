@@ -12,10 +12,13 @@ import {
   failTaskAttempt,
   loadRun,
   recordModelUnavailable,
+  recordOverLimit,
   recordTaskResult,
   revertTaskAnswer,
   substitutionNotice,
-  syncExecutionStatus
+  syncExecutionStatus,
+  taskTimeoutMinutes,
+  workerClockStart
 } from "./runs.mjs";
 import { atomicWrite } from "./state.mjs";
 import { createTaskWorktree, reuseTaskWorktree } from "./worktrees.mjs";
@@ -324,26 +327,107 @@ export function launchTaskWorker(
   }
 }
 
-export function pollRunWorkers(cwd, runId) {
+/** Whether the attempt (or the answered round its runner belongs to) has a recorded resume fallback. */
+function fallbackRecorded(attempt) {
+  const round = attempt.runner?.inputRound
+    ? attempt.inputRequests?.find((entry) => entry.round === attempt.runner.inputRound)?.answer
+    : null;
+  return Boolean((round ?? attempt).resumeFallback);
+}
+
+/**
+ * Report a still-running worker whose current process has run longer than the
+ * task's wall-clock limit. Reporting is all it does: the worker is never stopped
+ * here. `changed` is set only on the poll that first records it.
+ */
+function overLimitFields(cwd, runId, task, attempt, now) {
+  const clockStart = workerClockStart(attempt);
+  const started = clockStart ? Date.parse(clockStart) : NaN;
+  if (!Number.isFinite(started)) {
+    return {};
+  }
+  const timeoutMinutes = taskTimeoutMinutes(task, attempt);
+  const elapsedMinutes = Math.round(((now - started) / 60000) * 100) / 100;
+  if (now - started < timeoutMinutes * 60000) {
+    return {};
+  }
+  const recorded = recordOverLimit(cwd, runId, task.id, {
+    attemptId: attempt.id,
+    clockStart,
+    elapsedMinutes,
+    timeoutMinutes
+  });
+  if (!recorded.overLimit) {
+    return {};
+  }
+  return {
+    overLimit: { timeoutMinutes, elapsedMinutes, detectedAt: recorded.overLimit.detectedAt },
+    ...(recorded.recorded ? { changed: true } : {})
+  };
+}
+
+/** A paused worker's open request, repeated on every poll until it is answered. */
+function awaitingAnswer(task) {
+  const attempt = task.attempts.at(-1);
+  const round = attempt?.inputRequests?.at(-1);
+  return {
+    taskId: task.id,
+    attemptId: attempt?.id ?? null,
+    status: task.status,
+    awaitingAnswer: true,
+    ...(round && !round.answer ? { round: round.round, inputRequest: round.request } : {})
+  };
+}
+
+/**
+ * Collect what every active worker's status file says. Each update describes one
+ * task. `changed: true` marks an update the supervisor must act on: a worker that
+ * finished, failed, was cancelled, paused with a request, was relaunched on a
+ * substitute model, fell back from a missing thread, or went over its wall-clock
+ * limit. Running workers with nothing new, and paused workers still awaiting an
+ * answer (`awaitingAnswer: true`), are listed without it. `run wait` wakes on the
+ * first poll that returns a changed update.
+ */
+export function pollRunWorkers(cwd, runId, { now = Date.now() } = {}) {
   const run = loadRun(cwd, runId);
   const updates = [];
-  for (const task of Object.values(run.tasks)) {
-    if (!["dispatching", "running"].includes(task.status)) {
+  for (const listed of Object.values(run.tasks)) {
+    // Re-read each task: a concurrent `run poll` or `run wait` may have collected
+    // it since the run was loaded, and collecting it twice would fail.
+    const task = loadRun(cwd, runId).tasks[listed.id];
+    if (task?.status === "needs_input") {
+      updates.push(awaitingAnswer(task));
+      continue;
+    }
+    if (!task || !["dispatching", "running"].includes(task.status)) {
       continue;
     }
     const attempt = task.attempts.at(-1);
     const statusFile = attempt.runner?.statusFile;
     if (!statusFile || !fs.existsSync(statusFile)) {
-      updates.push({ taskId: task.id, status: task.status, waiting: true });
+      updates.push({
+        taskId: task.id,
+        status: task.status,
+        waiting: true,
+        ...overLimitFields(cwd, runId, task, attempt, now)
+      });
       continue;
     }
     const status = readJson(statusFile);
-    syncExecutionStatus(cwd, runId, task.id, {
+    const hadFallback = fallbackRecorded(attempt);
+    const synced = syncExecutionStatus(cwd, runId, task.id, {
       attemptId: attempt.id,
       status
     });
     if (status.status === "running") {
-      updates.push({ taskId: task.id, ...status });
+      const fellBack = !hadFallback && fallbackRecorded(synced);
+      const overLimit = overLimitFields(cwd, runId, task, attempt, now);
+      updates.push({
+        taskId: task.id,
+        ...status,
+        ...overLimit,
+        ...(fellBack ? { changed: true } : {})
+      });
       continue;
     }
     if (status.status === "cancelled") {
@@ -357,6 +441,7 @@ export function pollRunWorkers(cwd, runId) {
       updates.push({
         taskId: task.id,
         attemptId: attempt.id,
+        changed: true,
         status: cancelled.status,
         threadId: status.threadId,
         exitCode: status.exitCode
@@ -371,6 +456,7 @@ export function pollRunWorkers(cwd, runId) {
       updates.push({
         taskId: task.id,
         attemptId: attempt.id,
+        changed: true,
         status: recorded.task.status,
         threadId: status.threadId,
         exitCode: status.exitCode,
@@ -405,6 +491,7 @@ export function pollRunWorkers(cwd, runId) {
     updates.push({
       taskId: task.id,
       attemptId: attempt.id,
+      changed: true,
       status: failed.status,
       threadId: status.threadId,
       exitCode: status.exitCode,
@@ -429,6 +516,7 @@ function substituteUnavailableModel(cwd, runId, task, attempt, status, error) {
   const update = {
     taskId: task.id,
     attemptId: attempt.id,
+    changed: true,
     status: recorded.task.status,
     threadId: status.threadId,
     exitCode: status.exitCode,

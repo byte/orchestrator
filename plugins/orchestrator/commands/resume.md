@@ -25,6 +25,13 @@ Then read `${CLAUDE_PLUGIN_ROOT}/commands/run.md` and continue its orchestration
 recovered state. Do not create a replacement run. In particular:
 
 - collect and review newly reported results
+- if workers are still running, start one `run wait <run-id> --json` as a background command and
+  keep working; the harness wakes you when it exits. Do not poll in a loop. A wait started before
+  the interruption may have ended unseen, so always start a fresh one. Exit codes: `0` a worker
+  changed state (act on the updates marked `changed`), `2` timed out, `3` nothing active, `4` only
+  paused workers awaiting your answer
+- check the `wall-clock limit` line of each running task: a worker marked OVER LIMIT is still
+  running. Keep waiting or stop it with `run cancel <run-id> <task-id>`; nothing stops it for you
 - verify read tasks; inspect and integrate write-task worktrees
 - dispatch only currently ready tasks and stay within the saved worker limit
 - preserve every saved task route and honor any explicit run-level model or effort pin

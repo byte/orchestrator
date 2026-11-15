@@ -45,6 +45,20 @@ All support `--json` where structured output is useful.
   write surface. Grant inside the lane on your own authority; a grant outside the lane is refused
   until you ask the user and repeat it with `--user-approved`. A task gets at most 3 answered round
   trips; a further request is recorded as an ordinary blocker.
+- Wait for workers with `run wait <run-id> [--timeout <seconds>] --json` started as a background
+  Bash command, never by calling `run poll` in a loop. It blocks until a worker changes state —
+  finishes, fails, is cancelled, pauses with `needs_input`, is relaunched on a substitute model,
+  falls back from a missing thread, or exceeds its wall-clock limit — then prints the `run poll`
+  payload (changed updates carry `"changed": true`) and exits; the harness then wakes the
+  supervisor. Exit codes: `0` changed, `2` timed out (default 1800 s), `3` no worker running or
+  paused, `4` only paused workers awaiting an answer, `1` error. It returns at once when a change is
+  already on disk. It watches the worker directories with `fs.watch` and falls back to a poll every
+  15 s (`--interval`), so a missed file event only delays the wake. Keep one wait in flight per
+  run. `run poll` remains for a one-off, non-blocking look.
+- Each task has a wall-clock limit: plan field `timeoutMinutes`, else 120 (`astra`), 90 (`sol`),
+  60 (`terra`), or 30 (`luna`) minutes for the model the attempt runs on. An over-limit worker is
+  reported once (`overLimit`, `task.over_limit` event, OVER LIMIT in the briefing) and never
+  stopped by the runtime; stopping it is the supervisor's call through `run cancel`.
 - New runs auto-route by default. The supervisor must save an exact model, effort, and concise
   routing reason on each planned task unless the user explicitly pinned that dimension. The
   runtime rejects unresolved automatic routes and conflicts with explicit pins.
@@ -81,8 +95,9 @@ checkpoints, terminal attempt outcomes, verification evidence, and integration c
 Run state version 6 adds the current model roster, the models found unavailable during the run,
 per-attempt substitution records, optional warm-retry fields (`attempt.review`,
 `attempt.retry`, `attempt.resumedFromAttemptId`, `attempt.resumeFallback`, `task.pendingRetry`),
-and optional worker-request fields (`attempt.inputRequests`, `task.scopeGrants`, the
-`needs_input` task and attempt status). Version 5 stores the active provisional policy plus frozen
+optional worker-request fields (`attempt.inputRequests`, `task.scopeGrants`, the
+`needs_input` task and attempt status), and optional wall-clock fields (`task.timeoutMinutes`,
+`attempt.overLimit`). Version 5 stores the active provisional policy plus frozen
 task and attempt selections; version-3 through version-5 runs remain readable, keep their
 persisted exact slugs, and version-3 and version-4 runs default to guidance disabled.
 

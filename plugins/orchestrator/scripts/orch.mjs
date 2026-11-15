@@ -51,6 +51,11 @@ import {
   stopTaskWorker
 } from "./lib/workers.mjs";
 import {
+  DEFAULT_WAIT_INTERVAL_SECONDS,
+  DEFAULT_WAIT_TIMEOUT_SECONDS,
+  waitForRunChange
+} from "./lib/wait.mjs";
+import {
   cleanupTaskWorktree,
   inspectTaskWorktree,
   integrateTaskWorktree,
@@ -96,6 +101,8 @@ Usage:
   orch run recover <run-id> [--json]
   orch run launch <run-id> <task-id> [--json]
   orch run poll <run-id> [--json]
+  orch run wait <run-id> [--timeout <seconds>] [--interval <seconds>] [--no-watch] [--json]
+      exit 0 changed (poll payload), 2 timed out, 3 no active workers, 4 only paused workers awaiting an answer
   orch run inspect <run-id> <task-id> [--json]
   orch run integrate <run-id> <task-id> [--evidence <text>]... [--json]
   orch run finalize <run-id> --verdict <pass|fail> --summary <text> [--evidence <text>]... [--json]
@@ -363,6 +370,10 @@ function commandLedger(argv, cwd) {
 }
 
 function renderPollUpdate(update) {
+  if (update.overLimit && ["running", "dispatching"].includes(update.status)) {
+    return `${update.taskId}\t${update.status}\tOVER LIMIT: running ${update.overLimit.elapsedMinutes} min against a ` +
+      `${update.overLimit.timeoutMinutes}-minute limit; still running (not stopped). Keep waiting or \`run cancel\` it.`;
+  }
   if (update.inputRequest) {
     const request = update.inputRequest;
     const detail = request.kind === "scope_extension"
@@ -416,6 +427,37 @@ function renderRunSummary(run) {
     `- plan revision: ${run.planRevision}`,
     `- tasks: ${Object.entries(taskCounts).map(([status, count]) => `${status}=${count}`).join(", ") || "none"}`
   ].join("\n");
+}
+
+function seconds(value, label, fallback) {
+  if (value === undefined || value === null) {
+    return fallback;
+  }
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    throw new Error(`${label} must be a positive number of seconds.`);
+  }
+  return parsed;
+}
+
+/**
+ * Block until a worker changes state and print the `run poll` payload. Meant to
+ * be started as a background command: the harness re-invokes the supervisor when
+ * it exits. The one-line reason goes to stderr so stdout stays the poll payload.
+ */
+async function commandRunWait(cwd, runId, options) {
+  const result = await waitForRunChange(cwd, runId, {
+    timeoutMs: seconds(options.timeout, "--timeout", DEFAULT_WAIT_TIMEOUT_SECONDS) * 1000,
+    intervalMs: seconds(options.interval, "--interval", DEFAULT_WAIT_INTERVAL_SECONDS) * 1000,
+    watch: !options["no-watch"]
+  });
+  if (options.json) {
+    emitJson(result.updates);
+  } else {
+    emit(result.updates.length ? result.updates.map(renderPollUpdate).join("\n") : "No active workers.");
+  }
+  process.stderr.write(`${result.message} (exit ${result.exitCode})\n`);
+  process.exitCode = result.exitCode;
 }
 
 function commandRun(argv, cwd) {
@@ -509,7 +551,7 @@ function commandRun(argv, cwd) {
   }
 
   const { options, positionals } = parseArgs(rest, {
-    booleanOptions: ["json", "fresh", "deny", "user-approved"],
+    booleanOptions: ["json", "fresh", "deny", "user-approved", "no-watch"],
     repeatableOptions: ["decision", "risk", "next", "evidence", "grant-scope"],
     valueOptions: [
       "plan-file",
@@ -526,7 +568,9 @@ function commandRun(argv, cwd) {
       "reason-code",
       "provenance",
       "note",
-      "reply"
+      "reply",
+      "timeout",
+      "interval"
     ]
   });
   const runId = positionals[0];
@@ -755,6 +799,10 @@ function commandRun(argv, cwd) {
       : emit(updates.length ? updates.map(renderPollUpdate).join("\n") : "No active workers.");
   }
 
+  if (action === "wait") {
+    return commandRunWait(cwd, runId, options);
+  }
+
   if (action === "inspect") {
     const run = loadRun(cwd, runId);
     const taskId = positionals[1];
@@ -833,7 +881,7 @@ function commandRun(argv, cwd) {
   throw new Error(`Unknown run action "${action}".`);
 }
 
-function main() {
+async function main() {
   const [, , command = "help", ...argv] = process.argv;
   const cwd = resolveWorkspaceRoot(process.cwd());
 
@@ -850,7 +898,8 @@ function main() {
       case "learn":
         return commandLearn(argv, cwd);
       case "run":
-        return commandRun(argv, cwd);
+        // Only `run wait` is asynchronous; awaiting keeps its errors in this catch.
+        return await commandRun(argv, cwd);
       case "where":
         return emit(orchDir(cwd));
       case "help":

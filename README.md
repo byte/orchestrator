@@ -134,8 +134,9 @@ done — for you to confirm. You do not have to define one first.
 
 From there Claude proposes a dependency-aware plan, records a checkpoint capturing the reasoning
 and model-routing choices behind it, and asks for confirmation when new authority is needed.
-Independent ready tasks launch into separate worktrees. The supervisor remains responsive, polls
-their durable handles, reviews their structured evidence, integrates passing write tasks, and
+Independent ready tasks launch into separate worktrees. The supervisor remains responsive: it
+starts one background `run wait` that wakes it when a worker changes state, instead of polling,
+reviews their structured evidence, integrates passing write tasks, and
 replans or retries when evidence invalidates the current route.
 
 Model and effort are automatic by default. During planning, Fable or Opus must assign every task
@@ -200,7 +201,10 @@ replacement run or rely on conversational memory.
    worktree paths are persisted under `.orchestrator/local/`. A worker that needs one adjacent
    file outside its scope, or faces an objective with two materially different readings, pauses
    as `needs_input` with a typed request instead of stopping. Claude answers with `run answer`,
-   and the same attempt continues on the same Codex thread in the same worktree.
+   and the same attempt continues on the same Codex thread in the same worktree. Claude does not
+   poll: one `run wait` runs as a background command and exits when a worker finishes, fails,
+   pauses, is substituted, falls back from a missing thread, or exceeds its wall-clock limit, and
+   Claude Code wakes the supervisor when it exits.
 4. **Review.** Worker output becomes `reported`, never automatically complete. Claude evaluates the
    evidence and acceptance criteria. Terminal attempt outcomes are recorded separately from task
    lifecycle state so retries retain an auditable reason for each earlier result.
@@ -235,6 +239,22 @@ The lower-level CLI is available to command definitions and operators:
 ```text
 node plugins/orchestrator/scripts/orch.mjs help
 ```
+
+Wait for the next worker state change (started by the supervisor as a background command):
+
+```text
+orch run wait <run-id> [--timeout <seconds>] [--interval <seconds>] [--no-watch] [--json]
+```
+
+It prints the same payload as `run poll`, with `"changed": true` on each update that needs the
+supervisor, and exits `0` when a worker changed state, `2` on timeout (default 30 minutes), `3`
+when no worker is running or paused, and `4` when every remaining worker is paused awaiting an
+answer (`1` is an error). It returns at once when a change is already on disk. It watches worker
+status directories with `fs.watch` and also polls every 15 seconds (`--interval`), so a file event
+the platform drops only delays the wake; `--no-watch` relies on the interval alone. Each task has a
+wall-clock limit — the plan's `timeoutMinutes`, else 120 minutes on `astra`, 90 on `sol`, 60 on
+`terra`, and 30 on `luna` — and a worker past it is reported once, never stopped; stopping it is
+the supervisor's `run cancel`. `run poll` remains for a one-off, non-blocking look.
 
 Retry a failed or blocked task with a correction for the worker:
 
@@ -383,8 +403,9 @@ finalization, and cleanup without consuming model quota.
 
 ## Operational limits
 
-- Claude drives polling and decisions while the command is active; there is no background
-  daemon that can make supervisory decisions without Claude.
+- Claude drives every decision while the command is active. The only background process on the
+  supervisor's side is `run wait`, which collects worker status and exits; there is no daemon that
+  can make supervisory decisions without Claude.
 - Run state is machine-local by design. Move stable knowledge to the ledger before changing
   machines.
 - Integration uses cherry-pick. Conflicts abort and require the supervisor to replan or request
