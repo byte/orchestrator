@@ -3,13 +3,16 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { requireLane } from "./lanes.mjs";
 import {
   attachExecution,
   cancelTask,
   claimTask,
   failTaskAttempt,
   loadRun,
+  recordModelUnavailable,
   recordTaskResult,
+  substitutionNotice,
   syncExecutionStatus
 } from "./runs.mjs";
 import { atomicWrite } from "./state.mjs";
@@ -106,6 +109,64 @@ function eventStreamError(filePath) {
     }
   }
   return [...new Set(messages)].join(" | ");
+}
+
+function streamEvents(filePath) {
+  const events = [];
+  for (const line of tail(filePath, 64000).split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("{")) {
+      continue;
+    }
+    try {
+      events.push(JSON.parse(trimmed));
+    } catch {
+      // A truncated leading fragment simply fails to parse and is skipped.
+    }
+  }
+  return events;
+}
+
+const UNAVAILABLE_PHRASES =
+  /not supported|not available|unavailable|does not exist|not found|do(?:es)? not have access|no access|not enabled|not allowed/i;
+
+/**
+ * Decide whether Codex rejected the requested model itself, as opposed to the
+ * worker failing. Observed against Codex CLI 0.169.0 (2026-11-15) for a model the
+ * account cannot use: exit 1, empty stderr, and on stdout
+ *
+ *   {"type":"error","message":"The '<slug>' model is not supported when using Codex with a ChatGPT account."}
+ *   {"type":"turn.failed","error":{"message":"<same text>"}}
+ *
+ * Only those two top-level event types count. Codex also emits warnings as
+ * `item.completed` items of type "error" (for example "Model metadata for `<slug>`
+ * not found. Defaulting to fallback metadata"), which are not rejections. The
+ * message must name the requested slug, so an unrelated API error never triggers
+ * a substitution. An API-key account reporting `model_not_found` is matched by
+ * code as well; that shape is inferred from the OpenAI API, not observed here.
+ */
+export function modelUnavailableError(filePath, model) {
+  const slug = String(model ?? "").toLowerCase();
+  if (!slug) {
+    return null;
+  }
+  for (const event of streamEvents(filePath)) {
+    if (event?.type !== "error" && event?.type !== "turn.failed") {
+      continue;
+    }
+    const detail = event.error ?? null;
+    const message = String(
+      (typeof detail === "string" ? detail : detail?.message) ?? event.message ?? ""
+    ).trim();
+    const code = typeof detail === "object" ? detail?.code : event.code;
+    const namesModel = message.toLowerCase().includes(slug);
+    if (namesModel && (code === "model_not_found" ||
+        (/\bmodel\b/i.test(message) && UNAVAILABLE_PHRASES.test(message) &&
+          !/fallback metadata/i.test(message)))) {
+      return message;
+    }
+  }
+  return null;
 }
 
 function executionDir(cwd, runId, taskId, attemptId) {
@@ -252,6 +313,13 @@ export function pollRunWorkers(cwd, runId) {
       });
       continue;
     }
+    const unavailable = status.status === "failed"
+      ? modelUnavailableError(attempt.runner.outputFile, attempt.model)
+      : null;
+    if (unavailable) {
+      updates.push(substituteUnavailableModel(cwd, runId, task, attempt, status, unavailable));
+      continue;
+    }
     const error = status.error
       || tail(attempt.runner.errorFile)
       || eventStreamError(attempt.runner.outputFile)
@@ -275,6 +343,59 @@ export function pollRunWorkers(cwd, runId) {
     });
   }
   return updates;
+}
+
+/**
+ * Close a rejected attempt and relaunch the task one rung down the fallback
+ * ladder with the same effort, reusing the Codex command the rejected attempt
+ * was launched with. The returned update names both models so `run poll` and
+ * `run resume` show the substitution.
+ */
+function substituteUnavailableModel(cwd, runId, task, attempt, status, error) {
+  const recorded = recordModelUnavailable(cwd, runId, task.id, {
+    attemptId: attempt.id,
+    error
+  });
+  const update = {
+    taskId: task.id,
+    attemptId: attempt.id,
+    status: recorded.task.status,
+    threadId: status.threadId,
+    exitCode: status.exitCode,
+    error,
+    unavailableModel: attempt.model,
+    fallbackModel: recorded.fallbackModel
+  };
+  if (!recorded.fallbackModel || recorded.duplicate) {
+    return update;
+  }
+  let codexCommand = ["codex"];
+  try {
+    codexCommand = readJson(attempt.runner.specFile).codexCommand ?? codexCommand;
+  } catch {
+    // Fall back to the default command; the spec only records an override.
+  }
+  try {
+    const run = loadRun(cwd, runId);
+    const launched = launchTaskWorker(cwd, runId, task.id, requireLane(cwd, run.lane), {
+      codexCommand
+    });
+    return {
+      ...update,
+      status: "substituted",
+      nextAttemptId: launched.attemptId,
+      requestedModel: launched.requestedModel,
+      model: launched.model,
+      reasoningEffort: launched.reasoningEffort,
+      pinned: Boolean(launched.substitution?.pinned),
+      notice: substitutionNotice(launched.substitution)
+    };
+  } catch (launchError) {
+    return {
+      ...update,
+      relaunchError: launchError.message
+    };
+  }
 }
 
 function stopPid(pid) {

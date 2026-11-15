@@ -1,12 +1,7 @@
 import { spawnSync } from "node:child_process";
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
 
 import { isInitialized } from "./state.mjs";
 import { isGitRepository, resolveWorkspaceRoot } from "./workspace.mjs";
-
-const CODEX_PLUGIN_ID = "codex@openai-codex";
 
 /**
  * Run a probe and merge both streams. `codex login status` reports on stderr, so
@@ -51,35 +46,6 @@ function checkCodexAuth() {
   };
 }
 
-/**
- * There is no dependency field in the plugin manifest, so a hard requirement on
- * the Codex plugin can only be expressed as a runtime check.
- */
-function checkCodexPlugin() {
-  const manifest = path.join(os.homedir(), ".claude", "plugins", "installed_plugins.json");
-  let installed = false;
-  let detail = "no installed_plugins.json found";
-
-  if (fs.existsSync(manifest)) {
-    try {
-      const parsed = JSON.parse(fs.readFileSync(manifest, "utf8"));
-      installed = Boolean(parsed?.plugins?.[CODEX_PLUGIN_ID]);
-      detail = installed ? `${CODEX_PLUGIN_ID} installed` : `${CODEX_PLUGIN_ID} is not installed`;
-    } catch (error) {
-      detail = `could not read ${manifest}: ${error.message}`;
-    }
-  }
-
-  return {
-    id: "codex-plugin",
-    label: "Legacy Codex bridge installed (optional)",
-    ok: installed,
-    optional: true,
-    detail,
-    remedy: "/plugin marketplace add openai/codex-plugin-cc  then  /plugin install codex@openai-codex"
-  };
-}
-
 function checkGit(cwd) {
   const ok = isGitRepository(cwd);
   return {
@@ -106,13 +72,11 @@ export function preflight(cwd = process.cwd()) {
   const checks = [
     checkCodexBinary(),
     checkCodexAuth(),
-    checkCodexPlugin(),
     checkGit(cwd),
     checkInitialized(cwd)
   ];
 
-  // Native pool dispatch uses Codex CLI directly. The upstream Claude bridge is
-  // optional and retained only for the legacy single-task /orchestrator:do workflow.
+  // Pool dispatch invokes Codex CLI directly; no Claude-side Codex plugin is needed.
   const blocking = checks.filter(
     (check) => !check.ok && check.id !== "initialized" && !check.optional
   );

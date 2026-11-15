@@ -13,13 +13,13 @@ Present the output, then:
 
 - If any blocking check failed, give the exact remedy command from the report. The Codex
   CLI and Codex login are prerequisites this plugin cannot install for the user — do not
-  improvise an alternate auth flow. The legacy Claude Codex bridge is optional and only
-  needed for `/orchestrator:do`; pooled `/orchestrator:run` execution invokes Codex CLI directly.
+  improvise an alternate auth flow. `/orchestrator:run` invokes Codex CLI directly; no Claude-side
+  Codex plugin is needed.
 - If the repository has no lanes yet, offer to create a first one. A good starting lane is
   narrow: one subsystem, an explicit scope glob, and a definition of done.
 - Mention that `.orchestrator/lanes.json` and `.orchestrator/ledger.md` are meant to be
-  committed, and that `.orchestrator/local/` is self-ignored because thread bindings only
-  mean anything on this machine.
+  committed, and that `.orchestrator/local/` is self-ignored because run state, worker handles,
+  and worktrees only mean anything on this machine.
 
 Also note, once: orchestrator compiles briefings in whatever model is running the main
 thread. It is worth the overhead when that model is a strong supervising model, and much

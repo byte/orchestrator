@@ -1,6 +1,6 @@
 ---
 name: orchestrator-runtime
-description: Internal contract for the orchestrator CLI — how Claude supervises durable routed GPT-5.6 worker-pool runs and the legacy single-task bridge
+description: Internal contract for the orchestrator CLI — how Claude supervises durable routed Codex worker-pool runs
 user-invocable: false
 ---
 
@@ -8,7 +8,7 @@ user-invocable: false
 
 Helper: `node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" <command>`
 
-Commands: `preflight`, `init`, `lane`, `brief`, `accept`, `ledger`, `learn`, `run`.
+Commands: `preflight`, `init`, `lane`, `ledger`, `learn`, `run`.
 All support `--json` where structured output is useful.
 
 ## Pool execution rules
@@ -16,9 +16,15 @@ All support `--json` where structured output is useful.
 - Everything here runs **inline in the main thread**. Never fork a general-purpose subagent
   to plan, manage, or evaluate a pool run. The main thread's existing context is part of the
   supervisor, and the supervisor is whichever Claude model owns the session (Opus or Fable).
-- Use `run launch`; it starts detached Codex CLI workers on the task's saved `gpt-5.6-sol`,
-  `gpt-5.6-terra`, or `gpt-5.6-luna` route with the saved effort, output schema, least sandbox,
-  and isolated worktree. Never substitute a different route during recovery or retry.
+- Use `run launch`; it starts detached Codex CLI workers on the task's saved `gpt-6-astra`,
+  `gpt-6.1-sol`, `gpt-6.1-terra`, or `gpt-5.6-luna` route (or a 0.5.x run's persisted
+  `gpt-5.6-sol`/`gpt-5.6-terra` slug) with the saved effort, output schema, least sandbox, and
+  isolated worktree. Never substitute a route yourself during recovery or retry.
+- When Codex rejects a model as unavailable to the account, `run poll` and `run resume` relaunch
+  the task one rung down `astra` → `sol` → `terra` → `luna` with the same effort and record the
+  substitution on the attempt, in the run events, and in the briefing. Substitution is never
+  silent. A substituted user pin is flagged; tell the user. An exhausted ladder fails the task
+  with a `model_unavailable` outcome.
 - New runs auto-route by default. The supervisor must save an exact model, effort, and concise
   routing reason on each planned task unless the user explicitly pinned that dimension. The
   runtime rejects unresolved automatic routes and conflicts with explicit pins.
@@ -52,8 +58,10 @@ All support `--json` where structured output is useful.
 Run JSON, events, worker status, structured results, PIDs, Codex thread ids, worktree pointers,
 checkpoints, terminal attempt outcomes, verification evidence, and integration commits live under the self-ignored
 `.orchestrator/local/runs/`. The committed ledger carries durable project facts across machines.
-Run state version 5 stores the active provisional policy plus frozen task and attempt selections;
-version-3 and version-4 runs remain readable and default to guidance disabled.
+Run state version 6 adds the current model roster, the models found unavailable during the run,
+and per-attempt substitution records. Version 5 stores the active provisional policy plus frozen
+task and attempt selections; version-3 through version-5 runs remain readable, keep their
+persisted exact slugs, and version-3 and version-4 runs default to guidance disabled.
 
 Derived learning records live separately under `.orchestrator/local/learning/`. Use `learn
 collect` only after attempt outcomes exist. The base store is metadata-only and HMAC-addressed;
@@ -61,15 +69,6 @@ worker prose is never ground truth. `learn export` stays local and managed. Text
 named fields, user or supervisor consent, and the explicit sensitive-export acknowledgement.
 `learn purge` removes matching samples, label history, and affected exports but never raw runs;
 recollection can therefore recreate purged derived data.
-
-## Legacy single-task bridge
-
-`/orchestrator:do` still composes with `codex:codex-rescue`. For that compatibility path:
-
-- Always `brief` before dispatching so `accept` has a pre-dispatch snapshot.
-- The upstream plugin's `--resume` is session-relative, not lane-addressed. Default to `--fresh`.
-- A lane's bound `threadId` is a handoff pointer for direct `codex resume <thread-id>`.
-- `accept` exits 2 for "needs review". That is a signal, not an error.
 
 ## Ledger discipline
 

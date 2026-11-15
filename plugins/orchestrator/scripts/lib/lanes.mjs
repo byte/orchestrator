@@ -1,4 +1,4 @@
-import { loadLanesState, loadLocalState, nowIso, updateLanesState, updateLocalState } from "./state.mjs";
+import { loadLanesState, nowIso, updateLanesState, updateLocalState } from "./state.mjs";
 
 const NAME_PATTERN = /^[a-z0-9][a-z0-9._-]*$/;
 
@@ -14,14 +14,8 @@ export function assertValidLaneName(name) {
 
 export function listLanes(cwd) {
   const { lanes } = loadLanesState(cwd);
-  const local = loadLocalState(cwd);
   return Object.entries(lanes)
-    .map(([name, lane]) => ({
-      name,
-      ...lane,
-      threadId: local.threads[name]?.threadId ?? null,
-      threadBoundAt: local.threads[name]?.updatedAt ?? null
-    }))
+    .map(([name, lane]) => ({ name, ...lane }))
     .sort((left, right) => left.name.localeCompare(right.name));
 }
 
@@ -32,13 +26,7 @@ export function getLane(cwd, name) {
   if (!lane) {
     return null;
   }
-  const local = loadLocalState(cwd);
-  return {
-    name: laneName,
-    ...lane,
-    threadId: local.threads[laneName]?.threadId ?? null,
-    threadBoundAt: local.threads[laneName]?.updatedAt ?? null
-  };
+  return { name: laneName, ...lane };
 }
 
 export function requireLane(cwd, name) {
@@ -79,33 +67,12 @@ export function removeLane(cwd, name) {
   if (!removed) {
     return false;
   }
+  // Thread bindings and snapshots were written only by the retired
+  // `/orchestrator:do` path. The local file keeps its schema so state written by
+  // older releases still loads; removing a lane still clears its stale entries.
   updateLocalState(cwd, (local) => {
     delete local.threads[laneName];
     delete local.snapshots[laneName];
   });
   return true;
-}
-
-/**
- * Bind a Codex thread to a lane on this machine. This is the pointer the upstream
- * plugin drops on SessionEnd; keeping it is the whole point of lanes.
- */
-export function bindThread(cwd, name, threadId) {
-  const laneName = assertValidLaneName(name);
-  const id = String(threadId ?? "").trim();
-  if (!id) {
-    throw new Error("A thread id is required to bind a lane.");
-  }
-  updateLocalState(cwd, (local) => {
-    local.threads[laneName] = { threadId: id, updatedAt: nowIso() };
-  });
-  return { lane: laneName, threadId: id };
-}
-
-export function unbindThread(cwd, name) {
-  const laneName = assertValidLaneName(name);
-  updateLocalState(cwd, (local) => {
-    delete local.threads[laneName];
-  });
-  return { lane: laneName };
 }

@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 
-test("the run command keeps Claude in authority and routes only within the GPT-5.6 pool", () => {
+test("the run command keeps Claude in authority and routes only within the worker roster", () => {
   const command = fs.readFileSync(
     path.join(root, "plugins", "orchestrator", "commands", "run.md"),
     "utf8"
@@ -15,13 +15,19 @@ test("the run command keeps Claude in authority and routes only within the GPT-5
     command,
     /The Claude model running the main thread is always the planner, scheduler, reviewer, replanner,\s+and integrator/
   );
-  assert.match(command, /Claude Opus and Claude Fable are both supported supervisors/);
-  assert.match(command, /--model <auto\|sol\|terra\|luna>/);
-  assert.match(command, /use `sol` for the hardest open-ended implementation/);
-  assert.match(command, /use `terra` for strong general coding/);
-  assert.match(command, /use `luna` for clear, repeatable, high-volume/);
-  assert.match(command, /Select effort independently/);
-  assert.match(command, /Prefer the lowest effort that should reliably/);
+  assert.match(command, /Claude Opus 5\.5 and Claude Fable 5\.2 are the supported supervisors/);
+  assert.match(command, /the plugin never selects it/);
+  assert.match(command, /--model <auto\|astra\|sol\|terra\|luna>/);
+  assert.match(command, /use `sol` by default for anything non-trivial/);
+  assert.match(command, /use `terra` for well-bounded everyday coding/);
+  assert.match(command, /use `astra` when a wrong result would be expensive or hard to catch/);
+  assert.match(command, /use `luna` only for mechanical work whose acceptance criteria catch a bad result\s+immediately/);
+  assert.match(command, /Select effort independently\. Default to `high` on `sol` and `astra`/);
+  assert.doesNotMatch(command, /Prefer the lowest effort/);
+  assert.doesNotMatch(command, /`luna` does not support `ultra`/);
+  assert.match(command, /Independent `verify` tasks default to `astra`/);
+  assert.match(command, /There is no cap on `astra` tasks/);
+  assert.match(command, /rejects a `luna` route on any task that another task\s+depends on/);
   assert.match(command, /Flags never make the first positional token a lane/);
   assert.match(
     command,
@@ -30,8 +36,11 @@ test("the run command keeps Claude in authority and routes only within the GPT-5
   assert.doesNotMatch(command, /When flags are present: the first positional token is the lane/);
   assert.match(
     command,
-    /only `gpt-5\.6-sol`, `gpt-5\.6-terra`, or `gpt-5\.6-luna`/
+    /only `gpt-6-astra`, `gpt-6\.1-sol`, `gpt-6\.1-terra`, or `gpt-5\.6-luna`/
   );
+  assert.match(command, /Never substitute a model or effort silently/);
+  assert.match(command, /`astra` → `sol` → `terra` → `luna`/);
+  assert.doesNotMatch(command, /GPT-5\.6/);
   assert.match(command, /model-routing rationale/);
   assert.match(command, /omitted task routing is an invalid plan/);
   assert.match(command, /explicitly pins a model, every task uses that model/);
@@ -76,8 +85,27 @@ test("the resume command restores durable state and keeps Claude in authority", 
     command,
     /The Claude model running this main thread remains the planner, scheduler, reviewer, replanner,\s+integrator/
   );
-  assert.match(command, /whether that is Claude Opus or Claude Fable/);
-  assert.match(command, /gpt-5\.6-sol/);
-  assert.match(command, /gpt-5\.6-terra/);
-  assert.match(command, /gpt-5\.6-luna/);
+  assert.match(command, /whether that is Claude Opus 5\.5 or Claude Fable 5\.2/);
+  for (const slug of ["gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-5.6-luna"]) {
+    assert.match(command, new RegExp(slug.replaceAll(".", "\\.")));
+  }
+  assert.match(command, /persisted `gpt-5\.6-sol` or `gpt-5\.6-terra` slug/);
+  assert.match(command, /Model availability and substitutions/);
+});
+
+test("the legacy single-task commands are retired", () => {
+  const commands = path.join(root, "plugins", "orchestrator", "commands");
+  assert.equal(fs.existsSync(path.join(commands, "do.md")), false);
+  assert.equal(fs.existsSync(path.join(commands, "accept.md")), false);
+  for (const file of fs.readdirSync(commands)) {
+    const text = fs.readFileSync(path.join(commands, file), "utf8");
+    assert.doesNotMatch(text, /orchestrator:do|orchestrator:accept|codex-rescue/, file);
+  }
+  for (const skill of ["briefing-compiler", "orchestrator-runtime"]) {
+    const text = fs.readFileSync(
+      path.join(root, "plugins", "orchestrator", "skills", skill, "SKILL.md"),
+      "utf8"
+    );
+    assert.doesNotMatch(text, /orchestrator:do|orch brief|orch accept|`brief`|`accept`|GPT-5\.6/, skill);
+  }
 });

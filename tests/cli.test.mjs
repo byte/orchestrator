@@ -4,6 +4,7 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { after, test } from "node:test";
 
+import { updateLocalState } from "../plugins/orchestrator/scripts/lib/state.mjs";
 import { CLI, cleanup, git, makeRepo, runCli, write, writeResult } from "./helpers.mjs";
 
 const repos = [];
@@ -66,7 +67,7 @@ test("lanes round-trip through the CLI", () => {
   assert.equal(shown.description, "HTTP layer");
   assert.deepEqual(shown.scope, ["src/api/**"]);
   assert.deepEqual(shown.constraints, ["No new dependencies"]);
-  assert.equal(shown.threadId, null);
+  assert.equal(Object.hasOwn(shown, "threadId"), false);
 });
 
 test("an unknown lane is an error that lists the known ones", () => {
@@ -85,100 +86,19 @@ test("invalid lane names are rejected", () => {
   assert.match(result.stderr, /Invalid lane name/);
 });
 
-test("thread bindings survive as machine-local state", () => {
+test("removing a lane also drops a thread binding left by an older release", () => {
   const root = repo();
   runCli(root, ["lane", "add", "api", "--scope", "src/**"]);
-  runCli(root, ["lane", "bind", "api", "thread-abc123"]);
-
-  const shown = JSON.parse(runCli(root, ["lane", "show", "api", "--json"]).stdout);
-  assert.equal(shown.threadId, "thread-abc123");
-
-  runCli(root, ["lane", "unbind", "api"]);
-  assert.equal(JSON.parse(runCli(root, ["lane", "show", "api", "--json"]).stdout).threadId, null);
-});
-
-test("removing a lane also drops its thread binding", () => {
-  const root = repo();
-  runCli(root, ["lane", "add", "api", "--scope", "src/**"]);
-  runCli(root, ["lane", "bind", "api", "thread-abc123"]);
+  updateLocalState(root, (local) => {
+    local.threads.api = { threadId: "thread-abc123", updatedAt: "2026-01-01T00:00:00.000Z" };
+  });
   runCli(root, ["lane", "remove", "api"]);
 
   const local = JSON.parse(fs.readFileSync(path.join(root, ".orchestrator", "local", "threads.json"), "utf8"));
   assert.equal(local.threads.api, undefined);
 });
 
-test("brief compiles a briefing and snapshots the tree", () => {
-  const root = repo();
-  runCli(root, ["lane", "add", "api", "--scope", "src/api/**"]);
-  write(root, "already-dirty.txt", "dirty\n");
-
-  const payload = JSON.parse(runCli(root, ["brief", "api", "--task", "Add pagination", "--json"]).stdout);
-  assert.equal(payload.lane, "api");
-  assert.equal(payload.resuming, false);
-  assert.match(payload.briefing, /Add pagination/);
-  assert.match(payload.briefing, /## RESULT/);
-
-  const local = JSON.parse(fs.readFileSync(path.join(root, ".orchestrator", "local", "threads.json"), "utf8"));
-  assert.deepEqual(local.snapshots.api.dirtyFiles, ["already-dirty.txt"]);
-  assert.match(local.snapshots.api.fingerprints["already-dirty.txt"], /^file:/);
-});
-
-test("brief marks a bound lane as resuming", () => {
-  const root = repo();
-  runCli(root, ["lane", "add", "api", "--scope", "src/**"]);
-  runCli(root, ["lane", "bind", "api", "thread-abc123"]);
-  const payload = JSON.parse(runCli(root, ["brief", "api", "--task", "continue", "--json"]).stdout);
-  assert.equal(payload.resuming, true);
-  assert.equal(payload.threadId, "thread-abc123");
-});
-
-test("accept attributes only post-briefing changes and exits 2 on violations", () => {
-  const root = repo();
-  runCli(root, ["lane", "add", "api", "--scope", "src/api/**"]);
-  write(root, "already-dirty.txt", "dirty\n");
-  runCli(root, ["brief", "api", "--task", "Add pagination"]);
-
-  write(root, "src/api/users.js", "export const users = [];\n");
-  write(root, "src/db/schema.js", "export const schema = {};\n");
-
-  const resultPath = writeResult(
-    "Did the work.\n\n## RESULT\nfiles_touched: src/api/users.js\ndecisions: none\nassumptions: none\nblockers: none\nconfidence: high\n"
-  );
-
-  const result = runCli(root, ["accept", "api", "--result-file", resultPath, "--json"]);
-  assert.equal(result.code, 2);
-
-  const evaluation = JSON.parse(result.stdout);
-  assert.equal(evaluation.verdict, "review");
-  assert.ok(!evaluation.changed.includes("already-dirty.txt"));
-  assert.ok(evaluation.outOfScope.includes("src/db/schema.js"));
-  assert.ok(evaluation.undeclared.includes("src/db/schema.js"));
-});
-
-test("accept exits 0 when the run stayed in scope and reported honestly", () => {
-  const root = repo();
-  runCli(root, ["lane", "add", "api", "--scope", "src/api/**"]);
-  runCli(root, ["brief", "api", "--task", "Add pagination"]);
-  write(root, "src/api/users.js", "export const users = [];\n");
-
-  const resultPath = writeResult(
-    "## RESULT\nfiles_touched: src/api/users.js\ndecisions: none\nassumptions: none\nblockers: none\nconfidence: high\n"
-  );
-
-  const result = runCli(root, ["accept", "api", "--result-file", resultPath]);
-  assert.equal(result.code, 0);
-  assert.match(result.stdout, /Verdict: clean/);
-});
-
-test("accept refuses to guess when no briefing snapshot exists", () => {
-  const root = repo();
-  runCli(root, ["lane", "add", "api", "--scope", "src/**"]);
-  const result = runCli(root, ["accept", "api"]);
-  assert.equal(result.code, 1);
-  assert.match(result.stderr, /No pre-dispatch snapshot/);
-});
-
-test("ledger entries are dated, sectioned, and reach the briefing", () => {
+test("ledger entries are dated, sectioned, and reach the run briefing", () => {
   const root = repo();
   runCli(root, ["lane", "add", "api", "--scope", "src/**"]);
   runCli(root, ["ledger", "add", "decisions", "Errors are returned, never thrown."]);
@@ -188,9 +108,13 @@ test("ledger entries are dated, sectioned, and reach the briefing", () => {
   assert.match(ledger, /## Decisions\n\n- \(\d{4}-\d{2}-\d{2}\) Errors are returned, never thrown\./);
   assert.match(ledger, /## Failed approaches\n\n- \(\d{4}-\d{2}-\d{2}\) Retrying on 4xx made it worse\./);
 
-  const payload = JSON.parse(runCli(root, ["brief", "api", "--task", "x", "--json"]).stdout);
-  assert.match(payload.briefing, /Errors are returned, never thrown\./);
-  assert.match(payload.briefing, /Retrying on 4xx made it worse\./);
+  runCli(root, [
+    "run", "create", "api", "--id", "run-ledger", "--objective", "x",
+    "--model", "sol", "--effort", "high"
+  ]);
+  const briefing = runCli(root, ["run", "briefing", "run-ledger"]).stdout;
+  assert.match(briefing, /Errors are returned, never thrown\./);
+  assert.match(briefing, /Retrying on 4xx made it worse\./);
 });
 
 test("an unknown ledger section is rejected with the valid ones", () => {
@@ -203,7 +127,7 @@ test("an unknown ledger section is rejected with the valid ones", () => {
 test("commands refuse to run before init", () => {
   const root = makeRepo();
   repos.push(root);
-  const result = runCli(root, ["brief", "api", "--task", "x"]);
+  const result = runCli(root, ["run", "list"]);
   assert.equal(result.code, 1);
   assert.match(result.stderr, /not initialized/);
 });
@@ -222,57 +146,6 @@ test("unknown options are rejected instead of silently weakening a lane", () => 
   const result = runCli(root, ["lane", "add", "api", "--scoop", "src/**"]);
   assert.equal(result.code, 1);
   assert.match(result.stderr, /Unknown option --scoop/);
-});
-
-test("accept detects changes made to a file that was already dirty", () => {
-  const root = repo();
-  runCli(root, ["lane", "add", "api", "--scope", "src/**"]);
-  write(root, "src/existing.js", "before dispatch\n");
-  runCli(root, ["brief", "api", "--task", "finish the file"]);
-  write(root, "src/existing.js", "after dispatch\n");
-
-  const resultPath = writeResult(
-    "## RESULT\nfiles_touched: src/existing.js\ndecisions: none\nassumptions: none\nblockers: none\nconfidence: high\n"
-  );
-  const result = runCli(root, ["accept", "api", "--result-file", resultPath, "--json"]);
-  assert.equal(result.code, 0);
-  const evaluation = JSON.parse(result.stdout);
-  assert.deepEqual(evaluation.changed, ["src/existing.js"]);
-  assert.deepEqual(evaluation.preexisting, []);
-});
-
-test("accept detects files committed by a worker after the briefing", () => {
-  const root = repo();
-  runCli(root, ["lane", "add", "api", "--scope", "src/**"]);
-  runCli(root, ["brief", "api", "--task", "add a module"]);
-  write(root, "src/new.js", "export const value = 1;\n");
-  git(root, ["add", "src/new.js"]);
-  git(root, ["commit", "--quiet", "-m", "worker change"]);
-
-  const resultPath = writeResult(
-    "## RESULT\nfiles_touched: src/new.js\ndecisions: none\nassumptions: none\nblockers: none\nconfidence: high\n"
-  );
-  const result = runCli(root, ["accept", "api", "--result-file", resultPath, "--json"]);
-  assert.equal(result.code, 0);
-  const evaluation = JSON.parse(result.stdout);
-  assert.deepEqual(evaluation.changed, ["src/new.js"]);
-  assert.deepEqual(evaluation.committed, ["src/new.js"]);
-  assert.equal(evaluation.headChanged, true);
-});
-
-test("accept flags a branch switch after the briefing", () => {
-  const root = repo();
-  runCli(root, ["lane", "add", "api", "--scope", "src/**"]);
-  runCli(root, ["brief", "api", "--task", "inspect"]);
-  git(root, ["checkout", "-q", "-b", "other"]);
-  const resultPath = writeResult(
-    "## RESULT\nfiles_touched: none\ndecisions: none\nassumptions: none\nblockers: none\nconfidence: high\n"
-  );
-  const result = runCli(root, ["accept", "api", "--result-file", resultPath, "--json"]);
-  assert.equal(result.code, 2);
-  const evaluation = JSON.parse(result.stdout);
-  assert.equal(evaluation.branchChanged, true);
-  assert.match(evaluation.problems.join(" "), /branch changed/);
 });
 
 test("concurrent lane additions do not lose state", async () => {
@@ -367,7 +240,7 @@ test("run commands persist a plan, ready queue, checkpoint, and restart briefing
     ]).stdout
   );
   assert.equal(pinned.workerPolicy.routingMode, "pinned");
-  assert.equal(pinned.workerPolicy.model, "gpt-5.6-terra");
+  assert.equal(pinned.workerPolicy.model, "gpt-6.1-terra");
   assert.equal(pinned.workerPolicy.reasoningEffort, "high");
   const conflictingPlan = writeResult(
     JSON.stringify({
@@ -390,7 +263,7 @@ test("run commands persist a plan, ready queue, checkpoint, and restart briefing
     conflictingPlan
   ]);
   assert.equal(rejectedPin.code, 1);
-  assert.match(rejectedPin.stderr, /run explicitly pins gpt-5\.6-terra/);
+  assert.match(rejectedPin.stderr, /run explicitly pins gpt-6\.1-terra/);
 
   const planPath = writeResult(
     JSON.stringify({
@@ -400,9 +273,9 @@ test("run commands persist a plan, ready queue, checkpoint, and restart briefing
           title: "Implement",
           objective: "Add the cursor logic",
           acceptance: ["targeted tests pass"],
-          model: "luna",
+          model: "terra",
           effort: "low",
-          routingReason: "The implementation is a bounded mechanical change."
+          routingReason: "The implementation is a bounded everyday change."
         },
         {
           id: "review",
@@ -411,9 +284,9 @@ test("run commands persist a plan, ready queue, checkpoint, and restart briefing
           kind: "verify",
           dependsOn: ["implementation"],
           acceptance: ["no P1 findings"],
-          model: "terra",
-          effort: "xhigh",
-          routingReason: "Independent review needs balanced capability and deeper reasoning."
+          model: "astra",
+          effort: "high",
+          routingReason: "Independent review of sol-or-below work runs on astra."
         }
       ]
     })
@@ -461,12 +334,12 @@ test("run commands persist a plan, ready queue, checkpoint, and restart briefing
   const dispatch = JSON.parse(
     runCli(root, ["run", "claim", "run-cli", "implementation", "--json"]).stdout
   );
-  assert.equal(dispatch.model, "gpt-5.6-luna");
+  assert.equal(dispatch.model, "gpt-6.1-terra");
   assert.equal(dispatch.reasoningEffort, "low");
   assert.deepEqual(dispatch.routingFlags.slice(0, 3), [
     "--fresh",
     "--model",
-    "gpt-5.6-luna"
+    "gpt-6.1-terra"
   ]);
   const bound = runCli(root, [
     "run",
@@ -488,9 +361,9 @@ test("run commands persist a plan, ready queue, checkpoint, and restart briefing
     runCli(root, ["run", "recover", "run-cli", "--json"]).stdout
   );
   assert.equal(active[0].jobId, "job-cli");
-  assert.equal(active[0].model, "gpt-5.6-luna");
+  assert.equal(active[0].model, "gpt-6.1-terra");
   assert.equal(active[0].reasoningEffort, "low");
-  assert.match(active[0].routingReason, /bounded mechanical change/);
+  assert.match(active[0].routingReason, /bounded everyday change/);
   const resumed = JSON.parse(
     runCli(root, ["run", "resume", "run-cli", "--json"]).stdout
   );

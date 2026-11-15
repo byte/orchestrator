@@ -3,7 +3,7 @@
   "version": "0.5.1",
   "private": true,
   "type": "module",
-  "description": "A durable Claude supervisor for a routed GPT-5.6 Codex worker pool.",
+  "description": "A durable Claude supervisor for a routed Codex worker pool.",
   "license": "Apache-2.0",
   "engines": {
     "node": ">=18.18"

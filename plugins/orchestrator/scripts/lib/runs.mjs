@@ -29,25 +29,58 @@ export const DEFAULT_WORKER_MODEL = null;
 export const DEFAULT_REASONING_EFFORT = null;
 export const DEFAULT_ROUTING_MODE = "auto";
 export const DEFAULT_MAX_WORKERS = 3;
+// Every effort below was accepted by every model in a real `codex exec` probe
+// against Codex CLI 0.169.0 on 2026-11-15; see docs/architecture.md.
+const ALL_REASONING_EFFORTS = Object.freeze(["low", "medium", "high", "xhigh", "max", "ultra"]);
+
+// The current roster. Aliases are tier names only: a bare family name such as
+// `gpt-6` or `gpt-6.1` must never pick a tier on the supervisor's behalf.
 export const WORKER_MODELS = Object.freeze({
-  "gpt-5.6-sol": Object.freeze({
-    aliases: Object.freeze(["sol", "gpt-5.6", "gpt-5.6-sol"]),
-    efforts: Object.freeze(["low", "medium", "high", "xhigh", "max", "ultra"])
+  "gpt-6-astra": Object.freeze({
+    aliases: Object.freeze(["astra", "gpt-6-astra"]),
+    efforts: ALL_REASONING_EFFORTS
   }),
-  "gpt-5.6-terra": Object.freeze({
-    aliases: Object.freeze(["terra", "gpt-5.6-terra"]),
-    efforts: Object.freeze(["low", "medium", "high", "xhigh", "max", "ultra"])
+  "gpt-6.1-sol": Object.freeze({
+    aliases: Object.freeze(["sol", "gpt-6.1-sol"]),
+    efforts: ALL_REASONING_EFFORTS
+  }),
+  "gpt-6.1-terra": Object.freeze({
+    aliases: Object.freeze(["terra", "gpt-6.1-terra"]),
+    efforts: ALL_REASONING_EFFORTS
   }),
   "gpt-5.6-luna": Object.freeze({
     aliases: Object.freeze(["luna", "gpt-5.6-luna"]),
-    efforts: Object.freeze(["low", "medium", "high", "xhigh", "max"])
+    efforts: ALL_REASONING_EFFORTS
   })
 });
+
+// Exact slugs that runs saved by 0.5.x may already route to. They stay valid for
+// loading, resuming, and retrying those runs on the slug they were saved with,
+// and are never accepted when a new plan or run pin is written.
+export const LEGACY_WORKER_MODELS = Object.freeze({
+  "gpt-5.6-sol": Object.freeze({ efforts: ALL_REASONING_EFFORTS }),
+  "gpt-5.6-terra": Object.freeze({ efforts: ALL_REASONING_EFFORTS })
+});
+
+// When Codex rejects a model as unavailable to the account, a launch walks down
+// this ladder keeping the effort. Legacy slugs are deliberately not on it: a
+// 0.5.x run keeps its exact saved slug rather than silently changing generation.
+export const MODEL_FALLBACK_LADDER = Object.freeze([
+  "gpt-6-astra",
+  "gpt-6.1-sol",
+  "gpt-6.1-terra",
+  "gpt-5.6-luna"
+]);
+
+const WORKER_ALIASES = "astra, sol, terra, luna";
+const WORKER_SLUGS = Object.keys(WORKER_MODELS).join(", ");
+const FAMILY_NAMES = new Set(["gpt-6", "gpt-6.1", "gpt-5.6"]);
+const LUNA_MODEL = "gpt-5.6-luna";
 
 const RUN_ID_PATTERN = /^[a-z0-9][a-z0-9._-]*$/;
 const TASK_ID_PATTERN = RUN_ID_PATTERN;
 const TASK_KINDS = new Set(["write", "read", "verify"]);
-const REASONING_EFFORTS = new Set(["low", "medium", "high", "xhigh", "max", "ultra"]);
+const REASONING_EFFORTS = new Set(ALL_REASONING_EFFORTS);
 const ACTIVE_TASK_STATUSES = new Set(["dispatching", "running"]);
 const RETRYABLE_TASK_STATUSES = new Set(["blocked", "failed", "cancelled"]);
 
@@ -404,16 +437,46 @@ function positiveInteger(value, label, fallback) {
   return parsed;
 }
 
-export function normalizeWorkerModel(value) {
+/**
+ * Resolve an alias or exact slug to an exact current-roster slug. `allowLegacy`
+ * lists the legacy slugs this call may accept: only values already persisted by
+ * a 0.5.x run, so legacy routes survive resume and retry but never enter a new
+ * plan.
+ */
+export function normalizeWorkerModel(value, { allowLegacy = [] } = {}) {
   const requested = String(value ?? "").trim().toLowerCase();
   for (const [model, policy] of Object.entries(WORKER_MODELS)) {
     if (policy.aliases.includes(requested)) {
       return model;
     }
   }
+  if (Object.hasOwn(LEGACY_WORKER_MODELS, requested)) {
+    if (allowLegacy.includes(requested)) {
+      return requested;
+    }
+    throw new Error(
+      `Worker model "${value}" belongs to the retired GPT-5.6 Sol/Terra roster. It remains valid ` +
+        "only for runs saved by orchestrator 0.5.x, which keep their exact slug on resume and retry. " +
+        `Route new work to one of: ${WORKER_ALIASES} (exact slugs: ${WORKER_SLUGS}).`
+    );
+  }
+  if (FAMILY_NAMES.has(requested)) {
+    throw new Error(
+      `Worker model "${value}" is a model family, not a tier, and does not select a worker. ` +
+        `Use one of: ${WORKER_ALIASES} (exact slugs: ${WORKER_SLUGS}).`
+    );
+  }
   throw new Error(
-    `Unsupported worker model "${value}". Use one of: sol, terra, luna (or their exact gpt-5.6-* slugs).`
+    `Unsupported worker model "${value}". Use one of: ${WORKER_ALIASES} (exact slugs: ${WORKER_SLUGS}).`
   );
+}
+
+function workerModelPolicy(model) {
+  return WORKER_MODELS[model] ?? LEGACY_WORKER_MODELS[model];
+}
+
+function legacySlugs(...values) {
+  return values.filter((value) => Object.hasOwn(LEGACY_WORKER_MODELS, value));
 }
 
 function normalizeReasoningEffort(value) {
@@ -427,14 +490,19 @@ function normalizeReasoningEffort(value) {
 }
 
 function validateWorkerRoute(model, reasoningEffort, label = "Worker") {
-  if (!WORKER_MODELS[model].efforts.includes(reasoningEffort)) {
+  const efforts = workerModelPolicy(model).efforts;
+  if (!efforts.includes(reasoningEffort)) {
     throw new Error(
       `${label} cannot use reasoning effort "${reasoningEffort}" with ${model}. ` +
-        `Use one of: ${WORKER_MODELS[model].efforts.join(", ")}.`
+        `Use one of: ${efforts.join(", ")}.`
     );
   }
 }
 
+/**
+ * The route the supervisor saved (or the run pinned). This is persisted state, so
+ * a legacy slug saved by 0.5.x resolves to itself.
+ */
 export function resolveTaskWorker(run, task) {
   const selectedModel = task.model ?? run.workerPolicy.model;
   const selectedEffort = task.reasoningEffort ?? run.workerPolicy.reasoningEffort;
@@ -444,10 +512,81 @@ export function resolveTaskWorker(run, task) {
         "Auto-routed tasks require both model and effort in the saved plan."
     );
   }
-  const model = normalizeWorkerModel(selectedModel);
+  const model = normalizeWorkerModel(selectedModel, {
+    allowLegacy: legacySlugs(selectedModel)
+  });
   const reasoningEffort = normalizeReasoningEffort(selectedEffort);
   validateWorkerRoute(model, reasoningEffort, `Task "${task.id}"`);
   return { model, reasoningEffort };
+}
+
+function unavailableModelSet(run) {
+  return new Set((run.unavailableModels ?? []).map((entry) => entry.model));
+}
+
+/**
+ * The route a new attempt will actually launch on. It is the saved route unless
+ * Codex has already rejected that model for this account during the run, in which
+ * case it walks down MODEL_FALLBACK_LADDER keeping the effort. The substitution is
+ * returned explicitly so the caller records it; nothing here is silent.
+ */
+export function effectiveTaskRoute(run, task) {
+  const requested = resolveTaskWorker(run, task);
+  const unavailable = unavailableModelSet(run);
+  const pinned = run.workerPolicy.routingMode === "pinned" && Boolean(run.workerPolicy.model);
+  if (!unavailable.has(requested.model)) {
+    return { ...requested, requestedModel: requested.model, substitution: null };
+  }
+  const start = MODEL_FALLBACK_LADDER.indexOf(requested.model);
+  if (start === -1) {
+    return { ...requested, requestedModel: requested.model, substitution: null };
+  }
+  for (const candidate of MODEL_FALLBACK_LADDER.slice(start + 1)) {
+    if (unavailable.has(candidate) ||
+        !WORKER_MODELS[candidate].efforts.includes(requested.reasoningEffort)) {
+      continue;
+    }
+    return {
+      model: candidate,
+      reasoningEffort: requested.reasoningEffort,
+      requestedModel: requested.model,
+      substitution: {
+        requestedModel: requested.model,
+        model: candidate,
+        reasoningEffort: requested.reasoningEffort,
+        reason: "model_unavailable",
+        pinned,
+        unavailableModels: MODEL_FALLBACK_LADDER
+          .slice(start, MODEL_FALLBACK_LADDER.indexOf(candidate))
+          .filter((model) => unavailable.has(model))
+      }
+    };
+  }
+  return { ...requested, requestedModel: requested.model, substitution: null };
+}
+
+/** Next model a rejected launch can fall back to, or null when the ladder is exhausted. */
+export function fallbackModel(run, model, reasoningEffort) {
+  const unavailable = unavailableModelSet(run);
+  unavailable.add(model);
+  const start = MODEL_FALLBACK_LADDER.indexOf(model);
+  if (start === -1) {
+    return null;
+  }
+  return MODEL_FALLBACK_LADDER.slice(start + 1).find((candidate) =>
+    !unavailable.has(candidate) && WORKER_MODELS[candidate].efforts.includes(reasoningEffort)
+  ) ?? null;
+}
+
+export function substitutionNotice(substitution) {
+  if (!substitution) {
+    return null;
+  }
+  const pin = substitution.pinned
+    ? "USER-PINNED MODEL SUBSTITUTED: the run pinned "
+    : "Model substituted: the supervisor routed ";
+  return `${pin}${substitution.requestedModel}, which Codex rejected as unavailable to this ` +
+    `account; launched on ${substitution.model} (${substitution.reasoningEffort}) instead.`;
 }
 
 function optionalWorkerModel(value) {
@@ -536,7 +675,7 @@ function stringList(value, label) {
   return value.map((entry) => entry.trim()).filter(Boolean);
 }
 
-function normalizeTask(raw, defaultScope, workerPolicy) {
+function normalizeTask(raw, defaultScope, workerPolicy, { allowLegacy = [] } = {}) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
     throw new Error("Every task must be an object.");
   }
@@ -557,7 +696,7 @@ function normalizeTask(raw, defaultScope, workerPolicy) {
   const model =
     raw.model === undefined || raw.model === null || String(raw.model).trim() === ""
       ? null
-      : normalizeWorkerModel(raw.model);
+      : normalizeWorkerModel(raw.model, { allowLegacy });
   const requestedEffort = raw.effort ?? raw.reasoningEffort;
   const reasoningEffort =
     requestedEffort === undefined ||
@@ -591,7 +730,7 @@ function normalizeTask(raw, defaultScope, workerPolicy) {
   if (!resolvedModel) {
     throw new Error(
       `Task "${id}" requires a model because this run uses automatic model routing. ` +
-        "Choose sol, terra, or luna based on the task's complexity and needs."
+        `Choose ${WORKER_ALIASES} based on the task's complexity and the cost of a wrong result.`
     );
   }
   if (!resolvedEffort) {
@@ -599,7 +738,9 @@ function normalizeTask(raw, defaultScope, workerPolicy) {
       `Task "${id}" requires an effort because this run uses automatic effort routing.`
     );
   }
-  const exactModel = normalizeWorkerModel(resolvedModel);
+  const exactModel = normalizeWorkerModel(resolvedModel, {
+    allowLegacy: [...allowLegacy, ...legacySlugs(workerPolicy.model)]
+  });
   const exactEffort = normalizeReasoningEffort(resolvedEffort);
   validateWorkerRoute(exactModel, exactEffort, `Task "${id}"`);
   const routingReason = String(raw.routingReason ?? "").trim();
@@ -666,6 +807,33 @@ function validateGraph(tasks) {
   }
 }
 
+/**
+ * Luna is a last resort for mechanical work whose acceptance criteria catch a bad
+ * result immediately. A task other tasks build on fails that test: its errors
+ * propagate before anyone checks them. Only an explicit user pin overrides this.
+ */
+function validateLunaLeaves(run, tasks) {
+  if (!Object.hasOwn(run.workerPolicy, "routingMode") || run.workerPolicy.model === LUNA_MODEL) {
+    return;
+  }
+  for (const task of Object.values(tasks)) {
+    if (task.status === "completed" || resolveTaskWorker(run, task).model !== LUNA_MODEL) {
+      continue;
+    }
+    const dependents = Object.values(tasks)
+      .filter((other) => other.dependsOn.includes(task.id))
+      .map((other) => other.id)
+      .sort();
+    if (dependents.length) {
+      throw new Error(
+        `Task "${task.id}" routes to luna, but ${dependents.join(", ")} depend(s) on it. ` +
+          "Luna is reserved for mechanical leaf work whose acceptance criteria catch a bad " +
+          "result immediately; route it to terra or above, or pin the whole run to luna."
+      );
+    }
+  }
+}
+
 function taskDefinition(run, task) {
   const route = resolveTaskWorker(run, task);
   return {
@@ -699,7 +867,14 @@ export function replacePlan(cwd, runId, rawTasks, { defaultScope = [] } = {}) {
     }
     const tasks = {};
     for (const raw of rawTasks) {
-      const task = normalizeTask(raw, defaultScope, run.workerPolicy);
+      // A task persisted by 0.5.x on a legacy slug may be resubmitted on that
+      // exact slug, so completed and in-flight legacy work survives a revision.
+      const persisted = raw && typeof raw === "object"
+        ? run.tasks[String(raw.id ?? "").trim()]
+        : null;
+      const task = normalizeTask(raw, defaultScope, run.workerPolicy, {
+        allowLegacy: legacySlugs(persisted?.model)
+      });
       if (tasks[task.id]) {
         throw new Error(`Duplicate task id "${task.id}".`);
       }
@@ -728,6 +903,7 @@ export function replacePlan(cwd, runId, rawTasks, { defaultScope = [] } = {}) {
       }
     }
     validateGraph(tasks);
+    validateLunaLeaves(run, tasks);
     run.tasks = tasks;
     refreshPendingGuidance(run);
     run.planRevision += 1;
@@ -889,7 +1065,9 @@ function activeGuidancePolicy(run) {
 }
 
 function guidanceContext(run, task) {
-  const previousOutcome = task.attempts.at(-1)?.outcome;
+  // A launch Codex rejected because the model was unavailable never reached a
+  // worker, so it says nothing about how the task went and must not steer guidance.
+  const previousOutcome = task.attempts.findLast((attempt) => !attempt.modelUnavailable)?.outcome;
   if (!previousOutcome) {
     return null;
   }
@@ -1016,8 +1194,10 @@ function renderWorkerLedger(cwd) {
     .join("\n\n");
 }
 
-export function renderWorkerBriefing(cwd, run, task, lane) {
-  const route = resolveTaskWorker(run, task);
+export function renderWorkerBriefing(cwd, run, task, lane, launchRoute = null) {
+  // The header names the model the attempt actually launches on, which differs
+  // from the saved route only after a recorded substitution.
+  const route = launchRoute ?? resolveTaskWorker(run, task);
   const guidance = task.attempts.at(-1)?.guidanceSnapshot ?? task.guidanceSelection;
   if (guidance) {
     validateGuidanceSelection(guidance);
@@ -1044,7 +1224,7 @@ export function renderWorkerBriefing(cwd, run, task, lane) {
       }
       return lines.join("\n");
     });
-  return `You are one ${route.model} worker in a GPT-5.6 pool managed by a Claude supervisor.
+  return `You are one ${route.model} worker in a Codex worker pool managed by a Claude supervisor.
 
 Do not redefine the overall goal, widen scope, integrate other workers, or spawn subagents. Complete only the bounded assignment below and return evidence to the supervisor.
 
@@ -1127,7 +1307,7 @@ export function claimTask(cwd, runId, taskId, lane) {
           `  orch run checkpoint ${id} --summary "<plan and why>" --decision "<decision>" --risk "<risk>" --next "<next action>"`
       );
     }
-    const route = resolveTaskWorker(run, task);
+    const route = effectiveTaskRoute(run, task);
     const expectedGuidance = selectGuidance(
       activeGuidancePolicy(run),
       activeGuidancePolicy(run) ? guidanceContext(run, task) : null
@@ -1152,6 +1332,8 @@ export function claimTask(cwd, runId, taskId, lane) {
       threadId: null,
       model: route.model,
       reasoningEffort: route.reasoningEffort,
+      requestedModel: route.requestedModel,
+      substitution: route.substitution ? { ...route.substitution, at: nowIso() } : null,
       claimedAt: nowIso(),
       startedAt: null,
       finishedAt: null,
@@ -1174,12 +1356,23 @@ export function claimTask(cwd, runId, taskId, lane) {
       guidancePolicyHash: attempt.guidanceSnapshot.policyHash,
       guidanceItemIds: attempt.guidanceSnapshot.items.map((item) => item.guidanceId)
     });
+    if (attempt.substitution) {
+      appendEvent(cwd, id, {
+        type: "task.model_substituted",
+        taskId: task.id,
+        attemptId: attempt.id,
+        ...attempt.substitution,
+        notice: substitutionNotice(attempt.substitution)
+      });
+    }
     return {
       runId: id,
       taskId: task.id,
       attemptId: attempt.id,
       model: route.model,
       reasoningEffort: route.reasoningEffort,
+      requestedModel: route.requestedModel,
+      substitution: attempt.substitution,
       routingFlags: [
         "--fresh",
         "--model",
@@ -1187,7 +1380,7 @@ export function claimTask(cwd, runId, taskId, lane) {
         "--effort",
         route.reasoningEffort
       ],
-      briefing: renderWorkerBriefing(cwd, run, task, lane)
+      briefing: renderWorkerBriefing(cwd, run, task, lane, route)
     };
   });
 }
@@ -1492,6 +1685,83 @@ export function failTaskAttempt(
       outcome
     });
     return task;
+  });
+}
+
+/**
+ * Codex rejected the attempt's model as unavailable to this account before any
+ * work happened. Record the model as unavailable for the rest of the run, close
+ * the attempt with a typed outcome, and return the task to pending when the
+ * fallback ladder has a model left, so the caller can relaunch it. The next claim
+ * records the substitution on its attempt; nothing about it is silent.
+ */
+export function recordModelUnavailable(cwd, runId, taskId, { attemptId, error }) {
+  const id = assertId(runId, "run");
+  const filePath = runFile(cwd, id);
+  return withFileLock(filePath, () => {
+    const run = loadRun(cwd, id);
+    const task = requireTask(run, taskId);
+    const attempt = currentAttempt(task, attemptId);
+    if (attempt.outcome) {
+      if (attempt.modelUnavailable) {
+        return { task, attempt, fallbackModel: attempt.modelUnavailable.fallbackModel, duplicate: true };
+      }
+      throw new Error(
+        `Attempt "${attempt.id}" already has terminal outcome "${attempt.outcome.terminalOutcome}".`
+      );
+    }
+    const message = String(error ?? `Codex rejected ${attempt.model} as unavailable.`);
+    const next = fallbackModel(run, attempt.model, attempt.reasoningEffort);
+    run.unavailableModels ??= [];
+    if (!run.unavailableModels.some((entry) => entry.model === attempt.model)) {
+      run.unavailableModels.push({
+        model: attempt.model,
+        detectedAt: nowIso(),
+        taskId: task.id,
+        attemptId: attempt.id,
+        message
+      });
+    }
+    attempt.status = "failed";
+    attempt.finishedAt = nowIso();
+    attempt.error = message;
+    attempt.modelUnavailable = { model: attempt.model, fallbackModel: next };
+    const outcome = assignAttemptOutcome(
+      attempt,
+      outcomeInput("execution_failed", next ? "execute" : "escalate", "model_unavailable", {
+        signals: ["model_unavailable"],
+        metadata: { unavailableModel: attempt.model, fallbackModel: next }
+      })
+    );
+    if (next) {
+      task.status = "pending";
+      task.result = null;
+    } else {
+      task.status = "failed";
+      task.result = {
+        summary: `${message} No model remains on the fallback ladder below ${attempt.model}; ` +
+          "re-route the task or ask the user how to proceed.",
+        contractFound: false,
+        missingFields: [],
+        fields: {},
+        structured: null,
+        reportedAt: nowIso()
+      };
+    }
+    task.updatedAt = nowIso();
+    refreshRunStatus(run);
+    writeRun(cwd, run);
+    appendEvent(cwd, id, {
+      type: "task.model_unavailable",
+      taskId: task.id,
+      attemptId: attempt.id,
+      model: attempt.model,
+      reasoningEffort: attempt.reasoningEffort,
+      fallbackModel: next,
+      error: message,
+      outcome
+    });
+    return { task, attempt, fallbackModel: next, duplicate: false };
   });
 }
 
@@ -1971,6 +2241,8 @@ export function recoveryReport(run) {
         model: attempt.model ?? resolveTaskWorker(run, task).model,
         reasoningEffort:
           attempt.reasoningEffort ?? resolveTaskWorker(run, task).reasoningEffort,
+        requestedModel: attempt.requestedModel ?? attempt.model ?? resolveTaskWorker(run, task).model,
+        substitution: attempt.substitution ?? null,
         routingReason: task.routingReason ?? null,
         runnerPid: attempt.runner?.pid ?? null,
         runnerStatusFile: attempt.runner?.statusFile ?? null,
@@ -2070,6 +2342,27 @@ export function addCheckpoint(
   });
 }
 
+/**
+ * Every model Codex rejected during the run and every attempt that launched on a
+ * substitute. Pinned substitutions are listed first because the user chose that
+ * model explicitly and must be told it did not run.
+ */
+export function modelSubstitutionSummary(run) {
+  const unavailable = (run.unavailableModels ?? []).map(
+    (entry) => `unavailable: ${entry.model} (first rejected on ${entry.attemptId}: ${entry.message})`
+  );
+  const attempts = Object.values(run.tasks)
+    .flatMap((task) => task.attempts.filter((attempt) => attempt.substitution))
+    .sort((left, right) => Number(right.substitution.pinned) - Number(left.substitution.pinned));
+  return {
+    pinned: attempts.some((attempt) => attempt.substitution.pinned),
+    lines: [
+      ...attempts.map((attempt) => `${attempt.id}: ${substitutionNotice(attempt.substitution)}`),
+      ...unavailable
+    ]
+  };
+}
+
 function renderList(items) {
   return items.length ? items.map((item) => `- ${item}`).join("\n") : "- none";
 }
@@ -2091,13 +2384,21 @@ export function renderSupervisorBriefing(cwd, run, lane) {
       const dependencies = task.dependsOn.length ? task.dependsOn.join(", ") : "none";
       const attempt = task.attempts.at(-1);
       const structured = task.result?.structured;
-      const route = attempt?.model
-        ? {
-            model: attempt.model,
-            reasoningEffort:
-              attempt.reasoningEffort ?? resolveTaskWorker(run, task).reasoningEffort
-          }
-        : resolveTaskWorker(run, task);
+      const route = task.status === "pending"
+        ? effectiveTaskRoute(run, task)
+        : attempt?.model
+          ? {
+              model: attempt.model,
+              reasoningEffort:
+                attempt.reasoningEffort ?? resolveTaskWorker(run, task).reasoningEffort,
+              substitution: attempt.substitution ?? null
+            }
+          : resolveTaskWorker(run, task);
+      const substituted = route.substitution
+        ? ` — SUBSTITUTED for ${route.substitution.requestedModel}` +
+          `${route.substitution.pinned ? " (user pin overridden)" : ""}` +
+          `${task.status === "pending" ? " on next launch" : ""}`
+        : "";
       const workerTests = structured?.tests?.length
         ? structured.tests.map((test) => `${test.command}: ${test.outcome}`)
         : [];
@@ -2119,7 +2420,7 @@ export function renderSupervisorBriefing(cwd, run, lane) {
 
 - status: ${task.status}
 - kind: ${task.kind}
-- worker route: ${route.model} (${route.reasoningEffort})
+- worker route: ${route.model} (${route.reasoningEffort})${substituted}
 - routing reason: ${task.routingReason || "legacy or explicitly pinned run"}
 - provisional guidance: ${guidance?.enabled ? `${guidance.policyVersion} / ${guidance.policyHash}` : "disabled"}
 - guidance items:
@@ -2147,6 +2448,7 @@ ${renderList(task.acceptance)}`;
         .map(([section, entries]) => `### ${section}\n${renderList(entries)}`)
         .join("\n\n")
     : "No durable project facts have been recorded.";
+  const substitutions = modelSubstitutionSummary(run);
 
   return `# Supervisor briefing — ${run.id}
 
@@ -2173,6 +2475,10 @@ ${run.objective}
 - supervisor branch: ${run.repository.branch}
 - run base: ${run.repository.baseHead}
 - integrated head: ${run.repository.integrationHead}
+
+## Model availability and substitutions
+
+${substitutions.pinned ? "A user-pinned model was substituted. Tell the user which model actually ran before reporting any result.\n\n" : ""}${renderList(substitutions.lines)}
 
 ## Lane constraints
 

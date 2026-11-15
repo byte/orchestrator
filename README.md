@@ -4,12 +4,14 @@ A Claude Code supervisor for a pool of Codex workers.
 
 `orchestrator` keeps Claude in the main thread as planner, scheduler, reviewer, replanner,
 integrator, and user-facing manager. Bounded execution tasks run in parallel through detached
-Codex CLI processes routed to `gpt-5.6-sol`, `gpt-5.6-terra`, or `gpt-5.6-luna`. Durable run
+Codex CLI processes routed to `gpt-6-astra`, `gpt-6.1-sol`, `gpt-6.1-terra`, or `gpt-5.6-luna`.
+Durable run
 state, checkpoints, evidence, and project memory let the supervisor recover after context
 compaction, interruption, or a new Claude Code session.
 
 The supervisor is whichever Claude model owns the Claude Code session — Claude Opus and Claude
-Fable are both supported. Nothing in the plugin selects or switches the supervising model; run
+Fable are both supported, specifically Claude Opus 5.5 and Claude Fable 5.2.
+Nothing in the plugin selects or switches the supervising model; run
 `/orchestrator:run` from the session whose model you want managing the pool. Only the worker
 model is selected by the plugin; every resolved worker route is pinned to its attempt.
 
@@ -19,7 +21,8 @@ what should happen, what is acceptable, what gets integrated, and when the whole
 ## What it provides
 
 - A task DAG planned and owned by the supervising Claude model
-- A supervisor-routed mixed pool of exact GPT-5.6 Sol, Terra, and Luna workers
+- A supervisor-routed mixed pool of exact Astra, Sol, Terra, and Luna workers
+- Recorded, never-silent fallback down the model ladder when Codex rejects a model as unavailable
 - One detached `codex exec` process and isolated Git worktree per task
 - Read-only sandboxes for analysis/review tasks and workspace-write sandboxes for implementation
 - JSON-schema-enforced worker reports with files, tests, decisions, assumptions, blockers, and
@@ -45,11 +48,10 @@ what should happen, what is acceptable, what gets integrated, and when the whole
 
 Workers use the account already authenticated in Codex CLI. The plugin does not require its own
 OpenAI API key, change your Codex authentication, or grant model access; the selected model must
-be available to that account.
+be available to that account. If it is not, the runtime substitutes the next model down the ladder
+and records that it did; see the routing section below.
 
-The official `openai/codex-plugin-cc` Claude bridge is optional. Pooled `/orchestrator:run`
-execution invokes Codex CLI directly. The bridge is needed only for the legacy
-`/orchestrator:do` command.
+`/orchestrator:run` invokes Codex CLI directly. No Claude-side Codex plugin is needed.
 
 ## Install
 
@@ -135,9 +137,25 @@ their durable handles, reviews their structured evidence, integrates passing wri
 replans or retries when evidence invalidates the current route.
 
 Model and effort are automatic by default. During planning, Fable or Opus must assign every task
-an exact `model`, `effort`, and concise `routingReason`: Sol for the hardest open-ended work,
-Terra for balanced general work, and Luna for clear high-volume work.
-The runtime rejects an unresolved task instead of silently falling back to Sol.
+an exact `model`, `effort`, and concise `routingReason`:
+
+| Alias | Exact slug | Use it for |
+| --- | --- | --- |
+| `astra` | `gpt-6-astra` | Work where a wrong result is expensive or hard to catch, and deep verification |
+| `sol` | `gpt-6.1-sol` | The default for anything non-trivial: implementation, debugging, architecture |
+| `terra` | `gpt-6.1-terra` | Well-bounded everyday coding and review |
+| `luna` | `gpt-5.6-luna` | Last resort: mechanical work whose checks catch a bad result immediately |
+
+Every model accepts every effort from `low` through `ultra`. Effort defaults to `high` on `sol` and
+`astra`. A `luna` task cannot be one that other tasks depend on unless you pin the run to `luna`.
+The runtime rejects an unresolved task instead of silently falling back to a default model, and
+rejects family names such as `gpt-6` that do not name a tier.
+
+If Codex rejects a model as unavailable to your account, the task is relaunched on the next model
+down `astra` → `sol` → `terra` → `luna` with the same effort, and the rest of the run skips the
+unavailable model. The substitution is recorded on the attempt and in the run events, and shown by
+`run poll`, `/orchestrator:resume`, and the supervisor briefing; a substituted pin is flagged so
+Claude tells you which model actually ran.
 
 ### When you want exact control
 
@@ -154,7 +172,8 @@ write boundary yourself:
 /orchestrator:run api --max-workers 3 add cursor pagination to the users API
 ```
 
-Use `--model sol|terra|luna` only when you deliberately want to pin the entire pool to one model.
+Use `--model astra|sol|terra|luna` only when you deliberately want to pin the entire pool to one
+model.
 Use `--effort <level>` only when you want to pin effort across the run. A conflicting task route is
 rejected. Exact resolved routes are saved on the plan and every attempt so resume and audit cannot
 silently change them.
@@ -195,11 +214,9 @@ See [Architecture and recovery](docs/architecture.md) for the state machine and 
 | --- | --- |
 | `/orchestrator:init` | Create state and preflight Codex CLI, auth, and Git |
 | `/orchestrator:lanes` | Define named scope, constraints, and lane-level done criteria |
-| `/orchestrator:run` | Plan and manage a new Claude-supervised routed GPT-5.6 pool |
+| `/orchestrator:run` | Plan and manage a new Claude-supervised routed Codex worker pool |
 | `/orchestrator:resume` | Recover and continue an existing durable run |
 | `/orchestrator:ledger` | Show or add stable project facts carried into future tasks |
-| `/orchestrator:do` | Legacy single-task dispatch through the optional Claude Codex bridge |
-| `/orchestrator:accept` | Legacy post-dispatch Git/result cross-check for `/orchestrator:do` |
 
 The lower-level CLI is available to command definitions and operators:
 
@@ -263,7 +280,7 @@ State is split by portability:
   lanes.json                       # committed: scopes, constraints, done criteria
   ledger.md                        # committed: durable project decisions and facts
   local/                           # self-ignored: machine-specific run state
-    threads.json
+    threads.json                   # local state file; per-lane thread pointers are no longer written
     runs/<run-id>/
       run.json                     # task graph, attempts, results, evidence, checkpoints
       events.jsonl                 # append-only supervisory event history
@@ -281,9 +298,11 @@ worktree paths, and Codex threads are meaningful only on the machine that owns t
 combines the run record, latest checkpoint, worker evidence, integration history, lane definition,
 and ledger into the supervisor's reconstructed context.
 
-All versioned state is read defensively. Run state version 5 adds guidance policy and attempt
-snapshot fields while version-3 and version-4 runs remain readable. A newer version is refused
-instead of guessed at, writes are atomic, and shared state updates use file locks.
+All versioned state is read defensively. Run state version 6 adds the GPT-6 roster and model
+substitution records; version 5 added guidance policy and attempt snapshot fields. Version-3
+through version-5 runs remain readable and resume and retry on their persisted exact slugs,
+including the retired `gpt-5.6-sol` and `gpt-5.6-terra`, which new plans cannot select. A newer
+version is refused instead of guessed at, writes are atomic, and shared state updates use file locks.
 
 Learning records default to 365-day retention metadata; `--retention-days forever` records that
 they remain until an explicit purge. Retention never deletes raw run audit state. `learn purge`
@@ -294,8 +313,9 @@ derive a purged sample again until the raw run itself is removed through a separ
 
 ## Safety invariants
 
-- Workers use only `gpt-5.6-sol`, `gpt-5.6-terra`, or `gpt-5.6-luna`; each resolved model and
-  effort is persisted before launch, and substitution is never silent.
+- Workers use only `gpt-6-astra`, `gpt-6.1-sol`, `gpt-6.1-terra`, or `gpt-5.6-luna` (plus the
+  persisted `gpt-5.6-sol` or `gpt-5.6-terra` slugs of runs saved by 0.5.x); each resolved model
+  and effort is persisted before launch, and substitution is never silent.
 - Automatic routing is a plan-time supervisor decision, not a hidden runtime fallback. Every
   unpinned task must include an exact model, effort, and routing reason before dispatch.
 - A worker cannot widen its assigned scope or self-assign global work.
@@ -310,12 +330,6 @@ derive a purged sample again until the raw run itself is removed through a separ
   survives compaction.
 - Cancellation terminates the detached process and remains visible in durable state.
 - Dirty worktrees are never removed automatically.
-
-## Legacy single-task mode
-
-`/orchestrator:do` remains for small, one-off tasks. It compiles a lane briefing, calls the optional
-`codex:codex-rescue` bridge, stores a thread pointer, and checks the reported files against Git.
-It does not provide the pool, isolated integration, durable run DAG, or final supervisor gate.
 
 ## Development
 
@@ -339,8 +353,9 @@ finalization, and cleanup without consuming model quota.
 - Codex thread IDs are retained for diagnosis and handoff; retries currently start a fresh bounded
   worker with reconstructed context rather than resuming an old task thread.
 - The plugin validates supported model names and effort combinations, but actual model entitlement
-  belongs to the account authenticated in Codex CLI. An unavailable model fails as a durable worker
-  attempt rather than falling back.
+  belongs to the account authenticated in Codex CLI. A model Codex rejects as unavailable is
+  recorded as a failed attempt and the task relaunches on the next model down the ladder; only
+  when no model is left does the task fail for the supervisor to escalate.
 - Automated tests validate the complete process protocol with fake workers. A real authenticated
   Codex smoke test is still the environment-level proof for a particular installation.
 

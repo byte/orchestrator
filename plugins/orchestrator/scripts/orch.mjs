@@ -2,16 +2,13 @@
 import fs from "node:fs";
 import process from "node:process";
 
-import { evaluateRun } from "./lib/acceptance.mjs";
 import { parseArgs, splitList } from "./lib/args.mjs";
-import { briefingLedger, renderBriefing } from "./lib/briefing.mjs";
-import { captureGitSnapshot, changesSinceSnapshot } from "./lib/git.mjs";
 import {
   createProvisionalGuidancePolicy,
   deriveReviewedGuidanceSources
 } from "./lib/guidance.mjs";
 import { addLedgerEntry, readLedger } from "./lib/ledger.mjs";
-import { addLane, bindThread, listLanes, removeLane, requireLane, unbindThread } from "./lib/lanes.mjs";
+import { addLane, listLanes, removeLane, requireLane } from "./lib/lanes.mjs";
 import {
   collectLearningExamples,
   exportLearningExamples,
@@ -22,7 +19,7 @@ import {
   purgeLearningExamples
 } from "./lib/learning.mjs";
 import { preflight } from "./lib/preflight.mjs";
-import { renderAcceptance, renderLanes, renderPreflight } from "./lib/render.mjs";
+import { renderLanes, renderPreflight } from "./lib/render.mjs";
 import {
   addCheckpoint,
   bindAttempt,
@@ -40,6 +37,7 @@ import {
   recordTaskResult,
   recordIntegration,
   recordTaskDisposition,
+  modelSubstitutionSummary,
   recoveryReport,
   renderSupervisorBriefing,
   replacePlan,
@@ -53,17 +51,10 @@ import {
   integrateTaskWorktree,
   WorktreeOperationError
 } from "./lib/worktrees.mjs";
-import {
-  initWorkspace,
-  isInitialized,
-  loadLocalState,
-  nowIso,
-  orchDir,
-  updateLocalState
-} from "./lib/state.mjs";
+import { initWorkspace, isInitialized, orchDir } from "./lib/state.mjs";
 import { resolveWorkspaceRoot } from "./lib/workspace.mjs";
 
-const USAGE = `orchestrator — keep Codex briefed across tasks
+const USAGE = `orchestrator — a Claude-supervised Codex worker pool
 
 Usage:
   orch preflight [--json]
@@ -72,10 +63,6 @@ Usage:
   orch lane add <name> [--description <text>] [--scope <glob>]... [--constraint <text>]... [--done <text>]
   orch lane remove <name>
   orch lane show <name> [--json]
-  orch lane bind <name> <thread-id>
-  orch lane unbind <name>
-  orch brief <name> [--task <text>] [--no-snapshot] [--json]
-  orch accept <name> [--result-file <path>] [--json]
   orch ledger show
   orch ledger add <section> <text>
   orch learn collect [--run <id>]... [--retention-days <n|forever>] [--json]
@@ -85,7 +72,7 @@ Usage:
   orch learn export [--name <id>] [--run <id>]... [--outcome <value>]... [--sample <id>]... [--include-text <field>]... [--consent <supervisor|user>] [--acknowledge-sensitive-export] [--json]
   orch learn purge [--sample <id>]... [--run <id>]... [--task <id>]... [--attempt <id>]... [--expired|--all] [--json]
   orch run list [--json]
-  orch run create <lane> --objective <text> [--id <run-id>] [--max-workers <n>] [--model <auto|sol|terra|luna>] [--effort <auto|level>] [--json]
+  orch run create <lane> --objective <text> [--id <run-id>] [--max-workers <n>] [--model <auto|astra|sol|terra|luna>] [--effort <auto|level>] [--json]
   orch run show <run-id> [--json]
   orch run plan <run-id> --plan-file <path> [--json]
   orch run ready <run-id> [--json]
@@ -126,20 +113,6 @@ function requireInitialized(cwd) {
   if (!isInitialized(cwd)) {
     throw new Error("Orchestrator is not initialized in this repository. Run /orchestrator:init first.");
   }
-}
-
-function readTask(options, positionals) {
-  if (options.task) {
-    return String(options.task);
-  }
-  if (options["task-file"]) {
-    return fs.readFileSync(options["task-file"], "utf8");
-  }
-  const inline = positionals.join(" ").trim();
-  if (inline) {
-    return inline;
-  }
-  throw new Error("A task description is required. Pass --task, --task-file, or trailing text.");
 }
 
 function commandPreflight(argv, cwd) {
@@ -359,113 +332,7 @@ function commandLane(argv, cwd) {
     return options.json ? emitJson(lane) : emit(renderLanes([lane]));
   }
 
-  if (action === "bind") {
-    requireLane(cwd, name);
-    const threadId = positionals[1];
-    if (!threadId) {
-      throw new Error("`orch lane bind` requires a thread id.");
-    }
-    const bound = bindThread(cwd, name, threadId);
-    return emit(`Bound lane "${bound.lane}" to Codex thread ${bound.threadId}.`);
-  }
-
-  if (action === "unbind") {
-    unbindThread(cwd, name);
-    return emit(`Unbound lane "${name}". The next dispatch starts a fresh Codex thread.`);
-  }
-
   throw new Error(`Unknown lane action "${action}".`);
-}
-
-function commandBrief(argv, cwd) {
-  requireInitialized(cwd);
-  const { options, positionals } = parseArgs(argv, {
-    booleanOptions: ["json", "no-snapshot"],
-    valueOptions: ["task", "task-file"]
-  });
-  const name = positionals.shift();
-  if (!name) {
-    throw new Error("`orch brief` requires a lane name.");
-  }
-
-  const lane = requireLane(cwd, name);
-  const task = readTask(options, positionals);
-  const ledger = briefingLedger(cwd);
-  const resuming = Boolean(lane.threadId);
-  const text = renderBriefing({ lane, task, ledger, resuming });
-
-  // Snapshot before dispatch so the acceptance check can attribute changes to
-  // this run rather than to whatever was already dirty in the tree.
-  if (!options["no-snapshot"]) {
-    updateLocalState(cwd, (local) => {
-      local.snapshots[lane.name] = {
-        ...captureGitSnapshot(cwd),
-        task,
-        takenAt: nowIso()
-      };
-    });
-  }
-
-  if (options.json) {
-    return emitJson({
-      lane: lane.name,
-      resuming,
-      threadId: lane.threadId,
-      ledgerBytes: ledger.bytes,
-      ledgerOversized: ledger.oversized,
-      briefing: text
-    });
-  }
-
-  if (ledger.oversized) {
-    process.stderr.write(
-      `warning: ledger is ${ledger.bytes} bytes and rides along in every briefing. Consider pruning it.\n`
-    );
-  }
-  emit(text);
-}
-
-function commandAccept(argv, cwd) {
-  requireInitialized(cwd);
-  const { options, positionals } = parseArgs(argv, {
-    booleanOptions: ["json"],
-    valueOptions: ["result-file"]
-  });
-  const name = positionals.shift();
-  if (!name) {
-    throw new Error("`orch accept` requires a lane name.");
-  }
-
-  const lane = requireLane(cwd, name);
-  const local = loadLocalState(cwd);
-  const snapshot = local.snapshots[lane.name];
-  if (!snapshot) {
-    throw new Error(`No pre-dispatch snapshot for lane "${lane.name}". Run \`orch brief\` before dispatching.`);
-  }
-
-  let resultText = "";
-  if (options["result-file"]) {
-    resultText = fs.readFileSync(options["result-file"], "utf8");
-  } else if (positionals.length) {
-    resultText = positionals.join(" ");
-  }
-
-  const evaluation = evaluateRun({
-    lane,
-    snapshot,
-    changeSet: changesSinceSnapshot(cwd, snapshot),
-    resultText
-  });
-
-  if (options.json) {
-    emitJson({ lane: lane.name, ...evaluation });
-  } else {
-    emit(renderAcceptance(lane, evaluation));
-  }
-
-  if (evaluation.verdict !== "clean") {
-    process.exitCode = 2;
-  }
 }
 
 function commandLedger(argv, cwd) {
@@ -487,6 +354,19 @@ function commandLedger(argv, cwd) {
   }
 
   throw new Error(`Unknown ledger action "${action}".`);
+}
+
+function renderPollUpdate(update) {
+  if (update.notice) {
+    return `${update.taskId}\t${update.status}\t${update.notice} New attempt ${update.nextAttemptId}.`;
+  }
+  if (update.unavailableModel) {
+    const next = update.fallbackModel
+      ? `relaunch on ${update.fallbackModel} failed: ${update.relaunchError ?? "unknown error"}`
+      : "no model remains on the fallback ladder";
+    return `${update.taskId}\t${update.status}\t${update.unavailableModel} unavailable; ${next}`;
+  }
+  return `${update.taskId}\t${update.status}`;
 }
 
 function renderRunSummary(run) {
@@ -680,10 +560,12 @@ function commandRun(argv, cwd) {
     const updates = pollRunWorkers(cwd, runId);
     const run = loadRun(cwd, runId);
     const recovery = recoveryReport(run);
+    const substitutions = modelSubstitutionSummary(run);
     const briefing = renderSupervisorBriefing(cwd, run, requireLane(cwd, run.lane)).trimEnd();
+    const substitutedThisPoll = updates.filter((update) => update.notice).map(renderPollUpdate);
     return options.json
-      ? emitJson({ updates, recovery, run, briefing, checkpoint: checkpointStatus(run) })
-      : emit(`${briefing}\n\n## Active worker recovery\n\n${recovery.length ? recovery.map((item) => `- ${item.taskId}: ${item.model} (${item.reasoningEffort}), pid ${item.runnerPid ?? "unknown"}, thread ${item.threadId ?? "pending"}, worktree ${item.worktreePath ?? "unavailable"}`).join("\n") : "- none"}`);
+      ? emitJson({ updates, recovery, substitutions, run, briefing, checkpoint: checkpointStatus(run) })
+      : emit(`${substitutedThisPoll.length ? `${substitutedThisPoll.join("\n")}\n\n` : ""}${briefing}\n\n## Active worker recovery\n\n${recovery.length ? recovery.map((item) => `- ${item.taskId}: ${item.model} (${item.reasoningEffort})${item.substitution ? `, substituted for ${item.requestedModel}${item.substitution.pinned ? " (user pin overridden)" : ""}` : ""}, pid ${item.runnerPid ?? "unknown"}, thread ${item.threadId ?? "pending"}, worktree ${item.worktreePath ?? "unavailable"}`).join("\n") : "- none"}`);
   }
 
   if (action === "checkpoint") {
@@ -812,7 +694,7 @@ function commandRun(argv, cwd) {
     const updates = pollRunWorkers(cwd, runId);
     return options.json
       ? emitJson(updates)
-      : emit(updates.length ? updates.map((update) => `${update.taskId}\t${update.status}`).join("\n") : "No active workers.");
+      : emit(updates.length ? updates.map(renderPollUpdate).join("\n") : "No active workers.");
   }
 
   if (action === "inspect") {
@@ -905,10 +787,6 @@ function main() {
         return commandInit(cwd);
       case "lane":
         return commandLane(argv, cwd);
-      case "brief":
-        return commandBrief(argv, cwd);
-      case "accept":
-        return commandAccept(argv, cwd);
       case "ledger":
         return commandLedger(argv, cwd);
       case "learn":

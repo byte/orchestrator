@@ -1,6 +1,6 @@
 ---
-description: Automatically route and manage a GPT-5.6 Codex worker pool from the Claude Code main thread
-argument-hint: "<what you want done> [lane] [--max-workers <n>] [--model <auto|sol|terra|luna>] [--effort <auto|level>]"
+description: Automatically route and manage a Codex worker pool from the Claude Code main thread
+argument-hint: "<what you want done> [lane] [--max-workers <n>] [--model <auto|astra|sol|terra|luna>] [--effort <auto|level>]"
 allowed-tools: Read, Grep, Glob, Write, Bash(node:*), AskUserQuestion
 ---
 
@@ -59,8 +59,8 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" run create <lane> \
   --json
 ```
 
-Append `--model <sol|terra|luna>` or `--effort <level>` only when the user explicitly supplied
-that override. Omitted dimensions remain supervisor-routed. Keep the returned run id.
+Append `--model <astra|sol|terra|luna>` or `--effort <level>` only when the user explicitly
+supplied that override. Omitted dimensions remain supervisor-routed. Keep the returned run id.
 
 ## 3. Plan
 
@@ -74,22 +74,39 @@ Produce a small task DAG. Each task must have:
 - `dependsOn`: task ids that must be supervisor-verified first
 - `constraints`
 - `acceptance`: evidence-based completion criteria
-- `model`: `sol`, `terra`, `luna`, or an exact `gpt-5.6-*` slug unless the run pins a model
+- `model`: `astra`, `sol`, `terra`, `luna`, or an exact slug (`gpt-6-astra`, `gpt-6.1-sol`,
+  `gpt-6.1-terra`, `gpt-5.6-luna`) unless the run pins a model. Family names such as `gpt-6` or
+  `gpt-6.1` are rejected because they do not name a tier.
 - `effort`: the selected per-task reasoning effort unless the run pins an effort
 - `routingReason`: one concise explanation of why the selected route fits the task whenever either
   dimension is supervisor-routed
 
 Route by the demands of each bounded task:
 
-- use `sol` for the hardest open-ended implementation, security, architecture, debugging, and
-  deep verification work
-- use `terra` for strong general coding, review, and everyday work where balance matters
-- use `luna` for clear, repeatable, high-volume transformations and extraction
+- use `sol` by default for anything non-trivial: implementation, debugging, architecture, and
+  security work
+- use `terra` for well-bounded everyday coding and review whose shape is already clear
+- use `astra` when a wrong result would be expensive or hard to catch: the hardest open-ended
+  work, subtle concurrency or security reasoning, and deep independent verification
+- use `luna` only for mechanical work whose acceptance criteria catch a bad result immediately,
+  such as a rename the type checker or test suite fully exercises
 
-Select effort independently: use `low` for routine or latency-sensitive work, `medium` for balanced
-everyday work, `high` or `xhigh` only when deeper reasoning should materially improve the result,
-and `max` only for the hardest quality-first task. Prefer the lowest effort that should reliably
-meet the acceptance criteria.
+There is no cap on `astra` tasks, but every `astra` route needs a `routingReason` that says why a
+wrong result here would be expensive or hard to catch.
+
+`luna` is a last resort. Its `routingReason` must say explicitly why the acceptance criteria would
+catch a bad result immediately. The runtime rejects a `luna` route on any task that another task
+depends on, unless the user pinned the whole run to `luna`, because a dependent builds on the
+result before anyone can check it.
+
+Select effort independently. Default to `high` on `sol` and `astra`. Go lower only with a stated
+reason in `routingReason`, for example a bounded change whose checks are mechanical. Use `xhigh`,
+`max`, or `ultra` when deeper reasoning should materially improve a hard result. On `terra` and
+`luna`, choose the effort the bounded task needs and say why.
+
+Independent `verify` tasks default to `astra` when the task under verification ran on `sol` or
+below, so the check is made by a stronger reviewer than the author. Route a verifier lower only
+with a stated reason, such as a purely mechanical check.
 
 Escalate rather than economize when the task is uncertain or expensive to get wrong. Move one tier
 up in model, effort, or both when any of these hold:
@@ -106,10 +123,20 @@ the task is genuinely bounded and its acceptance criteria would catch a bad resu
 State the escalation in `routingReason` when it decided the route.
 
 In automatic mode, omitted task routing is an invalid plan: the runtime will not silently fall
-back to Sol or guess an effort. If the user explicitly pins a model, every task uses that model and
-a conflicting task model is rejected. The same rule applies to an explicit effort pin. Do not use
-a weaker route merely to maximize concurrency. `luna` does not support `ultra`, and the runtime
-rejects unknown models or unsupported model-effort combinations.
+back to a default model or guess an effort.
+If the user explicitly pins a model, every task uses that model and a conflicting task model is
+rejected. The same rule applies to an explicit effort pin. Do not use a weaker route merely to
+maximize concurrency. Every model accepts every effort from `low` through `ultra`; the runtime
+rejects unknown models and unknown efforts.
+
+If Codex rejects a model as unavailable to this account, the runtime does not fail the task. It
+relaunches one rung down the ladder `astra` → `sol` → `terra` → `luna`, keeping the effort, and
+remembers the model as unavailable for the rest of the run so later launches go straight to the
+substitute. The substitution is never silent: it is recorded on the attempt (requested and actual
+model), appended as a run event, and shown by `run poll`, `run resume`, and the supervisor
+briefing. A substituted user pin is flagged as such; tell the user which model actually ran. If no
+rung is left, the task fails with a `model_unavailable` outcome for you to escalate. Runs saved by
+0.5.x that route to `gpt-5.6-sol` or `gpt-5.6-terra` keep those exact slugs and are not substituted.
 
 Prefer 3–5 substantial parallel tasks over many tiny tasks. Separate implementation from
 independent verification when risk warrants it. Two tasks must not own the same write surface in
@@ -182,7 +209,8 @@ Each launch creates an isolated Git worktree and starts one detached `codex exec
 authoritative briefing, an output schema, the task's exact resolved `--model`, its resolved effort,
 and the least sandbox needed for the task. The selected route, PID, files, worktree, and eventual
 Codex thread id are stored in run state. Launch independent ready tasks without waiting between
-them.
+them. A launch response whose `substitution` is not null ran on a different model than the plan
+named; read its notice.
 
 ## 5. Monitor and collect
 
@@ -199,9 +227,11 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" run resume <run-id> --json
 ```
 
 This polls detached workers before returning the complete supervisor briefing, active handles,
-results, checkpoints, provisional-guidance revisions and attempt snapshots, and memory. Polling
-collects finished structured output into the task automatically. A worker report is not
-completion. It is evidence awaiting supervisor verification.
+results, checkpoints, provisional-guidance revisions and attempt snapshots, model substitutions,
+and memory. Polling collects finished structured output into the task automatically, and relaunches
+a task whose model Codex rejected as unavailable; a poll update with status `substituted` names
+the requested and actual model. A worker report is not completion. It is evidence awaiting
+supervisor verification.
 
 ## 6. Verify
 
@@ -324,11 +354,13 @@ created, and any residual risk. Distinguish built, verified, and unverified work
 ## Hard rules
 
 - The Claude model running the main thread is always the planner, scheduler, reviewer, replanner,
-  and integrator. Claude Opus and Claude Fable are both supported supervisors; the supervisor is
-  whichever model owns this Claude Code session, and supervisory authority never moves to a
-  subagent or to a worker.
-- Execution workers use only `gpt-5.6-sol`, `gpt-5.6-terra`, or `gpt-5.6-luna`, exactly as
-  resolved and persisted by the run plan. Never silently substitute another model or effort.
+  and integrator. Claude Opus 5.5 and Claude Fable 5.2 are the supported supervisors; the
+  supervisor is whichever model owns this Claude Code session, the plugin never selects it, and
+  supervisory authority never moves to a subagent or to a worker.
+- Execution workers use only `gpt-6-astra`, `gpt-6.1-sol`, `gpt-6.1-terra`, or `gpt-5.6-luna`,
+  exactly as resolved and persisted by the run plan. Runs saved by 0.5.x keep their persisted
+  `gpt-5.6-sol` or `gpt-5.6-terra` slugs. Never substitute a model or effort silently: the only
+  substitution is the runtime's recorded fallback when Codex rejects a model as unavailable.
 - Model and effort selection are the supervisor's planning responsibility unless the user
   explicitly pins either dimension. Automatic routing must never mean a hidden runtime fallback.
 - Routing is a revisable judgment, not a one-time commitment: re-route pending tasks through

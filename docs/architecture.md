@@ -3,8 +3,8 @@
 ## Authority model
 
 The Claude Code main thread is the control plane. The Claude model running that thread is the
-supervisor — Claude Opus and Claude Fable are both supported, and the plugin never selects or
-substitutes a supervising model. The supervisor owns:
+supervisor — Claude Opus 5.5 and Claude Fable 5.2 are the supported pair, and the plugin never
+selects or substitutes a supervising model. The supervisor owns:
 
 - goal interpretation, plan approval, and durable checkpointing
 - task boundaries, dependencies, priority, and pool capacity
@@ -20,14 +20,56 @@ evidence, so it builds on settled choices instead of re-deriving or contradictin
 may not spawn a subordinate pool, widen scope, integrate other work, or alter orchestration state.
 
 New runs auto-route by default. During planning, the Claude supervisor assigns each task a model,
-effort, and routing reason. Short aliases normalize to exact `gpt-5.6-sol`, `gpt-5.6-terra`, or
-`gpt-5.6-luna` slugs. An unresolved automatic route is rejected rather than falling back to Sol.
+effort, and routing reason. The aliases `astra`, `sol`, `terra`, and `luna` normalize to the exact
+slugs `gpt-6-astra`, `gpt-6.1-sol`, `gpt-6.1-terra`, and `gpt-5.6-luna`. Family names (`gpt-6`,
+`gpt-6.1`, `gpt-5.6`) are rejected because they do not name a tier. An unresolved automatic route is
+rejected rather than falling back to a default model. A `luna` route on a task that other tasks
+depend on is rejected unless the user pinned the run to `luna`.
+
+`gpt-5.6-sol` and `gpt-5.6-terra` are legacy slugs. They are accepted only where they were already
+persisted by a 0.5.x run (state versions 3 to 5): a task's saved model, a run-level pin, or a task
+resubmitted under its own id in a plan revision. A new plan, a new task, or a new run pin naming
+one is rejected with a message that says so. Run state version 6 marks every run this release
+writes, so a 0.5.x build refuses it instead of misreading slugs it does not know; any mutation of
+an older run upgrades it to version 6 without changing its persisted slugs.
 
 Users may explicitly pin a run-level model, effort, or both. A pinned dimension is inherited by
 every task and conflicting task input is rejected. The resolved combination is validated when
 planning and persisted again on the attempt before dispatch, making retries and recovery auditable
 without silently changing models. Version 3 runs retain their original fallback-and-override
 semantics when resumed.
+
+## Model substitution
+
+When Codex rejects a model as unavailable to the authenticated account, the runtime substitutes
+rather than failing the task, and never does so silently:
+
+1. `run poll` (and `run resume`, which polls first) finds a failed worker whose event stream
+   contains a top-level `error` or `turn.failed` event naming the attempt's model with an
+   unavailability phrase. Warning items (`item.completed` of item type `error`) never count, and a
+   message that does not name the slug never counts, so an unrelated API error is not mistaken for
+   unavailability.
+2. The attempt closes as `execution_failed` / `model_unavailable` with signal `model_unavailable`,
+   and the model is added to `run.unavailableModels` with the rejection message. Event:
+   `task.model_unavailable`.
+3. If the ladder `gpt-6-astra` → `gpt-6.1-sol` → `gpt-6.1-terra` → `gpt-5.6-luna` has a model
+   below it that is not known unavailable and accepts the same effort, the task returns to
+   `pending` and is relaunched immediately with the Codex command the rejected attempt used.
+4. Every claim computes the effective route: the saved route, or the first available rung below it.
+   A substituted attempt stores `requestedModel`, the actual `model`, and a `substitution` record
+   with `pinned` set when the run pinned the model. Event: `task.model_substituted`. Later tasks in
+   the same run go straight to the substitute without burning another rejected launch.
+5. The poll update has status `substituted` and a notice naming both models. The supervisor
+   briefing has a "Model availability and substitutions" section, marks the task route
+   `SUBSTITUTED for <requested>`, and, for a substituted pin, tells the supervisor to inform the
+   user. The saved plan route is never rewritten.
+6. With no rung left the task fails with action `escalate`.
+
+User pins are substituted too, because the owner's rule is "substitute, do not fail" without
+qualification; the pin is flagged in every surface instead. Legacy slugs are not on the ladder: a
+0.5.x run keeps its exact slug, and if Codex rejected one the task would fail for escalation rather
+than silently change generation. A rejected launch never reached a worker, so it is ignored when
+matching provisional guidance to the task's prior outcome.
 
 ## Run and task state machines
 
@@ -168,6 +210,72 @@ an entry in that retained policy. The emergency off and rollback paths discard m
 unrelated history entries while retaining every valid policy needed to replay prior attempts.
 Policy changes are refused while work is active or awaiting verification.
 
+## Verified against Codex CLI 0.169.0 (2026-11-15)
+
+Probed with real, minimal `codex exec` calls ("Reply with the single word ok.") in throwaway Git
+repositories, never this checkout. `~/.codex/config.toml` sets `model = "gpt-6.1-sol"` and
+`model_reasoning_effort = "high"`.
+
+**Roster and efforts (M0.1, M0.2).** `gpt-6-astra`, `gpt-6.1-sol`, `gpt-6.1-terra`, and
+`gpt-5.6-luna` are all accepted on this account. Every one accepts every effort `low`, `medium`,
+`high`, `xhigh`, `max`, and `ultra`; an invalid effort exits 1. `gpt-5.6-luna` therefore accepts
+`ultra`, which 0.5.x denied. The legacy `gpt-5.6-sol` and `gpt-5.6-terra` slugs are also still
+accepted.
+
+**Unavailable model.** A model the account cannot use (probed with a made-up slug) exits 1 with an
+empty stderr. stdout carries `thread.started` (a thread id is still issued), a warning item
+`{"type":"item.completed","item":{"type":"error","message":"Model metadata for \`<slug>\` not
+found. Defaulting to fallback metadata; ..."}}`, `turn.started`, then
+`{"type":"error","message":"The '<slug>' model is not supported when using Codex with a ChatGPT
+account."}` and `{"type":"turn.failed","error":{"message":"<same text>"}}`. This was observed for a
+ChatGPT-account login only; the wording for an API-key login was not observed. The detector also
+accepts an `error.code` of `model_not_found`, which is inferred from the OpenAI API, not observed.
+
+**`codex exec resume` (M0.3).** Usage is `codex exec resume [OPTIONS] [SESSION_ID] [PROMPT]`;
+`-` reads the prompt from stdin.
+
+| Flag | Placed after `resume` | Placed on `exec`, before `resume` |
+| --- | --- | --- |
+| `--model` | accepted | not tested |
+| `-c model_reasoning_effort=...` | accepted | not tested |
+| `--json` | accepted | not tested |
+| `--output-schema <file>` | accepted; the final message matched the schema | not tested |
+| `--output-last-message <file>` | accepted; file written | not tested |
+| `--sandbox <mode>` | **rejected**, exit 2 (unexpected argument) | accepted, and applied |
+| `-C <dir>` | **rejected**, exit 2 (unexpected argument) | accepted, and applied |
+
+The working invocation is therefore:
+
+```text
+codex exec -C <worktree> --sandbox <mode> resume \
+  --model <model> -c model_reasoning_effort="<effort>" \
+  --json --output-schema <schema> --output-last-message <result> <thread-id> -
+```
+
+A thread started in one repository resumed with `-C` pointed at a different repository: the
+resumed turn's recorded `cwd` was the new directory and a `pwd` run by the agent printed it. The
+same thread id is reported in `thread.started`.
+
+The sandbox is not inherited from the thread. A resume without `--sandbox` ran with this machine's
+default (writable) permission profile even though the thread started `read-only`; with
+`--sandbox read-only` before `resume` it was read-only again. Callers must always pass the
+sandbox explicitly. Without `-C`, resume runs in the caller's current directory, and fails outside
+a Git repository ("Not inside a trusted directory").
+
+**Changing route on resume (M0.4).** A resumed thread is not bound to the route it started on.
+Resuming a `gpt-6.1-terra`/`low` thread with `--model gpt-6.1-sol -c
+model_reasoning_effort="high"` succeeded, and the session's recorded turn context shows
+`gpt-6.1-sol`/`high` for that turn. Codex emits a warning item, not an error:
+`This session was recorded with model \`<old>\` but is resuming with \`<new>\`. Consider
+switching back to \`<old>\` as it may affect Codex performance.` Resuming with an unavailable model
+fails exactly like a fresh launch (same `error` and `turn.failed` events, exit 1), so the same
+detector applies.
+
+Omitting `--model` and the effort does **not** keep the thread's route: a `gpt-6.1-terra`/`low`
+thread resumed with neither flag ran on `gpt-6.1-sol`/`high`, the config defaults, with the same
+"recorded with model" warning. A warm retry must therefore pass model, effort, and sandbox
+explicitly on every resume.
+
 ## Task dispatch
 
 `run launch` performs these steps:
@@ -191,8 +299,9 @@ Policy changes are refused while work is active or awaiting verification.
      --output-last-message <result> -
    ```
 
-7. Persist the exact model and effort with the attempt, the wrapper PID immediately, then the Codex
-   thread ID when `thread.started` arrives.
+7. Persist the exact model and effort with the attempt (plus the requested model and a
+   substitution record when the route was substituted), the wrapper PID immediately, then the
+   Codex thread ID when `thread.started` arrives.
 
 The wrapper owns signal forwarding and atomic status updates. Claude never needs to block on a
 worker process.
@@ -250,7 +359,9 @@ a block.
 
 - current run and task status
 - process, status-file, thread, and worktree handles
-- the exact model and effort selected for each active attempt
+- the exact model and effort selected for each active attempt, and the requested model when it
+  was substituted
+- every model found unavailable during the run and every substituted attempt, user pins first
 - the frozen provisional guidance policy hash and item IDs selected for each attempt
 - the supervisor's saved routing reason for every automatically routed task
 - worker summaries, checks, blockers, confidence, and attempts
@@ -268,7 +379,8 @@ memory.
 
 | Failure | Durable outcome | Recovery |
 | --- | --- | --- |
-| Codex process exits non-zero | Task `failed`, stderr tail retained | Inspect, then explicit retry or replan |
+| Codex process exits non-zero | Task `failed`, stderr tail or event-stream error retained | Inspect, then explicit retry or replan |
+| Codex rejects the model as unavailable | Attempt `execution_failed`/`model_unavailable`; model recorded unavailable | Automatic relaunch one rung down the ladder, recorded and surfaced; escalate when the ladder is exhausted |
 | Worker reports blockers | Task `blocked`, structured result retained | Expand authorized scope, resolve prerequisite, or replan |
 | Malformed result | Task `failed` | Retry once if transient; otherwise report |
 | Scope/declaration mismatch | Integration refused | Reject result and replan; do not cherry-pick |

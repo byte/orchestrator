@@ -1,11 +1,11 @@
 ---
 description: List, create, or edit the workstream lanes that carry context between Codex tasks
-argument-hint: "[list|add|show|remove|bind|unbind] [name] [--scope <glob>]... [--constraint <text>]... [--done <text>]"
+argument-hint: "[list|add|show|remove] [name] [--scope <glob>]... [--constraint <text>]... [--done <text>]"
 allowed-tools: Bash(node:*), AskUserQuestion
 ---
 
-Manage lanes. A lane is a named workstream: a scope, standing constraints, a definition of
-done, and — on this machine only — a bound Codex thread id.
+Manage lanes. A lane is a named workstream: a scope, standing constraints, and a definition of
+done.
 
 This command is for inspecting and adjusting lanes directly. It is not a prerequisite for
 running work: `/orchestrator:run` derives and confirms a lane when none fits, so never tell a
@@ -32,7 +32,7 @@ When creating a lane, help the user make it useful rather than accepting a bare 
   code all lives in `src/` catches nothing. Prefer the subsystem the lane is actually about.
 - **constraints** are the things you would otherwise repeat in every task ("no new
   dependencies", "keep the public API stable").
-- **done** is what makes the acceptance check legible to a human later.
+- **done** is what makes the run's final verification legible to a human later.
 
 Scope patterns support `*`, `**`, `?`, and a leading `!` to exclude. Later patterns win, so
 `--scope 'src/**' --scope '!src/generated/**'` reads the way it looks.

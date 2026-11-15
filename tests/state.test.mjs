@@ -42,7 +42,7 @@ test("lane and thread files use schemas independent from run state", () => {
   const lanes = readJson(lanesFile(root));
   const local = readJson(threadsFile(root));
 
-  assert.equal(RUN_STATE_VERSION, 5);
+  assert.equal(RUN_STATE_VERSION, 6);
   assert.deepEqual(
     {
       version: lanes.version,

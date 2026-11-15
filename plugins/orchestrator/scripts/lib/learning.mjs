@@ -14,11 +14,28 @@ import {
   SUPPORTED_REDACTION_VERSIONS,
   redactTextFields
 } from "./redaction.mjs";
-import { eventsFile, listRuns, loadRun } from "./runs.mjs";
+import {
+  LEGACY_WORKER_MODELS,
+  WORKER_MODELS,
+  eventsFile,
+  listRuns,
+  loadRun
+} from "./runs.mjs";
 import { atomicWrite, localDir, nowIso } from "./state.mjs";
 import { resolveWorkspaceRoot } from "./workspace.mjs";
 
 export const LEARNING_SCHEMA_VERSION = 1;
+
+// Examples derived from 0.5.x runs keep their legacy slugs, so validation accepts
+// the current roster plus the legacy set rather than a hardcoded list.
+const LEARNING_MODELS = new Set([
+  ...Object.keys(WORKER_MODELS),
+  ...Object.keys(LEGACY_WORKER_MODELS)
+]);
+const LEARNING_EFFORTS = new Set(
+  [...Object.values(WORKER_MODELS), ...Object.values(LEGACY_WORKER_MODELS)]
+    .flatMap((policy) => policy.efforts)
+);
 export const LEARNING_EXPORT_VERSION = 1;
 export const LEARNING_EXPORT_RECORD_VERSION = 1;
 export const LEARNING_IDENTITY_VERSION = 1;
@@ -1206,12 +1223,9 @@ export function validateLearningExample(example) {
         (Number.isInteger(example.features.missingContractFieldCount) &&
           example.features.missingContractFieldCount >= 0)) ||
       typeof example.features.routingReasonPresent !== "boolean" ||
-      ![null, "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"].includes(
-        example.features.model
-      ) ||
-      ![null, "low", "medium", "high", "xhigh", "max", "ultra"].includes(
-        example.features.reasoningEffort
-      )) {
+      !(example.features.model === null || LEARNING_MODELS.has(example.features.model)) ||
+      !(example.features.reasoningEffort === null ||
+        LEARNING_EFFORTS.has(example.features.reasoningEffort))) {
     throw new Error("Learning route or contract features are invalid.");
   }
   assertExactKeys(example.outcome, [

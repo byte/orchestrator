@@ -3,7 +3,10 @@ import path from "node:path";
 
 import { resolveWorkspaceRoot } from "./workspace.mjs";
 
-export const RUN_STATE_VERSION = 5;
+// Version 6 routes to the GPT-6 roster and records model substitutions. A 0.5.x
+// build refuses it rather than misreading slugs it does not know. Versions 3-5
+// still load and keep their exact persisted slugs.
+export const RUN_STATE_VERSION = 6;
 
 // `RUN_STATE_VERSION` belongs to durable run state. Lanes and local thread pointers
 // have their own stable schemas because their shape did not change when run
