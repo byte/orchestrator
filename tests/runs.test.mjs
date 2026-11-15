@@ -392,6 +392,8 @@ test("worker binding, reporting, supervisor verification, and dependencies form 
       reasoningEffort: "high",
       requestedModel: "gpt-6.1-sol",
       substitution: null,
+      resumedFromAttemptId: null,
+      resumeFallback: null,
       routingReason: null,
       runnerPid: null,
       runnerStatusFile: null,

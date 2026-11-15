@@ -87,7 +87,7 @@ A task progresses through:
 ```text
 pending -> dispatching -> running -> reported -> completed
                               \-> blocked | failed | cancelled
-blocked | failed | cancelled -> pending (explicit retry)
+blocked | failed | cancelled -> pending (explicit retry, warm or fresh)
 ```
 
 `reported` means a structured worker result exists. It is deliberately separate from
@@ -104,7 +104,8 @@ why a terminal attempt ended. New terminal attempts record exactly one of `accep
 action, reason code, provenance, signals, and evidence references.
 
 Outcomes live on attempts rather than task results. Retrying clears the current task result and
-verification while preserving every earlier attempt and its outcome. Version 3 and version 4 run
+verification while preserving every earlier attempt and its outcome; the cleared result,
+verification, and disposition are first copied onto the attempt as `review`. Version 3 and version 4 run
 files without outcomes remain readable and are shown as unclassified legacy state rather than
 being guessed or backfilled.
 
@@ -276,6 +277,14 @@ thread resumed with neither flag ran on `gpt-6.1-sol`/`high`, the config default
 "recorded with model" warning. A warm retry must therefore pass model, effort, and sandbox
 explicitly on every resume.
 
+**Missing thread (M2.8, probed 2026-11-15).** Resuming a well-formed UUID that has no rollout on
+this machine exits 1 with nothing on stdout and, on stderr, `Error: thread/resume: thread/resume
+failed: no rollout found for thread id <id> (code -32600)`. No `thread.started` event is emitted.
+An expired thread was not observed; it is assumed to fail the same way, since expiry means the
+rollout is gone. A thread id that is not a UUID (probed with `thread-bogus`) is **not** an error:
+Codex silently starts a new thread, reports a different id in `thread.started`, and exits 0. A
+real resume reports the same thread id it was given.
+
 ## Task dispatch
 
 `run launch` performs these steps:
@@ -284,7 +293,8 @@ explicitly on every resume.
    model and effort, and requiring a checkpoint that covers the current plan and guidance
    revisions.
 2. Require a committed, clean supervisor checkout on the run's branch and integration head.
-3. Create `.orchestrator/local/worktrees/<run>/<task-attempt>` and a dedicated task branch.
+3. Create `.orchestrator/local/worktrees/<run>/<task-attempt>` and a dedicated task branch, or,
+   for a warm retry, reuse the previous attempt's worktree and branch (see "Warm retries").
 4. Write the prompt, JSON schema, worker specification, output paths, and status path.
 5. Spawn a detached Node wrapper.
 6. The wrapper invokes:
@@ -299,12 +309,61 @@ explicitly on every resume.
      --output-last-message <result> -
    ```
 
+   For a warm retry it resumes the previous attempt's thread instead, with `-C` and `--sandbox`
+   on `exec` (Codex rejects them after `resume`) and the attempt's own route after it:
+
+   ```text
+   codex exec -C <worktree> --sandbox <read-only|workspace-write> resume \
+     --model <attempt model> -c model_reasoning_effort="<attempt effort>" \
+     --json --output-schema <schema> --output-last-message <result> <thread-id> -
+   ```
+
 7. Persist the exact model and effort with the attempt (plus the requested model and a
    substitution record when the route was substituted), the wrapper PID immediately, then the
    Codex thread ID when `thread.started` arrives.
 
 The wrapper owns signal forwarding and atomic status updates. Claude never needs to block on a
 worker process.
+
+## Warm retries
+
+`run retry <run-id> <task-id> [--note <text>] [--fresh]` first copies the task-level result,
+verification, and disposition onto the last attempt as `attempt.review`, then clears them and
+records a pending retry on the task. The retry is warm when the most recent attempt that reached a
+Codex worker (attempts Codex rejected for an unavailable model, or that failed before Codex
+started, are skipped) has a thread id and ended with a result or verdict: `verification_failed`,
+`worker_blocked`, `policy_refused`, `authority_escalated`, `integration_failed`, or a
+`contract_failed` malformed result. It is cold for `--fresh`, a crash (`execution_failed`), a
+missing result, a cancellation, or a missing thread id. A route change does not force a cold
+start, because a resumed thread accepts a new model and effort.
+
+The next claim turns the request into `attempt.retry` (mode, reason, note, thread id, worktree
+decision) and sets `attempt.resumedFromAttemptId` on a warm attempt. The worktree decision is
+made then: a warm retry reuses the previous attempt's worktree, branch, and base, so inspection
+and integration see the commits of both attempts; after an `integration_conflict` it gets a fresh
+worktree at the current integration head instead, and the worker is told to redo the change
+there. A cold retry always gets a fresh worktree.
+
+Every retry briefing, warm or cold, carries a "Previous attempt" section: the outcome, the
+supervisor's evidence, the retry note, the worker's own summary and blockers (marked unverified),
+the files the attempt changed (from integration inspection when available, otherwise as
+declared), and any integration findings. It is ordinary briefing text and independent of the
+provisional guidance block. Because the whole briefing is resent on resume, it also works when
+the resume falls back.
+
+The wrapper falls back to a fresh thread in the same worktree, with the same prompt, when the
+resume exits non-zero without a `thread.started` event and stderr reports a missing thread. When
+Codex instead starts a different thread than requested (a non-UUID id), the attempt continues.
+Either way the status file carries `resumeFallback`, which `run poll` records on the attempt and
+as a `task.resume_fallback` event. A warm attempt that Codex rejects for an unavailable model hands
+its retry request to the relaunch, which resumes the same thread on the fallback model.
+
+`run resume` and the supervisor briefing label each attempt as a warm resume, a fallback, or a
+fresh retry, and show a pending retry's mode and note. Learning samples carry a `warmStart`
+feature that is true only for an attempt that actually continued an earlier thread; samples
+collected before this feature existed stay valid. `run retry` advises escalating one tier once two
+warm retries of the same task have failed. No state version bump was needed: every new field is
+optional, and version-3 through version-5 runs retry the same way.
 
 ## Collection and integration
 
@@ -383,6 +442,7 @@ memory.
 | Codex rejects the model as unavailable | Attempt `execution_failed`/`model_unavailable`; model recorded unavailable | Automatic relaunch one rung down the ladder, recorded and surfaced; escalate when the ladder is exhausted |
 | Worker reports blockers | Task `blocked`, structured result retained | Expand authorized scope, resolve prerequisite, or replan |
 | Malformed result | Task `failed` | Retry once if transient; otherwise report |
+| Warm retry's thread missing or replaced | Same attempt continues on a fresh thread in the same worktree; `resumeFallback` and `task.resume_fallback` recorded | Review as usual; the briefing was self-contained |
 | Scope/declaration mismatch | Integration refused | Reject result and replan; do not cherry-pick |
 | Dirty worker checkout | Inspection and cleanup refused | Ask worker/reviewer to resolve or preserve for diagnosis |
 | Cherry-pick conflict | Cherry-pick aborted | Replan integration order or create a bounded conflict task |

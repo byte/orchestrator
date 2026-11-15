@@ -17,7 +17,9 @@ const emit = (event) => process.stdout.write(`${JSON.stringify(event)}\n`);
 
 process.stdin.resume();
 process.stdin.on("end", () => {
-  emit({ type: "thread.started", thread_id: `thread-${model}` });
+  // A resumed thread keeps its id, as real Codex reports it.
+  const resumed = args.includes("resume") ? args.at(-2) : null;
+  emit({ type: "thread.started", thread_id: resumed ?? `thread-${model}` });
   if (unavailable.has(model)) {
     const message = `The '${model}' model is not supported when using Codex with a ChatGPT account.`;
     emit({

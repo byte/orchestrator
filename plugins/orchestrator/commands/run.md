@@ -252,12 +252,28 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" run verify <run-id> <task-id> \
   --json
 ```
 
-Use `--verdict fail` when the evidence is insufficient or the implementation is wrong. Retry a
-failed or blocked task only after correcting its briefing or plan:
+Use `--verdict fail` when the evidence is insufficient or the implementation is wrong, and make
+the evidence specific: it is handed to the worker on retry. Retry a failed or blocked task with a
+note saying what to change:
 
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" run retry <run-id> <task-id>
+node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" run retry <run-id> <task-id> \
+  --note "<what the worker must change>"
 ```
+
+A retry is warm by default: when the previous attempt reached a result or a supervisor verdict and
+left a Codex thread id, the next `run launch` resumes that thread on the attempt's own model,
+effort, and sandbox, in the same worktree. Its briefing gains a "Previous attempt" section with the
+outcome, your evidence, your note, and the files the attempt changed. The retry starts cold (a new
+thread, a new worktree, the same "Previous attempt" section) when the previous attempt crashed,
+returned no result, was cancelled, or has no thread id, or when you pass `--fresh`. Use `--fresh`
+when the earlier thread is anchored on a wrong approach you want the worker to drop. After an
+integration conflict the retry still resumes the thread but in a fresh worktree at the integrated
+head, so the worker redoes the change against it. If Codex reports the thread as missing, the
+launch falls back to a fresh thread with the same briefing and records `task.resume_fallback`.
+A route change in a revised plan does not force a cold start; the resumed thread runs on the new
+route. The "Previous attempt" section is ordinary briefing text, separate from the fixed-template
+provisional guidance block in section 3, and does not loosen any guidance restriction.
 
 Do not mark a task complete merely because Codex said it was complete.
 
@@ -321,7 +337,12 @@ higher tier does not repair an unclear objective.
 stop dispatching dependent work, explain the conflict, revise the plan deliberately, and
 checkpoint the change — a new plan revision blocks dispatch until it has its own checkpoint.
 
-Retry transient worker failures once. Repeated failures, scope conflicts, missing authority, or an
+Retry transient worker failures (a crash, a missing result) once; that retry starts cold. Retry a
+failed verification or a rejected integration warm, with a `--note` that names what to change.
+When two warm retries of the same task have failed, stop retrying at that route: escalate it one
+tier (`luna` → `terra` → `sol` → `astra`) in a revised plan with a `routingReason` that cites the
+failures, or treat it as a blocker if the evidence points at the briefing rather than the tier.
+`run retry` prints this advice once the count is reached. Scope conflicts, missing authority, or an
 unmet prerequisite are blockers; do not loop indefinitely.
 
 ## 8. Finish
@@ -366,6 +387,7 @@ created, and any residual risk. Distinguish built, verified, and unverified work
 - Routing is a revisable judgment, not a one-time commitment: re-route pending tasks through
   `run plan` when a completed wave contradicts the assumptions the original route was based on.
 - Codex workers never self-assign global work or expand their scope.
-- Every worker runs in its own isolated worktree.
+- Every task runs in its own isolated worktree; a warm retry continues in that task's previous
+  worktree unless integration failed on a conflict.
 - Never bypass the run state because the manual path seems faster.
 - Never continue from memory alone when `run briefing` or `run recover` can restore exact state.

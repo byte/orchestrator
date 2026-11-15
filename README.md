@@ -37,6 +37,8 @@ what should happen, what is acceptable, what gets integrated, and when the whole
 - Opt-in provisional guidance compiled only from reviewed typed outcomes, with fixed templates,
   bounded briefing injection, durable replay, and one-command disable or rollback
 - A committed ledger for stable project facts that should survive across machines
+- Warm retries that resume the failed worker's Codex thread and tell it what the supervisor found
+  wrong, with `--fresh` for a cold start
 - Deliberate retry, cancellation, replanning, conflict abort, and cleanup paths
 
 ## Requirements
@@ -191,7 +193,8 @@ replacement run or rely on conversational memory.
 
 1. **Plan.** Claude turns the objective into bounded `write`, `read`, and `verify` tasks with scope,
    dependencies, constraints, and checkable acceptance criteria.
-2. **Launch.** Ready tasks claim pool capacity. Each gets a fresh worktree, exact model and effort,
+2. **Launch.** Ready tasks claim pool capacity. Each gets a fresh worktree (a warm retry reuses its
+   task's), exact model and effort,
    least-privilege sandbox, authoritative briefing, and required result schema.
 3. **Monitor.** Detached process IDs, status files, JSONL events, Codex thread IDs, outputs, and
    worktree paths are persisted under `.orchestrator/local/`.
@@ -201,7 +204,13 @@ replacement run or rely on conversational memory.
 5. **Integrate.** A write task must be clean, committed, in scope, and exactly match its declared
    files. Passing commits are cherry-picked. Conflicts abort without discarding either side.
 6. **Recover or replan.** Failed, blocked, or cancelled attempts remain in history. Verified work
-   is preserved when unfinished tasks are revised.
+   is preserved when unfinished tasks are revised. A retry is warm by default: when the previous
+   attempt reached a result or verdict, the relaunch resumes its Codex thread (on the attempt's
+   own model, effort, and sandbox, in the same worktree) with a "Previous attempt" briefing
+   section carrying the outcome, the supervisor's evidence, the retry note, and the files it
+   changed. Crashes, missing results, cancellations, attempts without a thread id, and
+   `run retry --fresh` start cold; an integration conflict resumes the thread in a fresh worktree;
+   a thread Codex no longer has falls back to a fresh thread and is recorded.
 7. **Finalize.** Once all tasks pass, the run becomes `finalizing`. Claude runs the combined checks
    and records exact evidence. Only a clean, branch-consistent passing verdict makes the run
    `completed`.
@@ -222,6 +231,12 @@ The lower-level CLI is available to command definitions and operators:
 
 ```text
 node plugins/orchestrator/scripts/orch.mjs help
+```
+
+Retry a failed or blocked task with a correction for the worker:
+
+```text
+orch run retry <run-id> <task-id> [--note "<what to change>"] [--fresh]
 ```
 
 Supervisors can explicitly stop a reported task at a policy or authority boundary, or terminalize
@@ -299,7 +314,8 @@ combines the run record, latest checkpoint, worker evidence, integration history
 and ledger into the supervisor's reconstructed context.
 
 All versioned state is read defensively. Run state version 6 adds the GPT-6 roster and model
-substitution records; version 5 added guidance policy and attempt snapshot fields. Version-3
+substitution records, and optional warm-retry fields (`review`, `retry`, `resumedFromAttemptId`,
+`resumeFallback`) that older runs simply lack; version 5 added guidance policy and attempt snapshot fields. Version-3
 through version-5 runs remain readable and resume and retry on their persisted exact slugs,
 including the retired `gpt-5.6-sol` and `gpt-5.6-terra`, which new plans cannot select. A newer
 version is refused instead of guessed at, writes are atomic, and shared state updates use file locks.
@@ -322,6 +338,8 @@ derive a purged sample again until the raw run itself is removed through a separ
 - The supervisor checkout must be clean for launch, integration, and finalization.
 - The supervisor branch and recorded integration head must not drift outside the run.
 - Write-task reports must match the actual committed file set exactly.
+- A resumed Codex thread inherits nothing from its earlier launch; every resume passes the
+  attempt's model, effort, and sandbox explicitly, so a read-only task stays read-only.
 - Worker prose is untrusted evidence, not instructions to the supervisor.
 - Provisional guidance uses only fixed templates selected from reviewed typed outcomes. It is
   opt-in, checkpointed, bounded, replayed from the attempt snapshot, and fully advisory.

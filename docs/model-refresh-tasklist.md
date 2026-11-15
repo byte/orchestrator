@@ -214,36 +214,88 @@ Today `retryTask` (`runs.mjs:1832`) clears the result and the verification and
 relaunches a fresh `codex exec` with the original prompt. The worker learns
 nothing from the failure.
 
-- [ ] **M2.1** Persist the supervisor's failed-verification evidence and the
+- [x] **M2.1** Persist the supervisor's failed-verification evidence and the
   integration failure detail on the attempt record before `retryTask` clears
   the task-level fields.
-- [ ] **M2.2** Add a `run retry --note "<what to change>"` option that stores a
+- [x] **M2.2** Add a `run retry --note "<what to change>"` option that stores a
   supervisor correction on the next attempt.
-- [ ] **M2.3** Add a "Previous attempt" section to the worker prompt: outcome,
+- [x] **M2.3** Add a "Previous attempt" section to the worker prompt: outcome,
   supervisor evidence, the retry note, and the files the last attempt changed.
   This is ordinary briefing text, separate from the fixed-template guidance
   block.
-- [ ] **M2.4** Add a `resumeThreadId` field to the worker spec and have
+- [x] **M2.4** Add a `resumeThreadId` field to the worker spec and have
   `scripts/worker-child.mjs` call `codex exec resume <id>` when it is set.
-- [ ] **M2.5** Default retries to resuming the previous thread when the
+- [x] **M2.5** Default retries to resuming the previous thread when the
   previous attempt reached a result or a verification verdict. Start fresh when
   it crashed, produced no thread id, or the route changed (subject to M0.4).
-- [ ] **M2.6** Add `run retry --fresh` to force a cold start.
-- [ ] **M2.7** Decide worktree handling on a resumed retry. Recommendation:
+- [x] **M2.6** Add `run retry --fresh` to force a cold start.
+- [x] **M2.7** Decide worktree handling on a resumed retry. Recommendation:
   reuse the previous worktree when the supervisor rejected the work, recreate
   it when integration failed on a conflict.
-- [ ] **M2.8** Fall back to a fresh launch, with a recorded event, when Codex
+- [x] **M2.8** Fall back to a fresh launch, with a recorded event, when Codex
   reports the thread as missing or expired.
-- [ ] **M2.9** Record `resumedFromAttemptId` on the attempt and surface it in
+- [x] **M2.9** Record `resumedFromAttemptId` on the attempt and surface it in
   `run resume` and the learning features.
-- [ ] **M2.10** Lift "Retry transient worker failures once" in `run.md`
+- [x] **M2.10** Lift "Retry transient worker failures once" in `run.md`
   section 7: transient failures retry once cold, verification failures retry
   warm with a note, and two warm failures on the same task escalate one tier.
-- [ ] **M2.11** Add a `tests/fixtures/fake-codex-resume.mjs` fixture and tests
+- [x] **M2.11** Add a `tests/fixtures/fake-codex-resume.mjs` fixture and tests
   for warm retry, forced fresh retry, missing-thread fallback, and the rendered
   "Previous attempt" section.
 - [ ] **M2 gate** In a real run, a deliberately failed verification is retried
   and the worker's second attempt references the supervisor's evidence.
+  (`npm test` part met; the real run is outstanding, see evidence.)
+
+### Milestone 2 evidence
+
+- Built (2026-11-15): `run retry --note <text> --fresh`; the task-level result,
+  verification, and disposition copied onto the attempt as `review` before they
+  are cleared; a pending retry on the task that the next claim turns into
+  `attempt.retry` and `attempt.resumedFromAttemptId`; a "Previous attempt"
+  briefing section (outcome, supervisor evidence, note, worker summary and
+  blockers, changed files, integration findings) rendered for every retry, warm
+  or cold, as ordinary text outside the guidance block; `resumeThreadId` in the
+  worker spec and a `codex exec -C <dir> --sandbox <mode> resume --model <m> -c
+  model_reasoning_effort=... --json --output-schema ... --output-last-message
+  ... <id> -` launch in `worker-child.mjs`, always with the attempt's own model,
+  effort, and sandbox.
+- M2.5: warm when the latest attempt that reached a worker has a thread id and
+  ended `verification_failed`, `worker_blocked`, `policy_refused`,
+  `authority_escalated`, `integration_failed`, or `contract_failed` with a
+  malformed result. Cold for `--fresh`, `execution_failed`, a missing result,
+  cancellation, or no thread id. Attempts Codex rejected for an unavailable
+  model, and launches that failed before Codex started, are skipped when
+  choosing the attempt to resume. Decision: a route change does **not** force a
+  cold start, because M0.4 showed a resumed thread accepts a new model and
+  effort; the resume runs on the new route.
+- M2.7: a warm retry reuses the previous worktree, branch, and base (inspection
+  then sees both attempts' commits); after an `integration_conflict` it resumes
+  the thread in a fresh worktree at the integration head and tells the worker to
+  redo the change there; a missing worktree also gets a fresh one. Cold retries
+  always get a fresh worktree.
+- M2.8 (observed with a real probe in a scratch repository): resuming a UUID with
+  no rollout exits 1, prints nothing on stdout, and writes `Error: thread/resume:
+  thread/resume failed: no rollout found for thread id <id> (code -32600)` to
+  stderr. The wrapper then relaunches the same prompt as a fresh thread in the
+  same worktree and records `resumeFallback` and a `task.resume_fallback` event.
+  Also observed: a non-UUID id silently starts a new thread and exits 0; the
+  wrapper detects the changed `thread.started` id and records it as
+  `thread_replaced`. An expired thread was not observed and is assumed to fail
+  like a missing one.
+- M2.9: `resumedFromAttemptId` appears in `run resume` (attempt labels,
+  pending-retry line, active worker recovery) and as the learning feature
+  `warmStart` (true only when the thread really resumed). Older samples without
+  the feature still validate.
+- M2.10 is guidance in `run.md` plus advice printed by `run retry` after two
+  failed warm attempts; the runtime does not escalate a route by itself.
+- Model substitution: a warm attempt rejected as unavailable hands its retry to
+  the relaunch, which resumes the same thread on the fallback model (tested).
+- No state version bump: every new field is optional; a version-5 run retried
+  warm in tests.
+- Not done: the real-run gate. The implementer could not invoke slash commands;
+  the owner must run it.
+- Full repository gate: `npm test` passed 163 tests with 0 failures on
+  2026-11-15 (9 new in `tests/retry.test.mjs`).
 
 ## Milestone 3 — Workers can ask instead of only stopping
 

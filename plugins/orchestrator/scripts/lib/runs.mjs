@@ -83,6 +83,17 @@ const TASK_KINDS = new Set(["write", "read", "verify"]);
 const REASONING_EFFORTS = new Set(ALL_REASONING_EFFORTS);
 const ACTIVE_TASK_STATUSES = new Set(["dispatching", "running"]);
 const RETRYABLE_TASK_STATUSES = new Set(["blocked", "failed", "cancelled"]);
+// Outcomes that mean the worker finished a turn and handed back a result the
+// supervisor then judged. Its thread holds useful context, so a retry resumes it.
+// Crashes, missing results, and cancellations leave a thread that may stop
+// mid-turn, so those retry cold.
+const WARM_RETRY_OUTCOMES = new Set([
+  "verification_failed",
+  "worker_blocked",
+  "policy_refused",
+  "authority_escalated",
+  "integration_failed"
+]);
 
 function runsDir(cwd) {
   return path.join(localDir(cwd), "runs");
@@ -891,6 +902,9 @@ export function replacePlan(cwd, runId, rawTasks, { defaultScope = [] } = {}) {
         tasks[task.id] = {
           ...task,
           attempts: existing.attempts,
+          // A requested retry survives a plan revision. A route change does not
+          // force a cold start: a resumed Codex thread can change model and effort.
+          ...(existing.pendingRetry ? { pendingRetry: existing.pendingRetry } : {}),
           createdAt: existing.createdAt
         };
       } else {
@@ -1194,10 +1208,158 @@ function renderWorkerLedger(cwd) {
     .join("\n\n");
 }
 
+/**
+ * The most recent attempt that actually reached a Codex worker. A launch Codex
+ * rejected for an unavailable model, or one that failed before Codex started, has
+ * nothing to carry into a retry.
+ */
+function priorWorkerAttempt(task, before = task.attempts.length) {
+  return task.attempts
+    .slice(0, before)
+    .findLast((attempt) => !attempt.modelUnavailable && !attempt.launchFailed) ?? null;
+}
+
+function integrationConflict(attempt) {
+  return attempt?.outcome?.reasonCode === "integration_conflict" ||
+    attempt?.diagnostics?.at(-1)?.reasonCode === "integration_conflict";
+}
+
+/**
+ * Decide whether a retry resumes the previous attempt's Codex thread. Warm is the
+ * default whenever the previous attempt reached a result or a supervisor verdict
+ * and left a thread id. A route change does not force a cold start, because a
+ * resumed thread accepts a new model and effort (Codex CLI 0.169.0 only warns).
+ */
+function retryMode(task, previous, fresh) {
+  if (fresh) {
+    return { mode: "fresh", reason: "forced with --fresh" };
+  }
+  if (!previous) {
+    return { mode: "fresh", reason: "no earlier attempt reached a Codex worker" };
+  }
+  if (!previous.threadId) {
+    return { mode: "fresh", reason: `${previous.id} produced no thread id` };
+  }
+  const outcome = previous.outcome;
+  const reachedResult = outcome
+    ? WARM_RETRY_OUTCOMES.has(outcome.terminalOutcome) ||
+      (outcome.terminalOutcome === "contract_failed" &&
+        outcome.reasonCode === "malformed_result_contract")
+    // Attempts saved before typed outcomes existed: a recorded verdict or result.
+    : task.verification?.verdict === "fail" || Boolean(task.result?.contractFound);
+  if (!reachedResult) {
+    const what = outcome ? `${outcome.terminalOutcome} / ${outcome.reasonCode}` : "no recorded result";
+    return {
+      mode: "fresh",
+      reason: `${previous.id} ended without a result or verdict (${what})`
+    };
+  }
+  return { mode: "warm", reason: `${previous.id} reached a result or verdict` };
+}
+
+function warmFailureCount(task) {
+  return task.attempts.filter((attempt) =>
+    attempt.resumedFromAttemptId &&
+    !attempt.modelUnavailable &&
+    attempt.outcome &&
+    attempt.outcome.terminalOutcome !== "accepted"
+  ).length;
+}
+
+function previousAttemptFiles(previous) {
+  const inspected = previous.diagnostics?.findLast((entry) =>
+    Array.isArray(entry.details?.files)
+  )?.details.files;
+  if (inspected) {
+    return { source: "integration inspection", files: inspected };
+  }
+  const declared = previous.review?.result?.structured?.files_touched;
+  return { source: "your report", files: Array.isArray(declared) ? declared : [] };
+}
+
+/**
+ * Ordinary briefing text describing the attempt this one follows. It is not part
+ * of the fixed-template provisional guidance block and is not governed by it: it
+ * carries what the supervisor found, verbatim, so the worker can correct course.
+ */
+function renderPreviousAttempt(task, attempt) {
+  if (!attempt) {
+    return "";
+  }
+  const previous = attempt.retry?.previousAttemptId
+    ? task.attempts.find((entry) => entry.id === attempt.retry.previousAttemptId)
+    : priorWorkerAttempt(task, task.attempts.indexOf(attempt));
+  if (!previous || previous === attempt) {
+    return "";
+  }
+  const retry = attempt.retry ?? null;
+  const warm = Boolean(attempt.resumedFromAttemptId);
+  const review = previous.review ?? {};
+  const outcome = previous.outcome;
+  const structured = review.result?.structured ?? null;
+  const evidence = review.verification?.evidence?.length
+    ? review.verification.evidence
+    : review.disposition?.evidence?.length
+      ? review.disposition.evidence
+      : outcome?.evidence ?? [];
+  const thread = warm
+    ? `You are continuing the Codex thread of ${previous.id}; your earlier turns are above. ` +
+      "This briefing restates the assignment in full."
+    : `This attempt starts a fresh Codex thread. Everything carried over from ${previous.id} is below.`;
+  const worktree = retry?.worktree?.mode === "reuse"
+    ? "You are in the same worktree as before, with its commits and any uncommitted changes."
+    : retry?.worktree?.reason === "integration_conflict"
+      ? "Your previous worktree was set aside because its commits conflicted with the integrated " +
+        "branch. You are in a fresh worktree at the current integrated head; redo the change against it."
+      : "You are in a fresh worktree at the current integrated head; nothing from the earlier attempt is in it.";
+  const lines = [
+    "## Previous attempt",
+    "",
+    `${thread} ${worktree}`,
+    "",
+    `- attempt: ${previous.id}`,
+    `- outcome: ${outcome ? `${outcome.terminalOutcome} / ${outcome.reasonCode}` : "not classified"}`,
+    `- your summary (unverified): ${structured?.summary || review.result?.summary || previous.error || "none recorded"}`
+  ];
+  if (structured?.blockers?.length) {
+    lines.push("", "Blockers you reported:", renderList(structured.blockers));
+  }
+  lines.push(
+    "",
+    "Supervisor evidence:",
+    renderList(evidence),
+    "",
+    "Supervisor correction for this retry:",
+    retry?.note ? retry.note : "- none given; work from the evidence above"
+  );
+  const changed = previousAttemptFiles(previous);
+  lines.push("", `Files the previous attempt changed (from ${changed.source}):`, renderList(changed.files));
+  const diagnostic = previous.diagnostics?.findLast((entry) => entry.type?.startsWith("integration_"));
+  if (diagnostic) {
+    const details = diagnostic.details ?? {};
+    const findings = [
+      diagnostic.error ? `error: ${diagnostic.error}` : null,
+      details.outOfScope?.length ? `outside the declared scope: ${details.outOfScope.join(", ")}` : null,
+      details.undeclared?.length ? `changed but not declared: ${details.undeclared.join(", ")}` : null,
+      details.phantom?.length ? `declared but not changed: ${details.phantom.join(", ")}` : null,
+      details.dirty?.length ? `left uncommitted: ${details.dirty.join(", ")}` : null,
+      details.commits && !details.commits.length ? "no commits were made" : null
+    ].filter(Boolean);
+    lines.push("", `Integration findings (${diagnostic.reasonCode}):`, renderList(findings));
+  }
+  lines.push(
+    "",
+    "Address the supervisor's evidence and correction first. Do not repeat an approach the " +
+      "evidence shows failed."
+  );
+  return `${lines.join("\n")}\n\n`;
+}
+
 export function renderWorkerBriefing(cwd, run, task, lane, launchRoute = null) {
   // The header names the model the attempt actually launches on, which differs
   // from the saved route only after a recorded substitution.
   const route = launchRoute ?? resolveTaskWorker(run, task);
+  const previousAttempt = renderPreviousAttempt(task, task.attempts.at(-1));
   const guidance = task.attempts.at(-1)?.guidanceSnapshot ?? task.guidanceSelection;
   if (guidance) {
     validateGuidanceSelection(guidance);
@@ -1240,7 +1402,7 @@ Do not redefine the overall goal, widen scope, integrate other workers, or spawn
 
 ${task.objective}
 
-## Task kind
+${previousAttempt}## Task kind
 
 ${task.kind}
 
@@ -1285,6 +1447,59 @@ Return one JSON object matching the supplied output schema:
 `;
 }
 
+/**
+ * Turn a pending retry request into the retry record of the attempt being
+ * claimed, deciding the worktree now that the launch is imminent (M2.7): a warm
+ * retry reuses the previous worktree so the worker sees what it did, unless
+ * integration failed on a conflict, in which case the work must be redone against
+ * the current integrated head in a fresh worktree.
+ */
+function claimRetry(task) {
+  const pending = task.pendingRetry;
+  if (!pending) {
+    return null;
+  }
+  const previous = task.attempts.find((entry) => entry.id === pending.previousAttemptId) ?? null;
+  let mode = pending.mode;
+  let reason = pending.reason;
+  if (mode === "warm" && !previous?.threadId) {
+    mode = "fresh";
+    reason = "the previous attempt's thread id is no longer recorded";
+  }
+  let worktree = { mode: "new", reason: mode === "warm" ? null : "fresh retry" };
+  if (mode === "warm") {
+    if (integrationConflict(previous)) {
+      worktree = { mode: "new", reason: "integration_conflict" };
+    } else if (previous.worktree?.path && fs.existsSync(previous.worktree.path)) {
+      worktree = { mode: "reuse", reason: null, attemptId: previous.id };
+    } else {
+      worktree = { mode: "new", reason: "previous worktree is gone" };
+    }
+  }
+  return {
+    previousAttemptId: pending.previousAttemptId,
+    mode,
+    reason,
+    note: pending.note ?? null,
+    resumeThreadId: mode === "warm" ? previous.threadId : null,
+    worktree,
+    requestedAt: pending.requestedAt
+  };
+}
+
+/** Put a consumed retry request back when its attempt never reached a worker. */
+function restorePendingRetry(task, attempt) {
+  if (attempt.retry && !task.pendingRetry) {
+    task.pendingRetry = {
+      previousAttemptId: attempt.retry.previousAttemptId,
+      mode: attempt.retry.mode,
+      reason: attempt.retry.reason,
+      note: attempt.retry.note,
+      requestedAt: attempt.retry.requestedAt
+    };
+  }
+}
+
 export function claimTask(cwd, runId, taskId, lane) {
   const id = assertId(runId, "run");
   const filePath = runFile(cwd, id);
@@ -1324,6 +1539,7 @@ export function claimTask(cwd, runId, taskId, lane) {
         `Task "${task.id}" guidance no longer matches the run policy; refresh it before dispatch.`
       );
     }
+    const retry = claimRetry(task);
     const attempt = {
       id: `${task.id}-attempt-${task.attempts.length + 1}`,
       status: "dispatching",
@@ -1334,6 +1550,10 @@ export function claimTask(cwd, runId, taskId, lane) {
       reasoningEffort: route.reasoningEffort,
       requestedModel: route.requestedModel,
       substitution: route.substitution ? { ...route.substitution, at: nowIso() } : null,
+      // Set only when this attempt resumes the earlier attempt's Codex thread. The
+      // resume always runs on this attempt's own model, effort, and sandbox.
+      resumedFromAttemptId: retry?.mode === "warm" ? retry.previousAttemptId : null,
+      retry,
       claimedAt: nowIso(),
       startedAt: null,
       finishedAt: null,
@@ -1342,6 +1562,7 @@ export function claimTask(cwd, runId, taskId, lane) {
       diagnostics: []
     };
     task.attempts.push(attempt);
+    delete task.pendingRetry;
     task.status = "dispatching";
     task.updatedAt = nowIso();
     refreshRunStatus(run);
@@ -1354,7 +1575,9 @@ export function claimTask(cwd, runId, taskId, lane) {
       reasoningEffort: route.reasoningEffort,
       guidancePolicyVersion: attempt.guidanceSnapshot.policyVersion,
       guidancePolicyHash: attempt.guidanceSnapshot.policyHash,
-      guidanceItemIds: attempt.guidanceSnapshot.items.map((item) => item.guidanceId)
+      guidanceItemIds: attempt.guidanceSnapshot.items.map((item) => item.guidanceId),
+      retryMode: retry?.mode ?? null,
+      resumedFromAttemptId: attempt.resumedFromAttemptId
     });
     if (attempt.substitution) {
       appendEvent(cwd, id, {
@@ -1373,6 +1596,8 @@ export function claimTask(cwd, runId, taskId, lane) {
       reasoningEffort: route.reasoningEffort,
       requestedModel: route.requestedModel,
       substitution: attempt.substitution,
+      resumedFromAttemptId: attempt.resumedFromAttemptId,
+      retry: attempt.retry,
       routingFlags: [
         "--fresh",
         "--model",
@@ -1614,17 +1839,37 @@ export function syncExecutionStatus(cwd, runId, taskId, { attemptId, status }) {
       exitCode: attempt.runner.exitCode,
       signal: attempt.runner.signal
     };
-    if (JSON.stringify(previous) === JSON.stringify(current)) {
+    const fellBack = Boolean(status.resumeFallback && attempt.resumedFromAttemptId && !attempt.resumeFallback);
+    if (fellBack) {
+      attempt.resumeFallback = {
+        reason: String(status.resumeFallback.reason ?? "thread_missing"),
+        message: String(status.resumeFallback.message ?? ""),
+        resumeThreadId: attempt.retry?.resumeThreadId ?? null,
+        at: nowIso()
+      };
+    }
+    if (!fellBack && JSON.stringify(previous) === JSON.stringify(current)) {
       return attempt;
     }
     task.updatedAt = nowIso();
     writeRun(cwd, run);
-    appendEvent(cwd, id, {
-      type: "task.execution_status",
-      taskId: task.id,
-      attemptId: attempt.id,
-      runner: current
-    });
+    if (fellBack) {
+      appendEvent(cwd, id, {
+        type: "task.resume_fallback",
+        taskId: task.id,
+        attemptId: attempt.id,
+        resumedFromAttemptId: attempt.resumedFromAttemptId,
+        ...attempt.resumeFallback
+      });
+    }
+    if (JSON.stringify(previous) !== JSON.stringify(current)) {
+      appendEvent(cwd, id, {
+        type: "task.execution_status",
+        taskId: task.id,
+        attemptId: attempt.id,
+        runner: current
+      });
+    }
     return attempt;
   });
 }
@@ -1640,7 +1885,8 @@ export function failTaskAttempt(
     action = "execute",
     reasonCode = "worker_execution_failed",
     provenance = "automatic",
-    signals = ["worker_process_error"]
+    signals = ["worker_process_error"],
+    launchFailed = false
   }
 ) {
   const id = assertId(runId, "run");
@@ -1664,6 +1910,12 @@ export function failTaskAttempt(
     attempt.status = "failed";
     attempt.finishedAt = nowIso();
     attempt.error = String(error ?? "Worker execution failed.");
+    if (launchFailed) {
+      // Codex never started, so this attempt has nothing to carry forward; a
+      // later retry still resumes from the attempt before it.
+      attempt.launchFailed = true;
+      restorePendingRetry(task, attempt);
+    }
     const outcome = assignAttemptOutcome(attempt, outcomeCandidate);
     task.status = "failed";
     task.result = {
@@ -1733,6 +1985,9 @@ export function recordModelUnavailable(cwd, runId, taskId, { attemptId, error })
         metadata: { unavailableModel: attempt.model, fallbackModel: next }
       })
     );
+    // The rejected launch never reached a worker, so a warm retry it carried is
+    // handed to the relaunch, which resumes the same thread on the fallback model.
+    restorePendingRetry(task, attempt);
     if (next) {
       task.status = "pending";
       task.result = null;
@@ -2099,9 +2354,10 @@ export function configureRunGuidance(
   });
 }
 
-export function retryTask(cwd, runId, taskId) {
+export function retryTask(cwd, runId, taskId, { note = null, fresh = false } = {}) {
   const id = assertId(runId, "run");
   const filePath = runFile(cwd, id);
+  const correction = String(note ?? "").trim();
   return withFileLock(filePath, () => {
     const run = loadRun(cwd, id);
     const task = requireTask(run, taskId);
@@ -2109,6 +2365,31 @@ export function retryTask(cwd, runId, taskId) {
       throw new Error(`Task "${task.id}" cannot be retried from status "${task.status}".`);
     }
     const previousAttempt = task.attempts.at(-1) ?? null;
+    // Keep what the supervisor found on the attempt itself before the task-level
+    // fields are cleared, so the retry briefing and later audits can still read it.
+    if (previousAttempt && !previousAttempt.review) {
+      previousAttempt.review = {
+        result: task.result ? structuredClone(task.result) : null,
+        verification: task.verification ? structuredClone(task.verification) : null,
+        disposition: task.disposition ? structuredClone(task.disposition) : null,
+        recordedAt: nowIso()
+      };
+    }
+    const source = priorWorkerAttempt(task);
+    const decision = retryMode(task, source, fresh);
+    // A note given on an earlier retry of the same attempt survives a retry that
+    // was only needed because the relaunch itself failed.
+    const carriedNote = task.pendingRetry?.previousAttemptId === source?.id
+      ? task.pendingRetry?.note ?? null
+      : null;
+    task.pendingRetry = {
+      previousAttemptId: source?.id ?? null,
+      mode: decision.mode,
+      reason: decision.reason,
+      note: correction || carriedNote,
+      requestedAt: nowIso()
+    };
+    const warmFailures = warmFailureCount(task);
     task.status = "pending";
     task.result = null;
     task.verification = null;
@@ -2131,9 +2412,19 @@ export function retryTask(cwd, runId, taskId) {
       previousOutcome: previousAttempt?.outcome ?? null,
       guidanceRevision: run.guidance?.revision ?? 0,
       guidancePolicyVersion: task.guidanceSelection?.policyVersion ?? null,
-      guidanceItemIds: task.guidanceSelection?.items.map((item) => item.guidanceId) ?? []
+      guidanceItemIds: task.guidanceSelection?.items.map((item) => item.guidanceId) ?? [],
+      retryMode: task.pendingRetry.mode,
+      retryReason: task.pendingRetry.reason,
+      resumeFromAttemptId: task.pendingRetry.mode === "warm"
+        ? task.pendingRetry.previousAttemptId
+        : null,
+      notePresent: Boolean(task.pendingRetry.note),
+      warmFailures
     });
-    return task;
+    return {
+      ...task,
+      retryPlan: { ...task.pendingRetry, warmFailures, escalationAdvised: warmFailures >= 2 }
+    };
   });
 }
 
@@ -2243,6 +2534,8 @@ export function recoveryReport(run) {
           attempt.reasoningEffort ?? resolveTaskWorker(run, task).reasoningEffort,
         requestedModel: attempt.requestedModel ?? attempt.model ?? resolveTaskWorker(run, task).model,
         substitution: attempt.substitution ?? null,
+        resumedFromAttemptId: attempt.resumedFromAttemptId ?? null,
+        resumeFallback: attempt.resumeFallback ?? null,
         routingReason: task.routingReason ?? null,
         runnerPid: attempt.runner?.pid ?? null,
         runnerStatusFile: attempt.runner?.statusFile ?? null,
@@ -2363,6 +2656,15 @@ export function modelSubstitutionSummary(run) {
   };
 }
 
+function retryLabel(attempt) {
+  if (attempt.resumedFromAttemptId) {
+    return attempt.resumeFallback
+      ? ` — warm retry of ${attempt.resumedFromAttemptId} FELL BACK to a fresh thread (${attempt.resumeFallback.reason})`
+      : ` — warm, resumed from ${attempt.resumedFromAttemptId}`;
+  }
+  return attempt.retry ? ` — fresh retry (${attempt.retry.reason})` : "";
+}
+
 function renderList(items) {
   return items.length ? items.map((item) => `- ${item}`).join("\n") : "- none";
 }
@@ -2408,8 +2710,13 @@ export function renderSupervisorBriefing(cwd, run, lane) {
         attempt?.worktree?.path ? `worktree ${attempt.worktree.path}` : null
       ].filter(Boolean).join("; ");
       const attemptOutcomes = task.attempts.map(
-        (entry) => `${entry.id}: ${outcomeSummary(entry)}`
+        (entry) => `${entry.id}: ${outcomeSummary(entry)}${retryLabel(entry)}`
       );
+      const pendingRetry = task.status === "pending" && task.pendingRetry
+        ? `\n- next launch: ${task.pendingRetry.mode === "warm"
+          ? `warm, resuming the thread of ${task.pendingRetry.previousAttemptId}`
+          : `fresh thread (${task.pendingRetry.reason})`}; retry note: ${task.pendingRetry.note || "none"}`
+        : "";
       const guidance = task.status === "pending"
         ? task.guidanceSelection
         : attempt?.guidanceSnapshot ?? task.guidanceSelection;
@@ -2418,7 +2725,7 @@ export function renderSupervisorBriefing(cwd, run, lane) {
       ) ?? [];
       return `### ${task.id} — ${task.title}
 
-- status: ${task.status}
+- status: ${task.status}${pendingRetry}
 - kind: ${task.kind}
 - worker route: ${route.model} (${route.reasoningEffort})${substituted}
 - routing reason: ${task.routingReason || "legacy or explicitly pinned run"}

@@ -16,7 +16,7 @@ import {
   syncExecutionStatus
 } from "./runs.mjs";
 import { atomicWrite } from "./state.mjs";
-import { createTaskWorktree } from "./worktrees.mjs";
+import { createTaskWorktree, reuseTaskWorktree } from "./worktrees.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const childScript = path.join(here, "..", "worker-child.mjs");
@@ -205,7 +205,14 @@ export function launchTaskWorker(
     const run = loadRun(cwd, runId);
     const task = run.tasks[taskId];
     const attempt = task.attempts.find((entry) => entry.id === dispatch.attemptId);
-    const worktree = createTaskWorktree(cwd, run, task, attempt);
+    const retry = attempt.retry ?? null;
+    const worktree = retry?.worktree?.mode === "reuse"
+      ? reuseTaskWorktree(
+          cwd,
+          run,
+          task.attempts.find((entry) => entry.id === retry.worktree.attemptId)
+        )
+      : createTaskWorktree(cwd, run, task, attempt);
     const directory = executionDir(cwd, runId, taskId, attempt.id);
     fs.mkdirSync(directory, { recursive: true });
     const files = {
@@ -223,9 +230,15 @@ export function launchTaskWorker(
       ...files,
       codexCommand,
       worktreePath: worktree.path,
+      // Always the attempt's own route and the task's sandbox, also when resuming:
+      // a resumed Codex thread inherits none of them and would otherwise fall
+      // back to config defaults and write access.
       model: dispatch.model,
       reasoningEffort: dispatch.reasoningEffort,
-      sandbox: task.kind === "write" ? "workspace-write" : "read-only"
+      sandbox: task.kind === "write" ? "workspace-write" : "read-only",
+      ...(attempt.resumedFromAttemptId && retry?.resumeThreadId
+        ? { resumeThreadId: retry.resumeThreadId }
+        : {})
     };
     atomicWrite(files.specFile, `${JSON.stringify(spec, null, 2)}\n`);
     const child = spawn(process.execPath, [childScript, files.specFile], {
@@ -254,7 +267,8 @@ export function launchTaskWorker(
       terminalOutcome: policyRefusal ? "policy_refused" : "execution_failed",
       action: policyRefusal ? "refuse" : "execute",
       reasonCode: error.reasonCode ?? "worker_launch_failed",
-      signals: error.signals ?? ["worker_launch_error"]
+      signals: error.signals ?? ["worker_launch_error"],
+      launchFailed: true
     });
     throw error;
   }
@@ -309,7 +323,8 @@ export function pollRunWorkers(cwd, runId) {
         attemptId: attempt.id,
         status: recorded.task.status,
         threadId: status.threadId,
-        exitCode: status.exitCode
+        exitCode: status.exitCode,
+        ...(status.resumeFallback ? { resumeFallback: status.resumeFallback } : {})
       });
       continue;
     }
@@ -339,7 +354,8 @@ export function pollRunWorkers(cwd, runId) {
       status: failed.status,
       threadId: status.threadId,
       exitCode: status.exitCode,
-      error
+      error,
+      ...(status.resumeFallback ? { resumeFallback: status.resumeFallback } : {})
     });
   }
   return updates;

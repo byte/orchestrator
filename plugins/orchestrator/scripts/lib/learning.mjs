@@ -56,7 +56,8 @@ const SAFE_EVENT_TYPE_LIST = Object.freeze([
   "task.disposition_recorded",
   "task.integration_refused",
   "task.integration_failed",
-  "task.cancelled"
+  "task.cancelled",
+  "task.resume_fallback"
 ]);
 const SAFE_EVENT_TYPES = new Set(SAFE_EVENT_TYPE_LIST);
 const LABEL_PROVENANCE = new Set(["supervisor", "user", "imported"]);
@@ -489,7 +490,10 @@ function deriveExample(
       reasoningEffort: attempt.reasoningEffort ?? task.reasoningEffort ??
         run.workerPolicy?.reasoningEffort ?? null,
       routeSource,
-      routingReasonPresent: Boolean(task.routingReason)
+      routingReasonPresent: Boolean(task.routingReason),
+      // True only when the attempt really continued an earlier attempt's Codex
+      // thread; a warm retry that fell back to a fresh thread counts as cold.
+      warmStart: Boolean(attempt.resumedFromAttemptId) && !attempt.resumeFallback
     },
     outcome: safeOutcome(attempt.outcome),
     diagnostics: safeDiagnostics(attempt),
@@ -1179,7 +1183,10 @@ export function validateLearningExample(example) {
       throw new Error(`Learning source ${field} must be a positive integer.`);
     }
   }
+  // `warmStart` arrived with warm retries; samples collected earlier lack it and
+  // stay valid.
   assertExactKeys(example.features, [
+    ...(Object.hasOwn(example.features ?? {}, "warmStart") ? ["warmStart"] : []),
     "laneRef",
     "taskKind",
     "planRevision",
@@ -1223,6 +1230,8 @@ export function validateLearningExample(example) {
         (Number.isInteger(example.features.missingContractFieldCount) &&
           example.features.missingContractFieldCount >= 0)) ||
       typeof example.features.routingReasonPresent !== "boolean" ||
+      !(example.features.warmStart === undefined ||
+        typeof example.features.warmStart === "boolean") ||
       !(example.features.model === null || LEARNING_MODELS.has(example.features.model)) ||
       !(example.features.reasoningEffort === null ||
         LEARNING_EFFORTS.has(example.features.reasoningEffort))) {

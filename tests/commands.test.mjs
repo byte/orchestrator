@@ -59,7 +59,11 @@ test("the run command requires evidence gates and bounded retries", () => {
     "utf8"
   );
   assert.match(command, /evaluate every acceptance criterion/);
-  assert.match(command, /Retry transient worker failures once/);
+  assert.match(command, /Retry transient worker failures \(a crash, a missing result\) once; that retry starts cold/);
+  assert.match(command, /run retry <run-id> <task-id> \\\n\s+--note/);
+  assert.match(command, /A retry is warm by default/);
+  assert.match(command, /`--fresh`/);
+  assert.match(command, /two warm retries of the same task have failed/);
   assert.match(command, /run checkpoint <run-id>/);
   assert.match(
     command,
@@ -69,7 +73,7 @@ test("the run command requires evidence gates and bounded retries", () => {
   assert.match(command, /bounded advisory block/);
   assert.match(command, /--mode off/);
   assert.match(command, /--rollback/);
-  assert.match(command, /Every worker runs in its own isolated worktree/);
+  assert.match(command, /Every task runs in its own isolated worktree/);
 });
 
 test("the resume command restores durable state and keeps Claude in authority", () => {

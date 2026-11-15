@@ -85,7 +85,7 @@ Usage:
   orch run report <run-id> <task-id> --attempt <id> --result-file <path> [--json]
   orch run verify <run-id> <task-id> --verdict <pass|fail> [--evidence <text>]... [--json]
   orch run decide <run-id> <task-id> --outcome <policy_refused|authority_escalated|integration_failed> --action <refuse|escalate|replan> --reason-code <code> [--evidence <text>]... [--json]
-  orch run retry <run-id> <task-id> [--json]
+  orch run retry <run-id> <task-id> [--note <what to change>] [--fresh] [--json]
   orch run cancel <run-id> [task-id] [--reason <text>] [--json]
   orch run recover <run-id> [--json]
   orch run launch <run-id> <task-id> [--json]
@@ -366,6 +366,9 @@ function renderPollUpdate(update) {
       : "no model remains on the fallback ladder";
     return `${update.taskId}\t${update.status}\t${update.unavailableModel} unavailable; ${next}`;
   }
+  if (update.resumeFallback) {
+    return `${update.taskId}\t${update.status}\tresume fell back to a fresh thread (${update.resumeFallback.reason})`;
+  }
   return `${update.taskId}\t${update.status}`;
 }
 
@@ -490,7 +493,7 @@ function commandRun(argv, cwd) {
   }
 
   const { options, positionals } = parseArgs(rest, {
-    booleanOptions: ["json"],
+    booleanOptions: ["json", "fresh"],
     repeatableOptions: ["decision", "risk", "next", "evidence"],
     valueOptions: [
       "plan-file",
@@ -505,7 +508,8 @@ function commandRun(argv, cwd) {
       "outcome",
       "action",
       "reason-code",
-      "provenance"
+      "provenance",
+      "note"
     ]
   });
   const runId = positionals[0];
@@ -565,7 +569,7 @@ function commandRun(argv, cwd) {
     const substitutedThisPoll = updates.filter((update) => update.notice).map(renderPollUpdate);
     return options.json
       ? emitJson({ updates, recovery, substitutions, run, briefing, checkpoint: checkpointStatus(run) })
-      : emit(`${substitutedThisPoll.length ? `${substitutedThisPoll.join("\n")}\n\n` : ""}${briefing}\n\n## Active worker recovery\n\n${recovery.length ? recovery.map((item) => `- ${item.taskId}: ${item.model} (${item.reasoningEffort})${item.substitution ? `, substituted for ${item.requestedModel}${item.substitution.pinned ? " (user pin overridden)" : ""}` : ""}, pid ${item.runnerPid ?? "unknown"}, thread ${item.threadId ?? "pending"}, worktree ${item.worktreePath ?? "unavailable"}`).join("\n") : "- none"}`);
+      : emit(`${substitutedThisPoll.length ? `${substitutedThisPoll.join("\n")}\n\n` : ""}${briefing}\n\n## Active worker recovery\n\n${recovery.length ? recovery.map((item) => `- ${item.taskId}: ${item.model} (${item.reasoningEffort})${item.substitution ? `, substituted for ${item.requestedModel}${item.substitution.pinned ? " (user pin overridden)" : ""}` : ""}${item.resumedFromAttemptId ? `, ${item.resumeFallback ? "fresh fallback of a warm retry of" : "warm retry resuming"} ${item.resumedFromAttemptId}` : ""}, pid ${item.runnerPid ?? "unknown"}, thread ${item.threadId ?? "pending"}, worktree ${item.worktreePath ?? "unavailable"}`).join("\n") : "- none"}`);
   }
 
   if (action === "checkpoint") {
@@ -652,8 +656,20 @@ function commandRun(argv, cwd) {
     if (!taskId) {
       throw new Error("`orch run retry` requires a task id.");
     }
-    const task = retryTask(cwd, runId, taskId);
-    return options.json ? emitJson(task) : emit(`Task ${taskId} is pending retry.`);
+    const task = retryTask(cwd, runId, taskId, {
+      note: options.note,
+      fresh: Boolean(options.fresh)
+    });
+    const plan = task.retryPlan;
+    const how = plan.mode === "warm"
+      ? `warm: the next launch resumes the Codex thread of ${plan.previousAttemptId}`
+      : `fresh: the next launch starts a new Codex thread (${plan.reason})`;
+    const escalation = plan.escalationAdvised
+      ? `\n${plan.warmFailures} warm retries of this task have already failed; escalate the route one tier in a revised plan instead of retrying again.`
+      : "";
+    return options.json
+      ? emitJson(task)
+      : emit(`Task ${taskId} is pending retry, ${how}; retry note: ${plan.note ? "recorded" : "none"}.${escalation}`);
   }
 
   if (action === "cancel") {

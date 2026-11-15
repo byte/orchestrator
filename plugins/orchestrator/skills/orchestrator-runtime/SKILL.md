@@ -25,6 +25,14 @@ All support `--json` where structured output is useful.
   substitution on the attempt, in the run events, and in the briefing. Substitution is never
   silent. A substituted user pin is flagged; tell the user. An exhausted ladder fails the task
   with a `model_unavailable` outcome.
+- `run retry <run-id> <task-id> [--note <text>] [--fresh]` is warm by default: when the previous
+  attempt reached a result or verdict and has a thread id, the next `run launch` resumes that
+  Codex thread with the attempt's own model, effort, and sandbox, in the previous worktree (a
+  fresh worktree after an integration conflict). Crashes, missing results, cancellations, missing
+  thread ids, and `--fresh` start cold. Every retry briefing gets a "Previous attempt" section with
+  the outcome, supervisor evidence, note, and changed files; it is ordinary briefing text, not
+  guidance. A thread Codex no longer has falls back to a fresh thread with a
+  `task.resume_fallback` event. After two failed warm retries, escalate one tier instead.
 - New runs auto-route by default. The supervisor must save an exact model, effort, and concise
   routing reason on each planned task unless the user explicitly pinned that dimension. The
   runtime rejects unresolved automatic routes and conflicts with explicit pins.
@@ -59,7 +67,8 @@ Run JSON, events, worker status, structured results, PIDs, Codex thread ids, wor
 checkpoints, terminal attempt outcomes, verification evidence, and integration commits live under the self-ignored
 `.orchestrator/local/runs/`. The committed ledger carries durable project facts across machines.
 Run state version 6 adds the current model roster, the models found unavailable during the run,
-and per-attempt substitution records. Version 5 stores the active provisional policy plus frozen
+per-attempt substitution records, and optional warm-retry fields (`attempt.review`,
+`attempt.retry`, `attempt.resumedFromAttemptId`, `attempt.resumeFallback`, `task.pendingRetry`). Version 5 stores the active provisional policy plus frozen
 task and attempt selections; version-3 through version-5 runs remain readable, keep their
 persisted exact slugs, and version-3 and version-4 runs default to guidance disabled.
 

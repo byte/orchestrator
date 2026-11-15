@@ -35,7 +35,7 @@ function branchName(run, task, attempt) {
   return `orchestrator/${run.id}/${task.id}/${attempt.id}`;
 }
 
-export function createTaskWorktree(cwd, run, task, attempt) {
+function assertLaunchable(cwd, run) {
   if (!run.repository?.baseHead) {
     throw new WorktreeOperationError(
       "Worker isolation requires a repository with at least one commit.",
@@ -62,11 +62,41 @@ export function createTaskWorktree(cwd, run, task, attempt) {
       { reasonCode: "branch_drift", kind: "failed", signals: ["branch_drift"] }
     );
   }
+  return baseHead;
+}
+
+export function createTaskWorktree(cwd, run, task, attempt) {
+  const baseHead = assertLaunchable(cwd, run);
   const target = worktreePath(cwd, run, task, attempt);
   const branch = branchName(run, task, attempt);
   fs.mkdirSync(path.dirname(target), { recursive: true });
   git(cwd, ["worktree", "add", "-b", branch, target, baseHead]);
   return { path: target, branch, baseHead, createdAt: new Date().toISOString() };
+}
+
+/**
+ * A warm retry continues in the previous attempt's worktree, keeping its branch,
+ * its original base, its commits, and any uncommitted changes, so inspection and
+ * integration see the whole of the task's work. The same launch preconditions as
+ * a new worktree apply to the supervisor checkout.
+ */
+export function reuseTaskWorktree(cwd, run, previousAttempt) {
+  assertLaunchable(cwd, run);
+  const source = previousAttempt?.worktree;
+  if (!source?.path || !fs.existsSync(source.path)) {
+    throw new WorktreeOperationError(
+      `Worktree of attempt "${previousAttempt?.id}" is gone; retry with --fresh.`,
+      { reasonCode: "worktree_unavailable", kind: "failed", signals: ["worktree_unavailable"] }
+    );
+  }
+  return {
+    path: source.path,
+    branch: source.branch,
+    baseHead: source.baseHead,
+    createdAt: source.createdAt,
+    reusedFromAttemptId: previousAttempt.id,
+    reusedAt: new Date().toISOString()
+  };
 }
 
 function diffFiles(cwd, before, after) {
