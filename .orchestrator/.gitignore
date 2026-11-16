@@ -1,0 +1,3 @@
+# Machine-local orchestrator state. Thread ids and snapshots
+# are meaningless on another machine, so they are never committed.
+local/

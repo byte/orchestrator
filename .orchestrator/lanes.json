@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "schema": "orchestrator.lanes",
+  "schemaVersion": 1,
+  "lanes": {
+    "review": {
+      "description": "",
+      "scope": [
+        "plugins/**",
+        "tests/**",
+        "README.md",
+        "CHANGELOG.md"
+      ],
+      "constraints": [],
+      "done": "",
+      "createdAt": "2026-11-16T05:42:49.077Z",
+      "updatedAt": "2026-11-16T05:42:49.078Z"
+    }
+  }
+}
