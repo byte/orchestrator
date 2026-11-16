@@ -31,7 +31,7 @@ import {
   stopTaskWorker
 } from "../plugins/orchestrator/scripts/lib/workers.mjs";
 import { inspectTaskWorktree } from "../plugins/orchestrator/scripts/lib/worktrees.mjs";
-import { checkpointPlan, cleanup, makeRepo, runCli } from "./helpers.mjs";
+import { assertReadOnlyLaunch, checkpointPlan, cleanup, makeRepo, runCli } from "./helpers.mjs";
 
 const fixtures = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures");
 const askFixture = path.join(fixtures, "fake-codex-ask.mjs");
@@ -309,8 +309,9 @@ test("a question is answered with a reply on a read-only resume", async () => {
   assert.equal(task.status, "reported");
   assert.match(task.result.structured.summary, /reply=Use cursor pagination\./);
   const resumed = readLog(calls)[1];
-  assert.ok(resumed.argv.indexOf("--sandbox") < resumed.argv.indexOf("resume"));
-  assert.equal(resumed.argv[resumed.argv.indexOf("--sandbox") + 1], "read-only");
+  assertReadOnlyLaunch(resumed);
+  assert.ok(resumed.argv.includes("resume"));
+  assert.equal(fs.existsSync(resumed.tmpdir), false, "the scratch directory is removed after the worker");
   assert.match(resumed.prompt, /question: Should pagination be cursor-based or offset-based\?/);
   assert.match(resumed.prompt, /decision: Answered\. Proceed on the supervisor's reading below\./);
   verifyTask(root, "run-question", "work", { verdict: "pass", evidence: ["cursor pagination reviewed"] });

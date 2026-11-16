@@ -23,7 +23,8 @@ what should happen, what is acceptable, what gets integrated, and when the whole
 - A supervisor-routed mixed pool of exact Astra, Sol, Terra, and Luna workers
 - Recorded, never-silent fallback down the model ladder when Codex rejects a model as unavailable
 - One detached `codex exec` process and isolated Git worktree per task
-- Read-only sandboxes for analysis/review tasks and workspace-write sandboxes for implementation
+- Read-only sandboxes for analysis/review tasks and workspace-write sandboxes for implementation.
+  A read-only worker can still run tests: it gets a private, writable `TMPDIR`, and nothing else is writable.
 - JSON-schema-enforced worker reports with files, tests, decisions, assumptions, blockers, and
   confidence
 - Versioned terminal attempt outcomes that distinguish execution, contract, verification, policy,

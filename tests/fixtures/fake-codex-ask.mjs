@@ -6,7 +6,7 @@ import path from "node:path";
 // supervisor answers. It understands `exec ... resume <thread-id> -` like
 // fake-codex-resume.mjs (a resumed thread reports the same thread id; a thread id
 // listed in --missing has no rollout). Options placed before `exec`:
-//   --log=<file>          append {argv, cwd, prompt} for every invocation as JSONL
+//   --log=<file>          append {argv, cwd, prompt, tmpdir, tmpdirExists} for every invocation as JSONL
 //   --ask=scope:<paths>   ask for these comma-separated paths (scope_extension)
 //   --ask=question        ask a question with two options
 //   --asks=<n>            how many turns ask before finishing (default 1)
@@ -53,7 +53,7 @@ process.stdin.on("data", (chunk) => {
 });
 process.stdin.on("end", () => {
   if (log) {
-    fs.appendFileSync(log, `${JSON.stringify({ argv: args.slice(execIndex), cwd: process.cwd(), prompt })}\n`);
+    fs.appendFileSync(log, `${JSON.stringify({ argv: args.slice(execIndex), cwd: process.cwd(), prompt, tmpdir: process.env.TMPDIR ?? null, tmpdirExists: Boolean(process.env.TMPDIR && fs.existsSync(process.env.TMPDIR)) })}\n`);
   }
   if (resumeThreadId && resumeThreadId === missing) {
     process.stderr.write(

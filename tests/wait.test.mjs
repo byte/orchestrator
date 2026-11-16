@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -35,6 +36,45 @@ const stragglers = [];
 // Long enough that a test passing within it proves the file watch woke the wait,
 // short enough that a broken watch still fails the test rather than hanging it.
 const NO_FALLBACK_MS = 60000;
+
+/**
+ * Whether fs.watch delivers events for a directory under the temp root here.
+ * Some sandboxes (Codex's macOS seatbelt among them) block the file-event
+ * service, so a watch arms but never fires and `run wait` falls back to its
+ * interval. The tests that prove a *watch* woke the wait cannot pass there, so
+ * they are skipped with this reason instead of failing on the environment.
+ */
+async function watchDelivers() {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "orch-watch-probe-"));
+  let watcher = null;
+  let writer = null;
+  let timer = null;
+  try {
+    return await new Promise((resolve) => {
+      timer = setTimeout(() => resolve(false), 2000);
+      try {
+        // Only the probe's own file counts: macOS can report a stale event for a
+        // directory created a moment ago.
+        watcher = fs.watch(directory, (_event, filename) => {
+          if (String(filename ?? "") === "probe") {
+            resolve(true);
+          }
+        });
+        watcher.on("error", () => resolve(false));
+      } catch {
+        resolve(false);
+        return;
+      }
+      writer = setTimeout(() => fs.writeFileSync(path.join(directory, "probe"), "x"), 50);
+    });
+  } finally {
+    clearTimeout(timer);
+    clearTimeout(writer);
+    watcher?.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+}
+const WATCH_SKIP = (await watchDelivers()) ? false : "fs.watch delivers no file events here (for example inside the Codex sandbox)";
 
 function repo() {
   const root = makeRepo();
@@ -108,7 +148,7 @@ function runCliAsync(root, args) {
   });
 }
 
-test("run wait wakes on a file event when a slow worker completes, with the poll payload", async () => {
+test("run wait wakes on a file event when a slow worker completes, with the poll payload", { skip: WATCH_SKIP }, async () => {
   const root = repo();
   plan(root, "run-wake");
   launch(root, "run-wake", "work", [process.execPath, slowFixture, "--delay=500", "--complete"]);
@@ -372,7 +412,7 @@ test("runs saved before wall-clock limits existed load and wait on the tier defa
   assert.equal(pollRunWorkers(root, "run-v5-wait").length, 0);
 });
 
-test("a quiet worker does not make the wait poll on its own lock file", async () => {
+test("a quiet worker does not make the wait poll on its own lock file", { skip: WATCH_SKIP }, async () => {
   const root = repo();
   plan(root, "run-quiet");
   launch(root, "run-quiet", "work", [process.execPath, slowFixture, "--delay=10000"]);
@@ -384,7 +424,7 @@ test("a quiet worker does not make the wait poll on its own lock file", async ()
   assert.ok(result.polls <= 6, `expected a handful of polls, got ${result.polls}`);
 });
 
-test("a change to run.json made by another process wakes the wait", async () => {
+test("a change to run.json made by another process wakes the wait", { skip: WATCH_SKIP }, async () => {
   const root = repo();
   plan(root, "run-external");
   launch(root, "run-external", "work", [process.execPath, slowFixture, "--delay=10000"]);

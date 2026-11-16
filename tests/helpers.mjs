@@ -1,3 +1,4 @@
+import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
@@ -73,4 +74,28 @@ export function runCli(root, args) {
  */
 export function checkpointPlan(root, runId, summary = "plan approved") {
   return addCheckpoint(root, runId, { summary });
+}
+
+/**
+ * Assert that a logged Codex invocation (from a fixture's `--log`) ran read-only:
+ * no `--sandbox` flag (it would override the profile), the orchestrator's
+ * read profile extending `:read-only`, and write access granted only to the
+ * private scratch directory the worker saw as TMPDIR, outside the worktree.
+ */
+export function assertReadOnlyLaunch(entry) {
+  const { argv } = entry;
+  assert.equal(argv.includes("--sandbox"), false, "read-only launches must not pass --sandbox");
+  assert.equal(argv.includes("workspace-write"), false);
+  const values = argv.flatMap((arg, index) => (arg === "-c" ? [argv[index + 1]] : []));
+  assert.ok(values.includes('default_permissions="orchestrator-read"'), values.join(" "));
+  assert.ok(values.includes('permissions.orchestrator-read.extends=":read-only"'), values.join(" "));
+  const filesystem = values.filter((value) => value.startsWith("permissions.orchestrator-read.filesystem="));
+  assert.equal(filesystem.length, 1);
+  assert.equal(filesystem[0], `permissions.orchestrator-read.filesystem={${JSON.stringify(entry.tmpdir)}="write"}`);
+  assert.ok(entry.tmpdirExists, "the scratch TMPDIR exists while the worker runs");
+  assert.equal(path.relative(entry.cwd, entry.tmpdir).startsWith(".."), true, "scratch is outside the worktree");
+  const resumeAt = argv.indexOf("resume");
+  if (resumeAt !== -1) {
+    assert.ok(argv.lastIndexOf("-c", argv.indexOf(filesystem[0])) < resumeAt, "sandbox config precedes resume");
+  }
 }

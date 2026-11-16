@@ -4,6 +4,13 @@
 
 Fixes:
 
+- Read and verify workers can run tests. `--sandbox read-only` denied every
+  write, the system temp directory included, so a reviewer could not run a
+  suite that creates temporary files. These workers now get a Codex
+  permissions profile that extends `:read-only` with write access to one
+  private scratch directory, exported as `TMPDIR` and removed when the worker
+  exits. The worktree stays unwritable. The wait tests that need file-change
+  events skip, with the reason, where the sandbox blocks those events.
 - `run wait` no longer wakes on its own lock file. Every poll takes
   `run.json.lock`, and the run-directory watch let that name through, so a wait
   on a quiet worker polled about ten times a second instead of sleeping.

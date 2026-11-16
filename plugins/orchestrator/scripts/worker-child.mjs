@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 function atomicWrite(filePath, payload) {
   const temporary = `${filePath}.${process.pid}.tmp`;
@@ -37,6 +39,33 @@ function writeStatus(fields) {
   });
 }
 
+// A read-only worker still needs somewhere to put temporary files, or it cannot
+// run the tests it is reviewing: Codex's `--sandbox read-only` denies every
+// write, the system temp directory included. Instead of that flag, a read-only
+// worker gets a permissions profile that extends Codex's built-in `:read-only`
+// with write access to one private scratch directory, exported as TMPDIR. The
+// worktree and everything else stay unwritable. `--sandbox` must be left out:
+// when both are given, it wins over the profile (verified against Codex CLI
+// 0.169.0). The scratch directory is removed when the worker finishes.
+const READ_PROFILE = "orchestrator-read";
+const scratchDir = spec.sandbox === "read-only"
+  ? fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "orch-worker-")))
+  : null;
+
+function sandboxArgs() {
+  if (!scratchDir) {
+    return ["--sandbox", spec.sandbox];
+  }
+  return [
+    "-c",
+    `default_permissions="${READ_PROFILE}"`,
+    "-c",
+    `permissions.${READ_PROFILE}.extends=":read-only"`,
+    "-c",
+    `permissions.${READ_PROFILE}.filesystem={${JSON.stringify(scratchDir)}="write"}`
+  ];
+}
+
 writeStatus({ status: "running" });
 
 const output = fs.createWriteStream(spec.outputFile, { flags: "a", mode: 0o600 });
@@ -49,8 +78,8 @@ const fallbackPrompt = spec.fallbackPromptFile ? fs.readFileSync(spec.fallbackPr
 const [command, ...prefixArgs] = spec.codexCommand;
 
 // A resumed thread does not inherit its model, effort, or sandbox (verified against
-// Codex CLI 0.169.0), so every launch passes all three explicitly. `-C` and
-// `--sandbox` are only accepted on `exec`, before `resume`.
+// Codex CLI 0.169.0), so every launch passes all three explicitly. `-C` and the
+// sandbox arguments are only accepted on `exec`, before `resume`.
 function codexArgs(resumeThreadId) {
   const route = [
     "--model",
@@ -65,7 +94,7 @@ function codexArgs(resumeThreadId) {
     "--output-last-message",
     spec.lastMessageFile
   ];
-  const head = [...prefixArgs, "exec", "-C", spec.worktreePath, "--sandbox", spec.sandbox];
+  const head = [...prefixArgs, "exec", "-C", spec.worktreePath, ...sandboxArgs()];
   return resumeThreadId
     ? [...head, "resume", ...route, ...io, resumeThreadId, "-"]
     : [...head, ...route, ...io, "-"];
@@ -91,7 +120,7 @@ function runCodex(resumeThreadId, input = prompt) {
   return new Promise((resolve) => {
     const child = spawn(command, codexArgs(resumeThreadId), {
       cwd: spec.worktreePath,
-      env: process.env,
+      env: scratchDir ? { ...process.env, TMPDIR: scratchDir } : process.env,
       stdio: ["pipe", "pipe", "pipe"]
     });
     current = child;
@@ -202,3 +231,6 @@ if (result.error) {
 }
 output.end();
 errors.end();
+if (scratchDir) {
+  fs.rmSync(scratchDir, { recursive: true, force: true });
+}

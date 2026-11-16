@@ -9,7 +9,7 @@ import path from "node:path";
 //   "Error: thread/resume: thread/resume failed: no rollout found for thread id
 //   <id> (code -32600)" on stderr.
 // Options placed before `exec` (they end up in the orchestrator's codexCommand):
-//   --log=<file>       append {argv, cwd, prompt} for every invocation as JSONL
+//   --log=<file>       append {argv, cwd, prompt, tmpdir, tmpdirExists} for every invocation as JSONL
 //   --missing=<id>     treat this thread id as having no rollout
 //   --write            append a line to src/notes.txt and commit it
 //   --fresh-delay=<ms> a fresh (non-resumed) thread runs this long before finishing
@@ -32,7 +32,7 @@ process.stdin.on("data", (chunk) => {
 });
 process.stdin.on("end", () => {
   if (log) {
-    fs.appendFileSync(log, `${JSON.stringify({ argv: args.slice(execIndex), cwd: process.cwd(), prompt })}\n`);
+    fs.appendFileSync(log, `${JSON.stringify({ argv: args.slice(execIndex), cwd: process.cwd(), prompt, tmpdir: process.env.TMPDIR ?? null, tmpdirExists: Boolean(process.env.TMPDIR && fs.existsSync(process.env.TMPDIR)) })}\n`);
   }
   if (resumeThreadId && resumeThreadId === missing) {
     process.stderr.write(

@@ -316,17 +316,36 @@ real resume reports the same thread id it was given.
    codex exec -C <worktree> \
      --model <resolved task model> \
      -c model_reasoning_effort="<resolved task effort>" \
-     --sandbox <read-only|workspace-write> \
+     <sandbox arguments> \
      --json \
      --output-schema <schema> \
      --output-last-message <result> -
    ```
 
-   For a warm retry it resumes the previous attempt's thread instead, with `-C` and `--sandbox`
-   on `exec` (Codex rejects them after `resume`) and the attempt's own route after it:
+   A write task's sandbox arguments are `--sandbox workspace-write`. A read or verify task gets
+   no `--sandbox` flag; it gets a permissions profile instead, so it can run the tests it is
+   checking:
 
    ```text
-   codex exec -C <worktree> --sandbox <read-only|workspace-write> resume \
+   -c default_permissions="orchestrator-read"
+   -c permissions.orchestrator-read.extends=":read-only"
+   -c permissions.orchestrator-read.filesystem={"<scratch>"="write"}
+   ```
+
+   `<scratch>` is a fresh private directory under the system temp root, exported to Codex as
+   `TMPDIR` and removed when the worker exits. Plain `--sandbox read-only` denies every write,
+   the temp root included, so a reviewer could not create the temporary repositories a test
+   suite needs. The profile keeps the worktree and everything else unwritable. `--sandbox` must
+   not be passed alongside it: with both, `--sandbox read-only` wins and the scratch directory is
+   denied too. Verified against Codex CLI 0.169.0 on macOS, for a fresh `exec` and for
+   `exec ... resume`: a write to the scratch directory succeeded and a write to the worktree
+   failed with EPERM.
+
+   For a warm retry it resumes the previous attempt's thread instead, with `-C` and the sandbox
+   arguments on `exec` (Codex rejects them after `resume`) and the attempt's own route after it:
+
+   ```text
+   codex exec -C <worktree> <sandbox arguments> resume \
      --model <attempt model> -c model_reasoning_effort="<attempt effort>" \
      --json --output-schema <schema> --output-last-message <result> <thread-id> -
    ```

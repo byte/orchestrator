@@ -25,7 +25,7 @@ import {
 } from "../plugins/orchestrator/scripts/lib/runs.mjs";
 import { launchTaskWorker, pollRunWorkers } from "../plugins/orchestrator/scripts/lib/workers.mjs";
 import { inspectTaskWorktree } from "../plugins/orchestrator/scripts/lib/worktrees.mjs";
-import { checkpointPlan, cleanup, git, makeRepo, runCli } from "./helpers.mjs";
+import { assertReadOnlyLaunch, checkpointPlan, cleanup, git, makeRepo, runCli } from "./helpers.mjs";
 
 const fixtures = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures");
 const resumeFixture = path.join(fixtures, "fake-codex-resume.mjs");
@@ -306,9 +306,12 @@ test("a resumed read-only task is still launched read-only", async () => {
   const [fresh, resumed] = readLog(calls);
   assert.equal(fresh.argv.includes("resume"), false);
   assert.ok(resumed.argv.includes("resume"));
-  assert.equal(resumed.argv[resumed.argv.indexOf("--sandbox") + 1], "read-only");
-  assert.ok(resumed.argv.indexOf("--sandbox") < resumed.argv.indexOf("resume"));
-  assert.equal(resumed.argv.includes("workspace-write"), false);
+  assertReadOnlyLaunch(fresh);
+  assertReadOnlyLaunch(resumed);
+  // Each worker gets its own scratch directory, and neither outlives its worker.
+  assert.notEqual(fresh.tmpdir, resumed.tmpdir);
+  assert.equal(fs.existsSync(fresh.tmpdir), false);
+  assert.equal(fs.existsSync(resumed.tmpdir), false);
 });
 
 test("a missing thread falls back to a fresh launch with a recorded event", async () => {
@@ -342,7 +345,7 @@ test("a missing thread falls back to a fresh launch with a recorded event", asyn
   assert.equal(log[2].argv.includes("resume"), false);
   // The fresh fallback receives the same self-contained briefing.
   assert.equal(log[2].prompt, log[1].prompt);
-  assert.equal(log[2].argv[log[2].argv.indexOf("--sandbox") + 1], "read-only");
+  assertReadOnlyLaunch(log[2]);
 
   const events = fs.readFileSync(eventsFile(root, "run-missing"), "utf8")
     .split("\n").filter(Boolean).map((line) => JSON.parse(line));
