@@ -2385,6 +2385,11 @@ export function answerTask(
     task.result = null;
     task.updatedAt = nowIso();
     refreshRunStatus(run);
+    // Render before saving: a failure here (an unreadable ledger, say) must leave
+    // the task waiting for input, not dispatching with no runner and no rollback.
+    const route = { model: attempt.model, reasoningEffort: attempt.reasoningEffort };
+    const answerPrompt = renderAnswerPrompt(task, round);
+    const briefing = renderWorkerBriefing(cwd, run, task, lane, route);
     writeRun(cwd, run);
     try {
       appendEvent(cwd, id, {
@@ -2402,7 +2407,6 @@ export function answerTask(
     } catch (error) {
       throw new AnswerSavedError(error.message, { attemptId: attempt.id });
     }
-    const route = { model: attempt.model, reasoningEffort: attempt.reasoningEffort };
     return {
       runId: id,
       taskId: task.id,
@@ -2413,8 +2417,8 @@ export function answerTask(
       resumeThreadId: attempt.threadId,
       worktree: attempt.worktree,
       scope: effectiveTaskScope(task),
-      answerPrompt: renderAnswerPrompt(task, round),
-      briefing: renderWorkerBriefing(cwd, run, task, lane, route)
+      answerPrompt,
+      briefing
     };
   });
 }
@@ -2474,6 +2478,11 @@ export function attachExecution(cwd, runId, taskId, { attemptId, worktree, runne
     // Only a dispatching attempt takes its worker. One cancelled while the worker
     // was spawned must stay cancelled; the caller stops the worker instead.
     if (attempt.status !== "dispatching" || task.status !== "dispatching") {
+      // Keep the worktree the launch created, so `run cleanup` can remove it.
+      if (!attempt.worktree && worktree) {
+        attempt.worktree = worktree;
+        writeRun(cwd, run);
+      }
       throw new AttachRefusedError(
         `Attempt "${attempt.id}" is ${attempt.status}, not dispatching; its worker was not attached.`
       );
@@ -2642,7 +2651,8 @@ export function failTaskAttempt(
     provenance = "automatic",
     signals = ["worker_process_error"],
     launchFailed = false,
-    runnerStatusFile
+    runnerStatusFile,
+    worktree = null
   }
 ) {
   const id = assertId(runId, "run");
@@ -2667,6 +2677,11 @@ export function failTaskAttempt(
     attempt.status = "failed";
     attempt.finishedAt = nowIso();
     attempt.error = String(error ?? "Worker execution failed.");
+    // A launch that created a worktree but never attached it records it here,
+    // so `run cleanup` can remove it.
+    if (!attempt.worktree && worktree) {
+      attempt.worktree = worktree;
+    }
     if (launchFailed) {
       // Codex never started, so this attempt has nothing to carry forward; a
       // later retry still resumes from the attempt before it.

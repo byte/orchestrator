@@ -131,6 +131,7 @@ test("a write worker is not probed and keeps --sandbox workspace-write", async (
   assert.equal(launch.argv[launch.argv.indexOf("--sandbox") + 1], "workspace-write");
   // Write workers keep the user's approval policy; see docs/architecture.md.
   assert.equal(launch.argv.includes('approval_policy="never"'), false);
+  assert.equal(launch.argv.includes("--ignore-rules"), false);
   assert.equal(task.attempts[0].sandboxFallback, undefined);
 });
 
@@ -177,15 +178,17 @@ test("a worker stopped while proving its profile stops the probe, launches nothi
   assert.equal(fs.existsSync(calls), false, "Codex was never launched");
 });
 
-test("a scratch directory inside the checkout is refused and the worker falls back", async () => {
-  const root = setup("run-profile-inside");
+for (const [name, dir] of [["", "tmp-inside"], [" even when its name starts with ..", "..tmp-inside"]]) {
+test(`a scratch directory inside the checkout is refused and the worker falls back${name}`, async () => {
+  const runId = `run-profile-inside${dir.startsWith("..") ? "-dots" : ""}`;
+  const root = setup(runId);
   const calls = logFile();
-  const inner = path.join(root, "tmp-inside");
+  const inner = path.join(root, dir);
   fs.mkdirSync(inner);
   const saved = process.env.TMPDIR;
   process.env.TMPDIR = inner;
   try {
-    launchTaskWorker(root, "run-profile-inside", "work", lane, {
+    launchTaskWorker(root, runId, "work", lane, {
       codexCommand: [process.execPath, resumeFixture, `--log=${calls}`]
     });
   } finally {
@@ -195,34 +198,120 @@ test("a scratch directory inside the checkout is refused and the worker falls ba
       process.env.TMPDIR = saved;
     }
   }
-  const task = await settle(root, "run-profile-inside");
+  const task = await settle(root, runId);
   assert.equal(task.attempts[0].sandboxFallback.reason, "scratch_inside_checkout");
   const [launch] = readLog(calls);
   assert.equal(launch.argv[launch.argv.indexOf("--sandbox") + 1], "read-only");
   assert.equal(launch.argv.some((arg) => arg.startsWith("default_permissions=")), false);
+  // The fallback keeps the escalation and rule pins.
+  assert.ok(launch.argv.includes('approval_policy="never"'));
+  assert.ok(launch.argv.includes("--ignore-rules"));
+});
+}
+
+test("a stopped probe whose launcher left a child holding its pipes still ends the worker", async () => {
+  const root = setup("run-profile-stop-child");
+  const calls = logFile();
+  const pidFile = path.join(path.dirname(calls), "probe-child.pid");
+  const launched = launchTaskWorker(root, "run-profile-stop-child", "work", lane, {
+    codexCommand: [process.execPath, resumeFixture, `--log=${calls}`, "--sandbox-probe=hang-child", `--sandbox-probe-pid=${pidFile}`]
+  });
+  const deadline = Date.now() + 10000;
+  while (!fs.existsSync(pidFile) && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 40));
+  }
+  const childPid = Number(fs.readFileSync(pidFile, "utf8"));
+  const scratch = JSON.parse(fs.readFileSync(launched.runner.statusFile, "utf8")).scratchDir;
+  stopTaskWorker(loadRun(root, "run-profile-stop-child").tasks.work.attempts[0]);
+  try {
+    assert.ok(await gone(childPid), `probe child ${childPid} still running`);
+    assert.ok(await gone(launched.runner.pid), `wrapper ${launched.runner.pid} still running`);
+  } finally {
+    try {
+      process.kill(childPid, "SIGKILL");
+    } catch {
+      // Already gone.
+    }
+  }
+  const status = JSON.parse(fs.readFileSync(launched.runner.statusFile, "utf8"));
+  assert.equal(status.status, "cancelled");
+  assert.equal(fs.existsSync(scratch), false, "scratch removed after a stop");
+});
+
+test("a read worker that leaves an unreadable directory in its scratch still has it removed", async () => {
+  const root = setup("run-profile-locked");
+  const calls = logFile();
+  const launched = launchTaskWorker(root, "run-profile-locked", "work", lane, {
+    codexCommand: [process.execPath, resumeFixture, `--log=${calls}`, "--lock-tmpdir"]
+  });
+  const task = await settle(root, "run-profile-locked");
+  assert.equal(task.status, "reported");
+  const status = JSON.parse(fs.readFileSync(launched.runner.statusFile, "utf8"));
+  assert.ok(status.scratchDir);
+  assert.ok(await gone(launched.runner.pid), "the wrapper exits");
+  assert.equal(fs.existsSync(status.scratchDir), false, "scratch removed despite a chmod 000 directory");
 });
 
 test("run cleanup removes a scratch directory a hard-killed worker left, and nothing else", () => {
   const root = setup("run-profile-leftover");
   const attemptDir = path.join(path.dirname(runFile(root, "run-profile-leftover")), "workers", "work", "work-attempt-1");
-  const roundDir = path.join(attemptDir, "round-1");
-  fs.mkdirSync(roundDir, { recursive: true });
-  const leftover = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "orch-worker-"));
-  const live = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "orch-worker-"));
-  const unrelated = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "not-orch-"));
-  fs.writeFileSync(path.join(attemptDir, "status.json"), JSON.stringify({ pid: 999999999, status: "running", scratchDir: leftover }));
-  fs.writeFileSync(path.join(roundDir, "status.json"), JSON.stringify({ pid: process.pid, status: "running", scratchDir: live }));
-  const other = path.join(attemptDir, "other");
-  fs.mkdirSync(other);
-  fs.writeFileSync(path.join(other, "status.json"), JSON.stringify({ pid: 999999999, status: "failed", scratchDir: unrelated }));
+  const tmp = fs.realpathSync(os.tmpdir());
+  const made = [];
+  const scratch = (prefix = "orch-worker-") => {
+    const dir = fs.mkdtempSync(path.join(tmp, prefix));
+    made.push(dir);
+    return dir;
+  };
+  // A runner directory with a status file; `owner` writes the marker the wrapper writes.
+  const runner = (name, status, { owner = true } = {}) => {
+    const dir = path.join(attemptDir, name);
+    fs.mkdirSync(dir, { recursive: true });
+    const statusFile = path.join(dir, "status.json");
+    fs.writeFileSync(statusFile, JSON.stringify(status));
+    if (owner && status.scratchDir && fs.existsSync(status.scratchDir)) {
+      fs.writeFileSync(path.join(status.scratchDir, ".orch-worker-owner"), statusFile);
+    }
+    return statusFile;
+  };
+  const leftover = scratch();
+  fs.mkdirSync(path.join(leftover, "locked", "deeper"), { recursive: true });
+  fs.writeFileSync(path.join(leftover, "locked", "deeper", "file"), "x");
+  fs.chmodSync(path.join(leftover, "locked"), 0o000);
+  runner(".", { pid: 999999999, status: "running", scratchDir: leftover });
+  const live = scratch();
+  runner("round-1", { pid: process.pid, status: "running", scratchDir: live });
+  // Cancelled is written before the processes exit: a live Codex child keeps it.
+  const stopping = scratch();
+  runner("round-2", { pid: 999999999, childPid: process.pid, status: "cancelled", scratchDir: stopping });
+  const unrelated = scratch("not-orch-");
+  runner("other", { pid: 999999999, status: "failed", scratchDir: unrelated });
+  // Named like a scratch directory but not owned: a forged status file.
+  const forged = scratch();
+  runner("forged", { pid: 999999999, status: "failed", scratchDir: forged }, { owner: false });
+  // Owned by another runner's status file.
+  const stolen = scratch();
+  fs.writeFileSync(path.join(stolen, ".orch-worker-owner"), path.join(root, "elsewhere", "status.json"));
+  runner("stolen", { pid: 999999999, status: "failed", scratchDir: stolen }, { owner: false });
+  // A symlink to an owned scratch directory is not followed.
+  const target = scratch();
+  const link = path.join(tmp, `orch-worker-link-${process.pid}`);
+  fs.symlinkSync(target, link);
+  made.push(link);
+  const linkStatus = runner("link", { pid: 999999999, status: "failed", scratchDir: link }, { owner: false });
+  fs.writeFileSync(path.join(target, ".orch-worker-owner"), linkStatus);
   try {
     assert.deepEqual(removeLeftoverScratch(root, "run-profile-leftover", "work", "work-attempt-1"), [leftover]);
-    assert.equal(fs.existsSync(leftover), false);
+    assert.equal(fs.existsSync(leftover), false, "an owned, dead runner's scratch is removed, unreadable parts too");
     assert.equal(fs.existsSync(live), true, "a live worker's scratch is kept");
+    assert.equal(fs.existsSync(stopping), true, "a cancelled runner whose child is alive keeps its scratch");
     assert.equal(fs.existsSync(unrelated), true, "a directory not named like a worker scratch is kept");
+    assert.equal(fs.existsSync(forged), true, "a directory without the owner file is kept");
+    assert.equal(fs.existsSync(stolen), true, "a directory owned by another status file is kept");
+    assert.equal(fs.existsSync(target), true, "a symlinked directory is not followed");
   } finally {
-    fs.rmSync(live, { recursive: true, force: true });
-    fs.rmSync(unrelated, { recursive: true, force: true });
+    for (const dir of made) {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   }
 });
 

@@ -5,6 +5,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { removeTree, SCRATCH_OWNER_FILE } from "./lib/remove-tree.mjs";
+
 function atomicWrite(filePath, payload) {
   const temporary = `${filePath}.${process.pid}.tmp`;
   fs.writeFileSync(temporary, `${JSON.stringify(payload, null, 2)}\n`, {
@@ -62,6 +64,12 @@ const [command, ...prefixArgs] = spec.codexCommand;
 const scratchDir = spec.sandbox === "read-only"
   ? fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "orch-worker-")))
   : null;
+// `run cleanup` removes a scratch directory a hard-killed wrapper left behind
+// only if it names this runner's status file, so a forged `scratchDir` cannot
+// point it at an unrelated directory.
+if (scratchDir) {
+  fs.writeFileSync(path.join(scratchDir, SCRATCH_OWNER_FILE), path.resolve(spec.statusFile), { flag: "wx", mode: 0o600 });
+}
 
 // A read worker never needs to leave its sandbox, so it may not ask to: with a
 // user config such as `approval_policy = "on-request"` and an automatic approvals
@@ -69,7 +77,10 @@ const scratchDir = spec.sandbox === "read-only"
 // once the reviewer approves it, which would bypass the read-only boundary. Both
 // launch paths, the profile and the plain `--sandbox read-only` fallback, pin
 // `approval_policy="never"`, so an escalation request is refused outright.
-const READ_APPROVAL = ["-c", 'approval_policy="never"'];
+// That alone is not enough: a persisted execpolicy rule (`~/.codex/rules/*.rules`,
+// "always allow" prefixes such as `node` or `npm test`) runs a matching command
+// outside the sandbox without asking. A read worker loads no rules at all.
+const READ_APPROVAL = ["-c", 'approval_policy="never"', "--ignore-rules"];
 
 function readProfileArgs() {
   return [
@@ -90,7 +101,9 @@ function inside(parent, child) {
     return false;
   }
   const relative = path.relative(base, child);
-  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+  // `..tmp` is a directory inside the parent; only `..` itself or `../…` leaves it.
+  const leaves = relative === ".." || relative.startsWith(`..${path.sep}`);
+  return relative === "" || (!leaves && !path.isAbsolute(relative));
 }
 
 // Without `--sandbox`, a read worker is read-only only if Codex applies the
@@ -130,20 +143,48 @@ async function probeReadProfile() {
       command,
       [...prefixArgs, "sandbox", ...readProfileArgs(), "--", process.execPath, "-e", PROBE_SCRIPT,
         scratchDir, spec.worktreePath, marker],
-      { cwd: spec.worktreePath, env: { ...process.env, TMPDIR: scratchDir }, stdio: ["ignore", "pipe", "pipe"] }
+      // Its own process group: a launcher (the npm `codex` script) runs the native
+      // binary as a child, and killing only the launcher leaves that child holding
+      // the pipes, so the probe would never close.
+      { cwd: spec.worktreePath, env: { ...process.env, TMPDIR: scratchDir }, stdio: ["ignore", "pipe", "pipe"], detached: true }
     );
-    current = child;
-    const timer = setTimeout(() => child.kill("SIGKILL"), 30000);
+    let settled = false;
+    const finish = (value) => {
+      if (!settled) {
+        settled = true;
+        clearTimeout(timer);
+        clearTimeout(grace);
+        resolve(value);
+      }
+    };
+    const killGroup = (signal) => {
+      try {
+        process.kill(-child.pid, signal);
+      } catch {
+        try {
+          child.kill(signal);
+        } catch {
+          // Already gone.
+        }
+      }
+    };
+    let grace = null;
+    // A stop or the timeout kills the whole group, and gives up waiting for the
+    // pipes shortly after, so a descendant that survives cannot hang the wrapper.
+    const abandon = (signal) => {
+      killGroup(signal);
+      grace ??= setTimeout(() => {
+        child.stdout.destroy();
+        child.stderr.destroy();
+        finish({ code: null, signal, stdout, stderr });
+      }, 2000);
+    };
+    current = { kill: (signal) => abandon(signal === "SIGINT" ? "SIGINT" : "SIGKILL") };
+    const timer = setTimeout(() => abandon("SIGKILL"), 30000);
     child.stdout.setEncoding("utf8").on("data", (chunk) => { stdout += chunk; });
     child.stderr.setEncoding("utf8").on("data", (chunk) => { stderr += chunk; });
-    child.on("error", (error) => {
-      clearTimeout(timer);
-      resolve({ error, stdout, stderr });
-    });
-    child.on("close", (code, signal) => {
-      clearTimeout(timer);
-      resolve({ code, signal, stdout, stderr });
-    });
+    child.on("error", (error) => finish({ error, stdout, stderr }));
+    child.on("close", (code, signal) => finish({ code, signal, stdout, stderr }));
   });
   current = null;
   let observed = null;
@@ -301,8 +342,14 @@ function runCodex(resumeThreadId, input = prompt) {
 }
 
 function finishScratch() {
-  if (scratchDir) {
-    fs.rmSync(scratchDir, { recursive: true, force: true });
+  if (!scratchDir) {
+    return;
+  }
+  try {
+    removeTree(scratchDir);
+  } catch (error) {
+    // Left for `run cleanup`; the worker's own result still stands.
+    errors.write(`[orchestrator] could not remove scratch ${scratchDir}: ${error.message}\n`);
   }
 }
 
@@ -316,9 +363,9 @@ if (scratchDir) {
   if (stopping) {
     // Stopped while proving the profile: nothing was launched.
     writeStatus({ status: "cancelled", finishedAt: new Date().toISOString(), exitCode: null, signal: null });
+    finishScratch();
     output.end();
     errors.end();
-    finishScratch();
     process.exit(0);
   }
 }
@@ -368,6 +415,6 @@ if (result.error) {
     signal: result.signal
   });
 }
+finishScratch();
 output.end();
 errors.end();
-finishScratch();

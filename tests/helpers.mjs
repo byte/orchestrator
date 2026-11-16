@@ -97,11 +97,13 @@ export function assertReadOnlyLaunch(entry) {
   assert.equal(filesystem[0], `permissions.${name}.filesystem={${JSON.stringify(entry.tmpdir)}="write"}`);
   assert.equal(values.filter((value) => value.startsWith("permissions.")).length, 2, "no other permission keys");
   assert.ok(values.includes('approval_policy="never"'), "a read worker may not request escalation");
+  assert.ok(argv.includes("--ignore-rules"), "a read worker loads no execpolicy allow rules");
   assert.ok(entry.tmpdirExists, "the scratch TMPDIR exists while the worker runs");
   assert.equal(path.relative(entry.cwd, entry.tmpdir).startsWith(".."), true, "scratch is outside the worktree");
   const resumeAt = argv.indexOf("resume");
   if (resumeAt !== -1) {
     assert.ok(argv.indexOf(filesystem[0]) < resumeAt, "sandbox config precedes resume");
+    assert.ok(argv.indexOf("--ignore-rules") < resumeAt, "--ignore-rules precedes resume");
   }
   return name;
 }

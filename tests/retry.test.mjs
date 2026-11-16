@@ -546,6 +546,66 @@ test("an older declaration does not cover a later attempt's undeclared change", 
   assert.deepEqual(latest.undeclared, ["src/a.js"]);
 });
 
+test("a file changed and restored by commits still counts as changed", () => {
+  const root = makeRepo();
+  repos.push(root);
+  const head = () => git(root, ["rev-parse", "HEAD"]).trim();
+  const write = (file, text) => {
+    fs.mkdirSync(path.dirname(path.join(root, file)), { recursive: true });
+    fs.writeFileSync(path.join(root, file), text, "utf8");
+    git(root, ["add", file]);
+    git(root, ["commit", "--quiet", "-m", `${file}: ${text}`]);
+  };
+  const declared = (files) => ({ structured: { files_touched: files } });
+  const baseHead = head();
+  // Attempt 1 changes and declares a.
+  write("src/a.js", "a\n");
+  const reuse2 = head();
+  // Attempt 2 changes a and restores it, declaring nothing.
+  write("src/a.js", "tampered\n");
+  write("src/a.js", "a\n");
+  const reuse3 = head();
+  // Attempt 3 changes nothing of its own.
+  const at = (extra) => ({ path: root, branch: "main", baseHead, ...extra });
+  const task = {
+    id: "work",
+    scope: ["src/**"],
+    result: declared([]),
+    attempts: [
+      { id: "work-attempt-1", worktree: at({}), review: { result: declared(["src/a.js"]) } },
+      { id: "work-attempt-2", worktree: at({ reusedHead: reuse2 }), review: { result: declared([]) } },
+      { id: "work-attempt-3", worktree: at({ reusedHead: reuse3 }) }
+    ]
+  };
+  const inspection = inspectTaskWorktree(task, task.attempts[2]);
+  assert.deepEqual(inspection.carried, [], "attempt 2 changed a last, and did not declare it");
+  assert.deepEqual(inspection.undeclared, ["src/a.js"]);
+  assert.equal(inspection.ready, false);
+
+  // A single attempt that changes an out-of-scope file and restores it is still
+  // out of scope: integration would cherry-pick both commits.
+  const solo = makeRepo();
+  repos.push(solo);
+  const soloBase = git(solo, ["rev-parse", "HEAD"]).trim();
+  for (const [file, text] of [["src/b.js", "b\n"], ["docs/x.md", "x\n"]]) {
+    fs.mkdirSync(path.dirname(path.join(solo, file)), { recursive: true });
+    fs.writeFileSync(path.join(solo, file), text, "utf8");
+    git(solo, ["add", file]);
+    git(solo, ["commit", "--quiet", "-m", file]);
+  }
+  git(solo, ["rm", "--quiet", "docs/x.md"]);
+  git(solo, ["commit", "--quiet", "-m", "restore"]);
+  const one = {
+    id: "work",
+    scope: ["src/**"],
+    result: declared(["src/b.js"]),
+    attempts: [{ id: "work-attempt-1", worktree: { path: solo, branch: "main", baseHead: soloBase } }]
+  };
+  const single = inspectTaskWorktree(one, one.attempts[0]);
+  assert.deepEqual(single.outOfScope, ["docs/x.md"]);
+  assert.equal(single.ready, false);
+});
+
 test("a retry note reaches the worker when no earlier attempt reached one", () => {
   const root = repo();
   plan(root, "run-note-launch");

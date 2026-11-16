@@ -30,6 +30,7 @@ import {
 } from "../plugins/orchestrator/scripts/lib/runs.mjs";
 import {
   answerTaskWorker,
+  cancelWorkers,
   launchTaskWorker,
   pollRunWorkers,
   stopTaskWorker
@@ -914,6 +915,44 @@ test("a cancellation while a worker is launched stays cancelled and the worker i
   assert.equal(task.attempts[0].outcome.terminalOutcome, "cancelled");
   const status = JSON.parse(fs.readFileSync(path.join(path.dirname(runFile(root, "run-launch-cancel")), "workers", "work", "work-attempt-1", "status.json"), "utf8"));
   assert.ok(await gone(status.pid), `launched worker ${status.pid} still running after cancellation`);
+  // The worktree the refused launch created is recorded, so cleanup removes it.
+  const worktree = task.attempts[0].worktree;
+  assert.ok(worktree?.path && fs.existsSync(worktree.path), "the refused launch's worktree is recorded");
+  const removed = JSON.parse(runCli(root, ["run", "cleanup", "run-launch-cancel", "--json"]).stdout);
+  assert.deepEqual(removed.filter((entry) => entry === worktree.path), [worktree.path]);
+  assert.equal(fs.existsSync(worktree.path), false);
+});
+
+test("a worker attached after cancel read the run is still stopped by the cancellation", async () => {
+  const root = repo();
+  plan(root, "run-cancel-late");
+  const file = runFile(root, "run-cancel-late");
+  // Cancel reads the run while the task is still pending; a launch then attaches
+  // its worker before the cancellation is saved.
+  const original = fs.readFileSync;
+  let fired = false;
+  fs.readFileSync = function (target, ...rest) {
+    const content = original.call(this, target, ...rest);
+    if (!fired && String(target) === file) {
+      fired = true;
+      fs.readFileSync = original;
+      launchTaskWorker(root, "run-cancel-late", "work", lane(root), {
+        codexCommand: [process.execPath, path.join(fixtures, "fake-codex-slow.mjs"), "--delay=10000"]
+      });
+    }
+    return content;
+  };
+  try {
+    cancelWorkers(root, "run-cancel-late", "work", "user stopped it");
+  } finally {
+    fs.readFileSync = original;
+  }
+  assert.ok(fired);
+  const attempt = loadRun(root, "run-cancel-late").tasks.work.attempts[0];
+  assert.equal(attempt.status, "cancelled");
+  const status = JSON.parse(fs.readFileSync(attempt.runner.statusFile, "utf8"));
+  assert.ok(await gone(attempt.runner.pid), `worker ${attempt.runner.pid} still running after cancellation`);
+  assert.equal(status.status, "cancelled");
 });
 
 test("two polls racing on a paused worker do not crash the slower one", async () => {
@@ -1026,3 +1065,37 @@ test("reverting a failed answer restores the thread the next answer resumes", as
   assert.equal(again.resumeThreadId, original);
 });
 
+test("an answer whose briefing cannot be rendered stays waiting for input", async () => {
+  const root = repo();
+  plan(root, "run-answer-briefing");
+  launchTaskWorker(root, "run-answer-briefing", "work", lane(root), {
+    codexCommand: [process.execPath, askFixture, "--ask=scope:lib/helper.js", "--write=src/notes.txt", "--granted=lib/helper.js"]
+  });
+  await settle(root, "run-answer-briefing");
+  const ledger = path.join(root, ".orchestrator", "ledger.md");
+  assert.ok(fs.existsSync(ledger));
+  const original = fs.readFileSync;
+  fs.readFileSync = function (target, ...rest) {
+    if (String(target) === ledger) {
+      throw Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
+    }
+    return original.call(this, target, ...rest);
+  };
+  try {
+    assert.throws(
+      () => answerTaskWorker(root, "run-answer-briefing", "work", lane(root), { grantScope: ["lib/helper.js"] }),
+      /EACCES/
+    );
+  } finally {
+    fs.readFileSync = original;
+  }
+  let task = loadRun(root, "run-answer-briefing").tasks.work;
+  assert.equal(task.status, "needs_input");
+  assert.ok(task.attempts[0].runner, "the paused runner is kept");
+  assert.equal(task.attempts[0].inputRequests[0].answer, null);
+  assert.deepEqual(task.scopeGrants ?? [], []);
+
+  answerTaskWorker(root, "run-answer-briefing", "work", lane(root), { grantScope: ["lib/helper.js"] });
+  ({ task } = await settle(root, "run-answer-briefing"));
+  assert.equal(task.status, "reported");
+});

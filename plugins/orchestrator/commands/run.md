@@ -251,7 +251,8 @@ them. A launch response whose `substitution` is not null ran on a different mode
 named; read its notice.
 
 A `read` or `verify` worker cannot write the checkout, has no network, and may not ask to leave
-its sandbox (`approval_policy="never"`), but it can run commands and tests: it gets a private
+its sandbox (`approval_policy="never"`, and no saved "always allow" rules via `--ignore-rules`),
+but it can run commands and tests: it gets a private
 writable `TMPDIR`. So a read task's acceptance criteria can require test output. If the attempt
 shows `sandboxFallback` (a `task.sandbox_fallback` event), that profile could not be proven on
 this machine and the worker ran under plain `--sandbox read-only` with no writable temp

@@ -23,8 +23,31 @@ Fixes:
 - Read and verify workers launch with `approval_policy="never"`. With a Codex
   config such as `approval_policy = "on-request"` and an automatic approvals
   reviewer, a worker could ask to run a command outside its sandbox and have
-  it approved, bypassing the read-only boundary. Write workers keep the user's
-  approval policy.
+  it approved, bypassing the read-only boundary. They also launch with
+  `--ignore-rules`: a persisted "always allow" execpolicy rule (such as one for
+  `node` or `npm test`) ran a matching command outside the sandbox without
+  asking, so a read worker could write the checkout and reach the network.
+  Write workers keep the user's approval policy and rules.
+- The probe is killed with its whole process group when the worker is stopped
+  or it times out, so a native `codex` child that outlives the npm launcher
+  can no longer hang the worker. A `TMPDIR` inside the checkout whose name
+  starts with `..` is now refused too. A scratch directory the worker made
+  unreadable is still removed.
+- `run cleanup` removes a leftover scratch directory only once the wrapper and
+  its Codex child have exited (a cancelled status is written before they do),
+  only if it is a real `orch-worker-*` directory with no symlink on its path,
+  and only if its owner file names the status file that recorded it, so a
+  forged `scratchDir` cannot point cleanup at another directory.
+- A cancellation that races a launch or an answer stops the worker even when
+  the worker was attached after `run cancel` read the run. A launch refused or
+  failed after its worktree was created records that worktree, so `run cleanup`
+  removes it instead of leaking it and its branch.
+- An answer whose briefing cannot be rendered (an unreadable ledger, say) is
+  not saved, instead of leaving the task dispatching with no worker.
+- Inspection and the warm-retry carry rule count every file any commit
+  changed, not only the net difference. A file changed and then restored,
+  in scope or not, is still a change the supervisor branch receives when its
+  commits are cherry-picked, so it must be in scope and declared.
 - A task cancelled while its worker was being launched, or while an answered
   worker was being spawned, stays cancelled and its worker is stopped. Before,
   attaching the worker set the task back to running.

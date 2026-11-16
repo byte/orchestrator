@@ -12,6 +12,11 @@
 //   --sandbox-probe=network-on as ok, but without Codex's network-disabled marker
 //   --sandbox-probe=hang      write this process's pid to --sandbox-probe-pid=<file>
 //                             and hang, to test stopping a worker mid-probe
+//   --sandbox-probe=hang-child as hang, but the hanging process is a child that
+//                             holds the probe's pipes, the way the npm `codex`
+//                             launcher runs the native binary; its pid is written
+// For an exec call, --lock-tmpdir leaves an unreadable directory in $TMPDIR,
+// as a worker running `chmod 000` might.
 // Imported first by every fixture; it exits the process for a sandbox call and
 // does nothing otherwise.
 import { spawnSync } from "node:child_process";
@@ -26,6 +31,16 @@ if (at !== -1 && !args.includes("exec")) {
   if (mode === "fail") {
     process.stderr.write("error: unrecognized subcommand 'sandbox'\n");
     process.exit(2);
+  }
+  if (mode === "hang-child") {
+    const pidFile = args.find((arg) => arg.startsWith("--sandbox-probe-pid="))?.slice("--sandbox-probe-pid=".length);
+    const { spawn } = await import("node:child_process");
+    const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "inherit" });
+    if (pidFile) {
+      fs.writeFileSync(pidFile, String(child.pid));
+    }
+    setInterval(() => {}, 1000);
+    await new Promise(() => {});
   }
   if (mode === "hang") {
     const pidFile = args.find((arg) => arg.startsWith("--sandbox-probe-pid="))?.slice("--sandbox-probe-pid=".length);
@@ -61,4 +76,11 @@ if (at !== -1 && !args.includes("exec")) {
     fs.rmSync(denied, { recursive: true, force: true });
   }
   process.exit(mode === "ok-exit17" ? 17 : result.status ?? 1);
+}
+
+if (args.includes("exec") && args.includes("--lock-tmpdir") && process.env.TMPDIR) {
+  const locked = path.join(process.env.TMPDIR, "locked");
+  fs.mkdirSync(path.join(locked, "deeper"), { recursive: true });
+  fs.writeFileSync(path.join(locked, "deeper", "file"), "x");
+  fs.chmodSync(locked, 0o000);
 }

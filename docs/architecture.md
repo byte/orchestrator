@@ -334,8 +334,11 @@ real resume reports the same thread id it was given.
 
    `<scratch>` is a fresh private directory under the system temp root, exported to Codex as
    `TMPDIR` and removed when the wrapper exits, on SIGTERM too. A hard kill can leave it; its path
-   is in the runner's `status.json` as `scratchDir`, and `run cleanup` removes it once the runner
-   has finished. The profile name is random for every launch because Codex merges `-c` overrides
+   is in the runner's `status.json` as `scratchDir`, and `run cleanup` removes it once the wrapper
+   and its Codex child have both exited. A status file is only a claim, so cleanup also requires a
+   real directory (no symlink on the path) named `orch-worker-*` whose `.orch-worker-owner` file,
+   written by the wrapper, names that same status file; a directory a worker made unreadable is
+   given its owner's permissions back before removal. The profile name is random for every launch because Codex merges `-c` overrides
    into the user's config: under a fixed name, grants a user's config already gave that profile
    would survive the override, and the probe below could not see them. A scratch directory inside
    the worktree or the repository (a `TMPDIR` pointing there) is refused, since it would make part
@@ -351,7 +354,12 @@ real resume reports the same thread id it was given.
    user config such as `approval_policy = "on-request"` and `approvals_reviewer = "auto_review"`,
    the model may run a command with `sandbox_permissions: "require_escalated"` once the reviewer
    approves it, which is a command outside the sandbox. A read worker never needs that, so it may
-   not ask. Write workers keep the user's approval policy: whether committing in a worktree under
+   not ask. Read workers also get `--ignore-rules`: a persisted execpolicy allow rule
+   (`~/.codex/rules/*.rules`, written when a user picks "always allow" for a command prefix such
+   as `node` or `npm test`) runs a matching command outside the sandbox without asking, whatever
+   the approval policy. A third review reproduced exactly that in a read worker, which wrote the
+   checkout and opened an outbound connection. The `codex sandbox` probe cannot see this, as it
+   runs no model commands. Write workers keep the user's approval policy and rules: whether committing in a worktree under
    `workspace-write` ever needs an escalation has not been established, and pinning `never` there
    could turn such a commit into a failure.
 

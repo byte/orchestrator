@@ -9,6 +9,7 @@ import {
   answerTask,
   AttachRefusedError,
   attachExecution,
+  cancelRun,
   cancelTask,
   claimTask,
   failTaskAttempt,
@@ -23,6 +24,7 @@ import {
   workerClockStart,
   StaleRunnerError
 } from "./runs.mjs";
+import { removeTree, SCRATCH_OWNER_FILE } from "./remove-tree.mjs";
 import { atomicWrite } from "./state.mjs";
 import { createTaskWorktree, reuseTaskWorktree } from "./worktrees.mjs";
 
@@ -229,12 +231,30 @@ const TERMINAL_RUNNER_STATUSES = new Set(["completed", "failed", "cancelled"]);
 /**
  * Remove scratch directories that read-only workers of this attempt left behind.
  * A wrapper removes its own when it exits, even on SIGTERM; only a hard kill or
- * a crash leaves one, recorded as `scratchDir` in that runner's status file. Only
- * a finished runner's directory, named as the wrapper names them, is removed.
+ * a crash leaves one, recorded as `scratchDir` in that runner's status file.
+ * A status file is only a claim, so a directory is removed only when the wrapper
+ * and its Codex child are both gone (a "cancelled" status is written before the
+ * processes exit), the path is a real directory named as the wrapper names them
+ * with no symlink anywhere on it, and its owner file names this status file.
  */
 export function removeLeftoverScratch(cwd, runId, taskId, attemptId) {
   const root = executionDir(cwd, runId, taskId, attemptId);
   const removed = [];
+  const owned = (scratch, statusFile) => {
+    try {
+      if (!path.isAbsolute(scratch) || !path.basename(scratch).startsWith("orch-worker-")) {
+        return false;
+      }
+      if (!fs.lstatSync(scratch).isDirectory() || fs.realpathSync(scratch) !== scratch) {
+        return false;
+      }
+      const owner = path.join(scratch, SCRATCH_OWNER_FILE);
+      return fs.lstatSync(owner).isFile() &&
+        fs.realpathSync(fs.readFileSync(owner, "utf8")) === fs.realpathSync(statusFile);
+    } catch {
+      return false;
+    }
+  };
   const visit = (directory) => {
     let entries;
     try {
@@ -258,10 +278,11 @@ export function removeLeftoverScratch(cwd, runId, taskId, attemptId) {
         continue;
       }
       const scratch = typeof status.scratchDir === "string" ? status.scratchDir : null;
-      const finished = TERMINAL_RUNNER_STATUSES.has(status.status) || !processAlive(status.pid);
-      if (scratch && finished && path.isAbsolute(scratch) &&
-          path.basename(scratch).startsWith("orch-worker-") && fs.existsSync(scratch)) {
-        fs.rmSync(scratch, { recursive: true, force: true });
+      if (!scratch || processAlive(status.pid) || processAlive(status.childPid)) {
+        continue;
+      }
+      if (owned(scratch, entryPath)) {
+        removeTree(scratch);
         removed.push(scratch);
       }
     }
@@ -372,12 +393,13 @@ export function launchTaskWorker(
 ) {
   const dispatch = claimTask(cwd, runId, taskId, lane);
   let runner = null;
+  let worktree = null;
   try {
     const run = loadRun(cwd, runId);
     const task = run.tasks[taskId];
     const attempt = task.attempts.find((entry) => entry.id === dispatch.attemptId);
     const retry = attempt.retry ?? null;
-    const worktree = retry?.worktree?.mode === "reuse"
+    worktree = retry?.worktree?.mode === "reuse"
       ? reuseTaskWorktree(
           cwd,
           run,
@@ -413,7 +435,8 @@ export function launchTaskWorker(
           action: policyRefusal ? "refuse" : "execute",
           reasonCode: error.reasonCode ?? "worker_launch_failed",
           signals: error.signals ?? ["worker_launch_error"],
-          launchFailed: true
+          launchFailed: true,
+          worktree
         });
       }
     } finally {
@@ -766,6 +789,42 @@ function stopPid(pid) {
       throw error;
     }
   }
+}
+
+/**
+ * Cancel a task (or, with no task id, the whole run) and stop its workers. A
+ * launch or answer may attach its worker after the first stop reads the run but
+ * before the cancellation is saved; nothing can attach once it is saved, so a
+ * second pass stops any worker still live on a cancelled task.
+ */
+export function cancelWorkers(cwd, runId, taskId, reason) {
+  const pick = (run) => (taskId ? [run.tasks[taskId]] : Object.values(run.tasks)).filter(Boolean);
+  for (const task of pick(loadRun(cwd, runId))) {
+    stopTaskWorker(task.attempts.at(-1));
+  }
+  const result = taskId ? cancelTask(cwd, runId, taskId, reason) : cancelRun(cwd, runId, reason);
+  for (const task of pick(loadRun(cwd, runId))) {
+    if (task.status === "cancelled") {
+      stopLiveTaskWorker(task.attempts.at(-1));
+    }
+  }
+  return result;
+}
+
+/**
+ * Stop the attempt's worker only if its status file says it is still live; a
+ * runner already stopped or finished is left alone.
+ */
+function stopLiveTaskWorker(attempt) {
+  const runner = attempt?.runner;
+  if (!runner) {
+    return false;
+  }
+  const status = fs.existsSync(runner.statusFile) ? readJson(runner.statusFile)?.status : null;
+  if (TERMINAL_RUNNER_STATUSES.has(status)) {
+    return false;
+  }
+  return stopTaskWorker(attempt);
 }
 
 export function stopTaskWorker(attempt) {

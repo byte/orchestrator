@@ -24,8 +24,6 @@ import {
   addCheckpoint,
   bindAttempt,
   checkpointStatus,
-  cancelRun,
-  cancelTask,
   claimTask,
   configureRunGuidance,
   createRun,
@@ -51,8 +49,8 @@ import {
   answerTaskWorker,
   launchTaskWorker,
   pollRunWorkers,
-  removeLeftoverScratch,
-  stopTaskWorker
+  cancelWorkers,
+  removeLeftoverScratch
 } from "./lib/workers.mjs";
 import {
   ROUTE_TABLE_MIN_ATTEMPTS,
@@ -827,16 +825,7 @@ function commandRun(argv, cwd) {
 
   if (action === "cancel") {
     const taskId = positionals[1];
-    const activeRun = loadRun(cwd, runId);
-    const activeTasks = taskId
-      ? [activeRun.tasks[taskId]]
-      : Object.values(activeRun.tasks);
-    for (const task of activeTasks.filter(Boolean)) {
-      stopTaskWorker(task.attempts.at(-1));
-    }
-    const result = taskId
-      ? cancelTask(cwd, runId, taskId, options.reason)
-      : cancelRun(cwd, runId, options.reason);
+    const result = cancelWorkers(cwd, runId, taskId, options.reason);
     return options.json ? emitJson(result) : emit(taskId ? `Cancelled task ${taskId}.` : `Cancelled run ${runId}.`);
   }
 

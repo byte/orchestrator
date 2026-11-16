@@ -103,9 +103,14 @@ export function reuseTaskWorktree(cwd, run, previousAttempt) {
   };
 }
 
+/**
+ * Every file any commit in before..after changed, not only the net difference:
+ * integration cherry-picks each commit, so a file changed and then restored is
+ * still a change the supervisor branch receives. Renames count as both paths.
+ */
 function diffFiles(cwd, before, after) {
-  const output = git(cwd, ["diff", "--name-only", "-z", before, after]);
-  return output.split("\0").filter(Boolean).sort();
+  const output = git(cwd, ["log", "--no-renames", "--name-only", "--format=", "-z", `${before}..${after}`]);
+  return [...new Set(output.split("\0").map((entry) => entry.trim()).filter(Boolean))].sort();
 }
 
 /**
