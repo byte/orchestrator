@@ -647,21 +647,24 @@ export function answerTaskWorker(
     });
     return { ...answered, runner };
   } catch (error) {
-    // A worker spawned before the failure would run untracked once the answer is
-    // reverted; stop it so the task can be answered again cleanly.
-    if (runner) {
-      try {
-        stopTaskWorker({ runner });
-      } catch {
-        // The revert below must still run; a worker that cannot be stopped is
-        // reported by its own status file.
+    // Revert first, so no poll ever sees the task attached to a runner being
+    // stopped; then stop a worker spawned before the failure, which would
+    // otherwise run untracked.
+    try {
+      revertTaskAnswer(cwd, runId, taskId, {
+        attemptId: answered.attemptId,
+        error: error.message,
+        failedRunnerStatusFile: runner?.statusFile ?? null
+      });
+    } finally {
+      if (runner) {
+        try {
+          stopTaskWorker({ runner });
+        } catch {
+          // A worker that cannot be stopped is reported by its own status file.
+        }
       }
     }
-    revertTaskAnswer(cwd, runId, taskId, {
-      attemptId: answered.attemptId,
-      error: error.message,
-      failedRunnerStatusFile: runner?.statusFile ?? null
-    });
     throw error;
   }
 }

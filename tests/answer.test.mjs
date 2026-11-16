@@ -676,8 +676,19 @@ test("a resumed worker that cannot be attached is stopped and the answer reverte
   const status = JSON.parse(fs.readFileSync(path.join(roundDir, "status.json"), "utf8"));
   assert.equal(status.status, "cancelled");
   // The process itself is gone, not just marked cancelled.
-  await new Promise((resolve) => setTimeout(resolve, 500));
-  assert.throws(() => process.kill(status.pid, 0), { code: "ESRCH" });
+  const alive = () => {
+    try {
+      process.kill(status.pid, 0);
+      return true;
+    } catch (error) {
+      return error.code !== "ESRCH";
+    }
+  };
+  const deadline = Date.now() + 5000;
+  while (alive() && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  assert.equal(alive(), false, `worker ${status.pid} still running`);
 });
 
 test("a poll that read a runner since replaced by an answered resume cannot collect from it", async () => {
@@ -767,4 +778,52 @@ test("a result written by a discarded replacement thread is never collected for 
   // The relaunch wrote nothing, so the attempt has no result: not the discarded one.
   assert.equal(task.status, "failed");
   assert.equal(task.attempts[0].outcome.reasonCode, "missing_result");
+});
+
+test("a poll racing run answer skips the runner it read instead of collecting it again", async () => {
+  const root = repo();
+  plan(root, "run-answer-interleaved");
+  const launched = launchTaskWorker(root, "run-answer-interleaved", "work", lane(root), {
+    codexCommand: [process.execPath, askFixture, "--ask=scope:lib/helper.js", "--write=src/notes.txt"]
+  });
+  const statusFile = launched.runner.statusFile;
+  const deadline = Date.now() + 10000;
+  while (Date.now() < deadline) {
+    try {
+      if (JSON.parse(fs.readFileSync(statusFile, "utf8")).status === "completed") {
+        break;
+      }
+    } catch {
+      // Not written yet.
+    }
+    await new Promise((resolve) => setTimeout(resolve, 40));
+  }
+  // The outer poll reads the finished runner's status; before it acts, another
+  // poll collects the request and the supervisor answers it.
+  const original = fs.readFileSync;
+  let fired = false;
+  fs.readFileSync = function (target, ...rest) {
+    const content = original.call(this, target, ...rest);
+    if (!fired && String(target) === statusFile) {
+      fired = true;
+      pollRunWorkers(root, "run-answer-interleaved");
+      answerTaskWorker(root, "run-answer-interleaved", "work", lane(root), {
+        grantScope: ["lib/helper.js"],
+        codexCommand: [process.execPath, path.join(fixtures, "fake-codex-slow.mjs"), "--delay=10000"]
+      });
+    }
+    return content;
+  };
+  let updates;
+  try {
+    updates = pollRunWorkers(root, "run-answer-interleaved");
+  } finally {
+    fs.readFileSync = original;
+  }
+  assert.ok(fired);
+  assert.equal(updates.some((update) => update.changed), false);
+  const task = loadRun(root, "run-answer-interleaved").tasks.work;
+  assert.equal(task.status, "running");
+  assert.equal(task.attempts[0].inputRequests.length, 1);
+  stopTaskWorker(task.attempts[0]);
 });

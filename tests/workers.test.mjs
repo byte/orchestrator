@@ -758,3 +758,38 @@ test("a poll reloads the run only for tasks that are active", () => {
   }
   assert.equal(loads, 1);
 });
+
+test("a poll's run loads depend on its active tasks, not on how many tasks the run has", async () => {
+  const measure = async (runId, taskCount) => {
+    const root = repo();
+    createRun(root, { id: runId, lane: "api", objective: "Build safely", workerModel: "sol", reasoningEffort: "high" });
+    replacePlan(root, runId, Array.from({ length: taskCount }, (_, index) => ({
+      id: `t${index}`, title: `t${index}`, objective: `t${index}`, kind: "read", acceptance: ["ok"]
+    })));
+    checkpointPlan(root, runId);
+    const launched = launchTaskWorker(root, runId, "t0", { constraints: [] }, {
+      codexCommand: [process.execPath, slowFixture, "--delay=10000"]
+    });
+    after(() => stopTaskWorker(launched));
+    await pollUntil(root, runId, (run) => run.tasks.t0.attempts[0].threadId);
+    const file = runFile(root, runId);
+    const original = fs.readFileSync;
+    let loads = 0;
+    fs.readFileSync = function (target, ...rest) {
+      if (String(target) === file) {
+        loads += 1;
+      }
+      return original.call(this, target, ...rest);
+    };
+    let updates;
+    try {
+      updates = pollRunWorkers(root, runId);
+    } finally {
+      fs.readFileSync = original;
+    }
+    // The active task is still collected.
+    assert.deepEqual(updates.map((update) => [update.taskId, update.status]), [["t0", "running"]]);
+    return loads;
+  };
+  assert.equal(await measure("run-loads-small", 2), await measure("run-loads-large", 8));
+});
