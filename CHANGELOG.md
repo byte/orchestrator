@@ -27,7 +27,19 @@ Fixes:
   `--ignore-rules`: a persisted "always allow" execpolicy rule (such as one for
   `node` or `npm test`) ran a matching command outside the sandbox without
   asking, so a read worker could write the checkout and reach the network.
-  Write workers keep the user's approval policy and rules.
+- Write workers launch with the same pins. Their commits only worked through
+  that hole: `workspace-write` keeps `.git` read-only, so a worker could commit
+  only when a saved `git commit` rule or an approved escalation ran git outside
+  the sandbox, and without such a rule it could not commit at all. Workers now
+  leave their changes in the worktree and the wrapper commits them, outside the
+  sandbox, when Codex finishes (not when it pauses for input). A failed commit
+  fails the worker.
+- Git run in a worker's worktree, by the wrapper or by `run inspect`,
+  `integrate` and `cleanup`, uses the git directory recorded when the worktree
+  was created, never the worktree's `.git` pointer file, with hooks, fsmonitor,
+  signing and submodule recursion turned off. A worker could otherwise re-aim
+  the pointer, plant a hook, or plant a nested repository, and have its code
+  run outside the sandbox by the supervisor's git.
 - The probe is killed with its whole process group when the worker is stopped
   or it times out, so a native `codex` child that outlives the npm launcher
   can no longer hang the worker. A `TMPDIR` inside the checkout whose name

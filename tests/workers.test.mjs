@@ -321,6 +321,88 @@ test("the pool runs independent ready tasks in separate detached worktrees", asy
   }
 });
 
+/** Wait for a runner's status file to reach a terminal state. */
+async function runnerDone(statusFile) {
+  for (let index = 0; index < 200; index += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    try {
+      const status = JSON.parse(fs.readFileSync(statusFile, "utf8"));
+      if (["completed", "failed", "cancelled"].includes(status.status)) {
+        return status;
+      }
+    } catch {
+      // Not written yet.
+    }
+  }
+  throw new Error("runner did not finish");
+}
+
+test("the wrapper commits a locked-down write worker's changes, with no hook from the worktree run", async () => {
+  const root = repo();
+  // A repository whose hooks live in the tree, as with husky: a worker could edit them.
+  git(root, ["config", "core.hooksPath", ".husky"]);
+  plan(root, "run-wrapper-commit");
+  checkpointPlan(root, "run-wrapper-commit");
+  const marker = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "orch-hook-")), "ran");
+  const launched = launchTaskWorker(root, "run-wrapper-commit", "build", { constraints: [] }, {
+    codexCommand: [process.execPath, writeFixture, "--no-commit", `--hooks=${marker}`]
+  });
+  const status = await runnerDone(launched.runner.statusFile);
+  assert.equal(status.status, "completed");
+  assert.equal(fs.existsSync(marker), false, "no hook from the worktree ran outside the sandbox");
+  const worktree = launched.worktree.path;
+  assert.equal(git(worktree, ["status", "--porcelain"]).trim(), "", "every change is committed");
+  assert.equal(git(worktree, ["log", "-1", "--format=%s"]).trim(), "Build");
+  assert.match(git(worktree, ["log", "-1", "--format=%b"]), /Orchestrator task build, build-attempt-1\./);
+  const files = git(worktree, ["show", "--name-only", "--format=", "HEAD"]).trim().split("\n").sort();
+  assert.deepEqual(files, [".husky/commit-msg", ".husky/post-commit", ".husky/pre-commit", "src/generated.js"]);
+  fs.rmSync(path.dirname(marker), { recursive: true, force: true });
+});
+
+test("a worker that re-aims its worktree's .git pointer cannot run code through the wrapper or inspection", async () => {
+  const root = repo();
+  plan(root, "run-wrapper-hijack");
+  checkpointPlan(root, "run-wrapper-hijack");
+  const marker = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "orch-hijack-")), "ran");
+  const launched = launchTaskWorker(root, "run-wrapper-hijack", "build", { constraints: [] }, {
+    codexCommand: [process.execPath, writeFixture, "--no-commit", `--hijack-git=${marker}`]
+  });
+  const status = await runnerDone(launched.runner.statusFile);
+  assert.equal(status.status, "completed", status.error);
+  assert.equal(fs.existsSync(marker) ? fs.readFileSync(marker, "utf8") : "", "", "the wrapper did not run the planted fsmonitor");
+  // The commit landed on the worker's real branch, not in the planted repository.
+  const branch = launched.worktree.branch;
+  assert.equal(git(root, ["log", "-1", "--format=%s", branch]).trim(), "Build");
+  const run = loadRun(root, "run-wrapper-hijack");
+  const task = run.tasks.build;
+  inspectTaskWorktree(task, task.attempts.at(-1));
+  assert.equal(fs.existsSync(marker) ? fs.readFileSync(marker, "utf8") : "", "", "inspection did not run the planted fsmonitor");
+  fs.rmSync(path.dirname(marker), { recursive: true, force: true });
+});
+
+test("a write worker paused for input keeps its changes uncommitted, and a failed commit fails the worker", async () => {
+  const root = repo();
+  plan(root, "run-wrapper-pause");
+  checkpointPlan(root, "run-wrapper-pause");
+  const paused = launchTaskWorker(root, "run-wrapper-pause", "build", { constraints: [] }, {
+    codexCommand: [process.execPath, writeFixture, "--no-commit", "--ask"]
+  });
+  assert.equal((await runnerDone(paused.runner.statusFile)).status, "completed");
+  const base = paused.worktree.baseHead;
+  assert.equal(git(paused.worktree.path, ["rev-parse", "HEAD"]).trim(), base, "nothing committed at a pause");
+  assert.match(git(paused.worktree.path, ["status", "--porcelain"]), /src\//);
+
+  const root2 = repo();
+  plan(root2, "run-wrapper-fail");
+  checkpointPlan(root2, "run-wrapper-fail");
+  const failing = launchTaskWorker(root2, "run-wrapper-fail", "build", { constraints: [] }, {
+    codexCommand: [process.execPath, writeFixture, "--no-commit", "--lock-index"]
+  });
+  const status = await runnerDone(failing.runner.statusFile);
+  assert.equal(status.status, "failed");
+  assert.match(status.error, /git add failed/);
+});
+
 test("a detached write worker completes the full launch, inspect, integrate, finalize, and cleanup lifecycle", async () => {
   const root = repo();
   plan(root, "run-e2e");

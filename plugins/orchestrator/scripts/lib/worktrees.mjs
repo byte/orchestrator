@@ -3,18 +3,41 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { parseFileList } from "./briefing.mjs";
-import { changedFiles, currentBranch, headSha } from "./git.mjs";
+import { changedFiles, currentBranch, headSha, worktreeGitEnv } from "./git.mjs";
 import { partitionByScope } from "./glob.mjs";
 import { effectiveTaskScope } from "./runs.mjs";
 import { localDir } from "./state.mjs";
 
-function git(cwd, args) {
+function git(cwd, args, gitDir = null) {
   return execFileSync("git", args, {
     cwd,
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
-    maxBuffer: 32 * 1024 * 1024
+    maxBuffer: 32 * 1024 * 1024,
+    ...(gitDir ? { env: worktreeGitEnv(cwd, gitDir) } : {})
   }).trim();
+}
+
+/**
+ * The git directory of a linked worktree, found from the supervisor
+ * repository's own records (`<common>/worktrees/*\/gitdir`), which a worker
+ * cannot write, never from the worktree's `.git` pointer file, which it can.
+ */
+export function worktreeGitDir(cwd, worktreePath) {
+  const common = path.resolve(cwd, git(cwd, ["rev-parse", "--git-common-dir"]));
+  const want = fs.realpathSync(worktreePath);
+  const root = path.join(common, "worktrees");
+  for (const name of fs.readdirSync(root)) {
+    try {
+      const pointer = fs.readFileSync(path.join(root, name, "gitdir"), "utf8").trim();
+      if (fs.realpathSync(path.dirname(pointer)) === want) {
+        return path.join(root, name);
+      }
+    } catch {
+      // A stale or unreadable entry is not this worktree.
+    }
+  }
+  throw new Error(`No git directory is registered for worktree ${worktreePath}.`);
 }
 
 export class WorktreeOperationError extends Error {
@@ -72,7 +95,7 @@ export function createTaskWorktree(cwd, run, task, attempt) {
   const branch = branchName(run, task, attempt);
   fs.mkdirSync(path.dirname(target), { recursive: true });
   git(cwd, ["worktree", "add", "-b", branch, target, baseHead]);
-  return { path: target, branch, baseHead, createdAt: new Date().toISOString() };
+  return { path: target, gitDir: worktreeGitDir(cwd, target), branch, baseHead, createdAt: new Date().toISOString() };
 }
 
 /**
@@ -92,13 +115,14 @@ export function reuseTaskWorktree(cwd, run, previousAttempt) {
   }
   return {
     path: source.path,
+    ...(source.gitDir ? { gitDir: source.gitDir } : {}),
     branch: source.branch,
     baseHead: source.baseHead,
     createdAt: source.createdAt,
     reusedFromAttemptId: previousAttempt.id,
     // The head the earlier attempts left: commits up to here are theirs, commits
     // after it are this attempt's. Inspection carries declarations only for the former.
-    reusedHead: headSha(source.path),
+    reusedHead: headSha(source.path, { gitDir: source.gitDir }),
     reusedAt: new Date().toISOString()
   };
 }
@@ -108,8 +132,8 @@ export function reuseTaskWorktree(cwd, run, previousAttempt) {
  * integration cherry-picks each commit, so a file changed and then restored is
  * still a change the supervisor branch receives. Renames count as both paths.
  */
-function diffFiles(cwd, before, after) {
-  const output = git(cwd, ["log", "--no-renames", "--name-only", "--format=", "-z", `${before}..${after}`]);
+function diffFiles(cwd, before, after, gitDir = null) {
+  const output = git(cwd, ["log", "--no-renames", "--name-only", "--format=", "-z", `${before}..${after}`], gitDir);
   return [...new Set(output.split("\0").map((entry) => entry.trim()).filter(Boolean))].sort();
 }
 
@@ -142,14 +166,14 @@ function carriedDeclarations(task, attempt, head) {
     if (starts[position] === ends[position]) {
       return;
     }
-    for (const file of diffFiles(worktree.path, starts[position], ends[position])) {
+    for (const file of diffFiles(worktree.path, starts[position], ends[position], worktree.gitDir)) {
       lastChangedBy.set(file, earlier);
     }
   });
   const before = new Set(worktree.reusedHead === worktree.baseHead
     ? []
-    : diffFiles(worktree.path, worktree.baseHead, worktree.reusedHead));
-  const own = new Set(head === worktree.reusedHead ? [] : diffFiles(worktree.path, worktree.reusedHead, head));
+    : diffFiles(worktree.path, worktree.baseHead, worktree.reusedHead, worktree.gitDir));
+  const own = new Set(head === worktree.reusedHead ? [] : diffFiles(worktree.path, worktree.reusedHead, head, worktree.gitDir));
   const declaredBy = (earlier) => new Set(
     earlier.review?.result?.structured?.files_touched ??
       parseFileList(earlier.review?.result?.fields?.files_touched) ??
@@ -173,14 +197,14 @@ export function inspectTaskWorktree(task, attempt) {
       }
     );
   }
-  const head = headSha(worktree.path);
+  const head = headSha(worktree.path, { gitDir: worktree.gitDir });
   const commits = head === worktree.baseHead
     ? []
-    : git(worktree.path, ["rev-list", "--reverse", `${worktree.baseHead}..${head}`])
+    : git(worktree.path, ["rev-list", "--reverse", `${worktree.baseHead}..${head}`], worktree.gitDir)
         .split("\n")
         .filter(Boolean);
-  const files = head === worktree.baseHead ? [] : diffFiles(worktree.path, worktree.baseHead, head);
-  const dirty = changedFiles(worktree.path);
+  const files = head === worktree.baseHead ? [] : diffFiles(worktree.path, worktree.baseHead, head, worktree.gitDir);
+  const dirty = changedFiles(worktree.path, { gitDir: worktree.gitDir });
   // The planned scope plus what the supervisor granted this task through
   // `run answer`; anything else outside it is still refused.
   const scope = effectiveTaskScope(task);
@@ -293,7 +317,7 @@ export function cleanupTaskWorktree(cwd, attempt) {
   if (!worktree?.path || !fs.existsSync(worktree.path)) {
     return false;
   }
-  if (changedFiles(worktree.path).length) {
+  if (changedFiles(worktree.path, { gitDir: worktree.gitDir }).length) {
     throw new Error(`Refusing to remove dirty worktree ${worktree.path}.`);
   }
   fs.rmSync(worktree.path, { recursive: true, force: false });

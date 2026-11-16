@@ -25,7 +25,7 @@ import {
 } from "../plugins/orchestrator/scripts/lib/runs.mjs";
 import { launchTaskWorker, pollRunWorkers } from "../plugins/orchestrator/scripts/lib/workers.mjs";
 import { inspectTaskWorktree } from "../plugins/orchestrator/scripts/lib/worktrees.mjs";
-import { assertReadOnlyLaunch, checkpointPlan, cleanup, git, makeRepo, runCli } from "./helpers.mjs";
+import { assertReadOnlyLaunch, checkpointPlan, cleanup, git, makeRepo, runCli, assertLockedDown, configValue } from "./helpers.mjs";
 
 const fixtures = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures");
 const resumeFixture = path.join(fixtures, "fake-codex-resume.mjs");
@@ -275,7 +275,8 @@ test("a warm retry resumes the thread with explicit model, effort, and sandbox i
   assert.ok(at("-C") < at("resume") && argv[at("-C") + 1] === first.worktree.path);
   assert.ok(at("--sandbox") < at("resume") && argv[at("--sandbox") + 1] === "workspace-write");
   assert.ok(at("--model") > at("resume") && argv[at("--model") + 1] === "gpt-6.1-sol");
-  assert.equal(argv[at("-c") + 1], 'model_reasoning_effort="high"');
+  assert.equal(configValue(argv, "model_reasoning_effort"), 'model_reasoning_effort="high"');
+  assertLockedDown(argv);
   assert.deepEqual(argv.slice(-2), [threadId, "-"]);
   assert.match(resumed.prompt, /## Previous attempt/);
   assert.match(resumed.prompt, /notes must not mention fresh starts/);

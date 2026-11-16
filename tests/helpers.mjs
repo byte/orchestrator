@@ -107,3 +107,23 @@ export function assertReadOnlyLaunch(entry) {
   }
   return name;
 }
+
+/**
+ * Every worker launch may not leave its sandbox: no escalation and no persisted
+ * execpolicy rules, both given to `exec` before any `resume`.
+ */
+export function assertLockedDown(argv) {
+  const approval = argv.indexOf('approval_policy="never"');
+  const rules = argv.indexOf("--ignore-rules");
+  assert.ok(approval > 0 && argv[approval - 1] === "-c", "approval_policy is pinned to never");
+  assert.ok(rules > 0, "--ignore-rules is passed");
+  const resumeAt = argv.indexOf("resume");
+  if (resumeAt !== -1) {
+    assert.ok(approval < resumeAt && rules < resumeAt, "the lockdown precedes resume");
+  }
+}
+
+/** The value of the `-c` override for `key`, wherever it sits in argv. */
+export function configValue(argv, key) {
+  return argv.find((arg, index) => argv[index - 1] === "-c" && arg.startsWith(`${key}=`)) ?? null;
+}

@@ -1,10 +1,11 @@
 #!/usr/bin/env node
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { worktreeGitEnv } from "./lib/git.mjs";
 import { removeTree, SCRATCH_OWNER_FILE } from "./lib/remove-tree.mjs";
 
 function atomicWrite(filePath, payload) {
@@ -71,16 +72,16 @@ if (scratchDir) {
   fs.writeFileSync(path.join(scratchDir, SCRATCH_OWNER_FILE), path.resolve(spec.statusFile), { flag: "wx", mode: 0o600 });
 }
 
-// A read worker never needs to leave its sandbox, so it may not ask to: with a
-// user config such as `approval_policy = "on-request"` and an automatic approvals
-// reviewer, Codex lets the model run a command unsandboxed (`require_escalated`)
-// once the reviewer approves it, which would bypass the read-only boundary. Both
-// launch paths, the profile and the plain `--sandbox read-only` fallback, pin
-// `approval_policy="never"`, so an escalation request is refused outright.
-// That alone is not enough: a persisted execpolicy rule (`~/.codex/rules/*.rules`,
-// "always allow" prefixes such as `node` or `npm test`) runs a matching command
-// outside the sandbox without asking. A read worker loads no rules at all.
-const READ_APPROVAL = ["-c", 'approval_policy="never"', "--ignore-rules"];
+// No worker may leave its sandbox. With a user config such as
+// `approval_policy = "on-request"` and an automatic approvals reviewer, Codex lets
+// the model run a command unsandboxed (`require_escalated`) once the reviewer
+// approves it, so every launch pins `approval_policy="never"`. That alone is not
+// enough: a persisted execpolicy rule (`~/.codex/rules/*.rules`, "always allow"
+// prefixes such as `node`, `npm test` or `git commit`) runs a matching command
+// outside the sandbox without asking, so no worker loads any rules. A write
+// worker therefore cannot commit (`workspace-write` keeps `.git` read-only); this
+// wrapper, outside the sandbox, commits its changes when Codex finishes.
+const LOCKDOWN = ["-c", 'approval_policy="never"', "--ignore-rules"];
 
 function readProfileArgs() {
   return [
@@ -215,12 +216,51 @@ async function probeReadProfile() {
 }
 
 function sandboxArgs() {
-  if (!scratchDir) {
-    return ["--sandbox", spec.sandbox];
+  if (!scratchDir || sandboxFallback) {
+    return ["--sandbox", spec.sandbox, ...LOCKDOWN];
   }
-  return sandboxFallback
-    ? ["--sandbox", spec.sandbox, ...READ_APPROVAL]
-    : [...readProfileArgs(), ...READ_APPROVAL];
+  return [...readProfileArgs(), ...LOCKDOWN];
+}
+
+/**
+ * Commit everything a write worker left in its worktree, from outside the
+ * sandbox. The worktree is worker-controlled, so nothing in it may run here:
+ * hooks are disabled (a worker could edit a hooks directory such as `.husky/`
+ * that `core.hooksPath` points at) and so is signing, which could prompt.
+ * Returns an error message, or null.
+ */
+function commitWorkerChanges() {
+  // The git directory comes from the supervisor repository's records: the
+  // worktree's `.git` pointer file is worker-controlled and could aim git at a
+  // config the worker wrote (`core.fsmonitor`, say).
+  if (!spec.gitDir) {
+    return "no recorded git directory for the worktree; not committing";
+  }
+  // worktreeGitEnv also turns off hooks, fsmonitor, signing and submodule recursion.
+  const git = (args) => spawnSync("git", args, {
+    cwd: spec.worktreePath,
+    encoding: "utf8",
+    env: worktreeGitEnv(spec.worktreePath, spec.gitDir)
+  });
+  const add = git(["add", "-A"]);
+  if (add.status !== 0) {
+    return `git add failed: ${(add.stderr || add.error?.message || "").trim()}`;
+  }
+  if (git(["diff", "--cached", "--quiet"]).status === 0) {
+    return null;
+  }
+  const commit = git(["commit", "--no-verify", "--quiet", "-m", spec.commitMessage || "Orchestrator worker changes"]);
+  return commit.status === 0 ? null : `git commit failed: ${(commit.stderr || commit.error?.message || "").trim()}`;
+}
+
+/** Whether the worker's final message pauses for input rather than finishing. */
+function pausedForInput() {
+  try {
+    const message = JSON.parse(fs.readFileSync(spec.lastMessageFile, "utf8"));
+    return message?.needs_input != null;
+  } catch {
+    return false;
+  }
 }
 
 writeStatus({ status: "running" });
@@ -401,11 +441,21 @@ if (result.replacedWithoutBriefing && !stopping) {
   result = await runCodex(null, fallbackPrompt);
 }
 
-if (result.error) {
+// A finished write worker's changes are committed for it; a paused one keeps
+// them uncommitted for its resume, and a failed or stopped one is left as is.
+const commitError = spec.sandbox === "workspace-write" && !result.error && !stopping &&
+  result.code === 0 && !pausedForInput()
+  ? commitWorkerChanges()
+  : null;
+if (commitError) {
+  errors.write(`\n[orchestrator] ${commitError}\n`);
+}
+
+if (result.error || commitError) {
   writeStatus({
     status: "failed",
     finishedAt: new Date().toISOString(),
-    error: result.error.message
+    error: result.error?.message ?? commitError
   });
 } else {
   writeStatus({

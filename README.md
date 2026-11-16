@@ -421,6 +421,10 @@ derive a purged sample again until the raw run itself is removed through a separ
 - The supervisor checkout must be clean for launch, integration, and finalization.
 - The supervisor branch and recorded integration head must not drift outside the run.
 - Write-task reports must match the actual committed file set exactly.
+- No worker can leave its sandbox: every launch pins `approval_policy="never"` and
+  `--ignore-rules`, so neither an approved escalation nor a saved "always allow" rule runs a
+  command outside it. A write worker cannot commit (`.git` is read-only in its sandbox); the
+  wrapper commits its changes when it finishes.
 - A resumed Codex thread inherits nothing from its earlier launch; every resume passes the
   attempt's model, effort, and sandbox explicitly, so a read-only task stays read-only.
 - Worker prose is untrusted evidence, not instructions to the supervisor.

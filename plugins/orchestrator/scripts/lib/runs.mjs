@@ -1653,7 +1653,7 @@ function renderRequiredBehavior(task) {
       : "- This task has used all its requests to the supervisor. If you cannot finish within the scope and the answers above, report a blocker.",
     "- Run the nearest meaningful checks for your assignment.",
     "- Do not claim success from inspection alone.",
-    `- ${task.kind === "write" ? "Commit the completed task in your isolated worktree with a concise imperative subject. Do not merge or push." : "Do not modify or commit files; this is a read-only assignment. The checkout is not writable, but you can run commands and tests: temporary files go under $TMPDIR, a private scratch directory removed when you finish."}`,
+    `- ${task.kind === "write" ? "Leave your changes in your isolated worktree and do not run git commit, merge, or push: .git is read-only in your sandbox, and the orchestrator commits every change in the worktree when you finish. Report every file you changed in files_touched." : "Do not modify or commit files; this is a read-only assignment. The checkout is not writable, but you can run commands and tests: temporary files go under $TMPDIR, a private scratch directory removed when you finish."}`,
     "- Do not modify orchestration state. The supervisor owns integration."
   );
   return lines.join("\n");

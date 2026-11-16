@@ -19,7 +19,7 @@ import {
   removeLeftoverScratch,
   stopTaskWorker
 } from "../plugins/orchestrator/scripts/lib/workers.mjs";
-import { assertReadOnlyLaunch, checkpointPlan, cleanup, makeRepo, runCli } from "./helpers.mjs";
+import { assertReadOnlyLaunch, checkpointPlan, cleanup, makeRepo, runCli, assertLockedDown } from "./helpers.mjs";
 
 const fixtures = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures");
 const resumeFixture = path.join(fixtures, "fake-codex-resume.mjs");
@@ -120,7 +120,7 @@ for (const [mode, reason] of [
   });
 }
 
-test("a write worker is not probed and keeps --sandbox workspace-write", async () => {
+test("a write worker is not probed, keeps --sandbox workspace-write, and cannot leave it", async () => {
   const root = setup("run-profile-write", "write");
   const calls = logFile();
   launchTaskWorker(root, "run-profile-write", "work", lane, {
@@ -129,9 +129,8 @@ test("a write worker is not probed and keeps --sandbox workspace-write", async (
   const task = await settle(root, "run-profile-write");
   const [launch] = readLog(calls);
   assert.equal(launch.argv[launch.argv.indexOf("--sandbox") + 1], "workspace-write");
-  // Write workers keep the user's approval policy; see docs/architecture.md.
-  assert.equal(launch.argv.includes('approval_policy="never"'), false);
-  assert.equal(launch.argv.includes("--ignore-rules"), false);
+  // Write workers are locked down too; the wrapper commits for them.
+  assertLockedDown(launch.argv);
   assert.equal(task.attempts[0].sandboxFallback, undefined);
 });
 

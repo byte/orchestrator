@@ -359,9 +359,21 @@ real resume reports the same thread id it was given.
    as `node` or `npm test`) runs a matching command outside the sandbox without asking, whatever
    the approval policy. A third review reproduced exactly that in a read worker, which wrote the
    checkout and opened an outbound connection. The `codex sandbox` probe cannot see this, as it
-   runs no model commands. Write workers keep the user's approval policy and rules: whether committing in a worktree under
-   `workspace-write` ever needs an escalation has not been established, and pinning `never` there
-   could turn such a commit into a failure.
+   runs no model commands.
+
+   Write workers get the same two pins on `--sandbox workspace-write`. Their commits used to work
+   only because of the same hole: `workspace-write` keeps `.git` read-only (a `git commit` there
+   fails with EPERM, checked with `codex sandbox` on Codex 0.169.0), so a worker could commit only
+   when a saved `git commit` allow rule or an approved escalation ran git outside the sandbox. Now
+   the worker leaves its changes in the worktree, and the wrapper, which runs outside the sandbox,
+   commits everything (`git add -A`) after Codex exits 0, under the task title, unless the worker
+   paused for input (its changes stay for the resume). A failed commit fails the worker. The
+   worktree is worker-controlled, so every git command the wrapper or the supervisor runs in it
+   takes the git directory recorded when the worktree was created (found from the supervisor
+   repository's `worktrees/*/gitdir` records, never from the worktree's `.git` pointer file, which a
+   worker could re-aim at a repository config it wrote), with hooks, fsmonitor, signing and
+   submodule recursion off: a worker could otherwise plant a hook, or a nested repository whose
+   config git would run during `git status`.
 
    Without `--sandbox`, the worker is read-only only if Codex applies the profile; a Codex that
    ignored it would run with the user's default permissions, which may be writable. So before

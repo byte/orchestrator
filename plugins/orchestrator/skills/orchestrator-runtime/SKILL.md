@@ -28,6 +28,8 @@ All support `--json` where structured output is useful.
   `sandboxFallback` (a `task.sandbox_fallback` event), the profile could not be proven and the
   worker ran under plain `--sandbox read-only` with no writable temp directory; its test failures
   may be the sandbox, so rerun them yourself before acting on them.
+- Write workers get the same lockdown and cannot commit; the wrapper commits their changes under
+  the task title when they finish. A wrapper commit failure fails the worker.
 - When Codex rejects a model as unavailable to the account, `run poll` and `run resume` relaunch
   the task one rung down `astra` → `sol` → `terra` → `luna` with the same effort and record the
   substitution on the attempt, in the run events, and in the briefing. Substitution is never

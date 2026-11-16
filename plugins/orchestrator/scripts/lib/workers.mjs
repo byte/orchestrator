@@ -26,7 +26,7 @@ import {
 } from "./runs.mjs";
 import { removeTree, SCRATCH_OWNER_FILE } from "./remove-tree.mjs";
 import { atomicWrite } from "./state.mjs";
-import { createTaskWorktree, reuseTaskWorktree } from "./worktrees.mjs";
+import { createTaskWorktree, reuseTaskWorktree, worktreeGitDir } from "./worktrees.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const childScript = path.join(here, "..", "worker-child.mjs");
@@ -333,7 +333,7 @@ function tail(filePath, bytes = 8000) {
 function spawnWorker(
   cwd,
   directory,
-  { prompt, fallbackPrompt = null, codexCommand, worktreePath, model, reasoningEffort, kind, resumeThreadId = null }
+  { prompt, fallbackPrompt = null, codexCommand, worktreePath, model, reasoningEffort, kind, resumeThreadId = null, commitMessage = null }
 ) {
   fs.mkdirSync(directory, { recursive: true });
   const files = {
@@ -358,6 +358,11 @@ function spawnWorker(
     model,
     reasoningEffort,
     sandbox: kind === "write" ? "workspace-write" : "read-only",
+    // The wrapper commits a write worker's changes with this git directory,
+    // never through the worktree's own `.git` pointer file (see worktreeGitEnv).
+    ...(kind === "write"
+      ? { commitMessage, gitDir: worktreeGitDir(cwd, worktreePath) }
+      : {}),
     ...(resumeThreadId ? { resumeThreadId } : {})
   };
   atomicWrite(files.specFile, `${JSON.stringify(spec, null, 2)}\n`);
@@ -373,6 +378,12 @@ function spawnWorker(
     ...files,
     launchedAt: new Date().toISOString()
   };
+}
+
+/** The message the wrapper commits a write worker's changes under. */
+function workerCommitMessage(task, attemptId) {
+  const subject = String(task.title || task.id).replace(/\s+/g, " ").trim().slice(0, 72);
+  return `${subject}\n\nOrchestrator task ${task.id}, ${attemptId}.`;
 }
 
 function launchCommand(runner, fallback = ["codex"]) {
@@ -413,6 +424,7 @@ export function launchTaskWorker(
       model: dispatch.model,
       reasoningEffort: dispatch.reasoningEffort,
       kind: task.kind,
+      commitMessage: workerCommitMessage(task, attempt.id),
       resumeThreadId: attempt.resumedFromAttemptId ? retry?.resumeThreadId ?? null : null
     });
     attachExecution(cwd, runId, taskId, {
@@ -745,6 +757,7 @@ export function answerTaskWorker(
         model: answered.model,
         reasoningEffort: answered.reasoningEffort,
         kind: task.kind,
+        commitMessage: workerCommitMessage(task, answered.attemptId),
         resumeThreadId: answered.resumeThreadId
       }
     );

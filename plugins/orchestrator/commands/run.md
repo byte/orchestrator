@@ -259,6 +259,12 @@ this machine and the worker ran under plain `--sandbox read-only` with no writab
 directory; rerun any test it reports as failing yourself. A test skipped inside the sandbox is not
 a pass. `run cleanup` also removes a scratch directory a hard-killed worker left behind.
 
+A `write` worker is locked down the same way and cannot run `git commit` (`.git` is read-only in
+its sandbox). It leaves its changes in the worktree, and its wrapper commits them under the task
+title when it finishes, so the inspection gates still see a commit. A worker that reports
+`failed` with `git add failed` or `git commit failed` left a worktree the wrapper could not
+commit; inspect it before retrying.
+
 ## 5. Monitor and collect
 
 Do not poll in a loop. After launching a wave, start one blocking wait as a **background** Bash
