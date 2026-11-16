@@ -344,6 +344,7 @@ test("the wrapper commits a locked-down write worker's changes, with no hook fro
   plan(root, "run-wrapper-commit");
   checkpointPlan(root, "run-wrapper-commit");
   const marker = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "orch-hook-")), "ran");
+  repos.push(path.dirname(marker));
   const launched = launchTaskWorker(root, "run-wrapper-commit", "build", { constraints: [] }, {
     codexCommand: [process.execPath, writeFixture, "--no-commit", `--hooks=${marker}`]
   });
@@ -356,7 +357,6 @@ test("the wrapper commits a locked-down write worker's changes, with no hook fro
   assert.match(git(worktree, ["log", "-1", "--format=%b"]), /Orchestrator task build, build-attempt-1\./);
   const files = git(worktree, ["show", "--name-only", "--format=", "HEAD"]).trim().split("\n").sort();
   assert.deepEqual(files, [".husky/commit-msg", ".husky/post-commit", ".husky/pre-commit", "src/generated.js"]);
-  fs.rmSync(path.dirname(marker), { recursive: true, force: true });
 });
 
 test("a worker that re-aims its worktree's .git pointer cannot run code through the wrapper or inspection", async () => {
@@ -364,6 +364,7 @@ test("a worker that re-aims its worktree's .git pointer cannot run code through 
   plan(root, "run-wrapper-hijack");
   checkpointPlan(root, "run-wrapper-hijack");
   const marker = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "orch-hijack-")), "ran");
+  repos.push(path.dirname(marker));
   const launched = launchTaskWorker(root, "run-wrapper-hijack", "build", { constraints: [] }, {
     codexCommand: [process.execPath, writeFixture, "--no-commit", `--hijack-git=${marker}`]
   });
@@ -377,7 +378,6 @@ test("a worker that re-aims its worktree's .git pointer cannot run code through 
   const task = run.tasks.build;
   inspectTaskWorktree(task, task.attempts.at(-1));
   assert.equal(fs.existsSync(marker) ? fs.readFileSync(marker, "utf8") : "", "", "inspection did not run the planted fsmonitor");
-  fs.rmSync(path.dirname(marker), { recursive: true, force: true });
 });
 
 test("a write worker paused for input keeps its changes uncommitted, and a failed commit fails the worker", async () => {
