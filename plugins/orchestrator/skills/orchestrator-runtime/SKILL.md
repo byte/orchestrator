@@ -44,7 +44,8 @@ All support `--json` where structured output is useful.
   attempt resumes on the same Codex thread, in the same worktree, with the attempt's own model,
   effort, and sandbox. A grant belongs to the task, never the lane, and inspection and integration
   honour it; it is refused when it may overlap another running, paused, or unintegrated task's
-  write surface. Grant inside the lane on your own authority; a grant outside the lane is refused
+  write surface, and a pending task whose scope overlaps it cannot launch until the granted task
+  is integrated or cancelled. Grant inside the lane on your own authority; a grant outside the lane is refused
   until you ask the user and repeat it with `--user-approved`. A task gets at most 3 answered round
   trips; a further request is recorded as an ordinary blocker.
 - Wait for workers with `run wait <run-id> [--timeout <seconds>] --json` started as a background

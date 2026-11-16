@@ -950,6 +950,39 @@ function validateLunaLeaves(run, tasks) {
  * lane, so the lane's scope and the planned task scope are never rewritten.
  * Tasks saved before grants existed simply have none.
  */
+/**
+ * Overlaps between a write task about to launch and the granted scope of another
+ * active write task, in either direction. `run answer` checks a grant against
+ * tasks active when it is made; this catches a task that was still pending then.
+ * Planned scopes are not compared with each other here: overlapping plans are
+ * the supervisor's decision, but a grant was promised to be exclusive.
+ */
+function grantedSurfaceConflicts(run, task) {
+  if (task.kind !== "write") {
+    return [];
+  }
+  const grantedTo = (entry) => (entry.scopeGrants ?? []).flatMap((grant) => grant.patterns ?? []);
+  const own = effectiveTaskScope(task);
+  const ownGrants = grantedTo(task);
+  const conflicts = [];
+  for (const other of Object.values(run.tasks)) {
+    if (other.id === task.id || other.kind !== "write" || !WRITE_SURFACE_TASK_STATUSES.has(other.status)) {
+      continue;
+    }
+    for (const pattern of grantedTo(other)) {
+      for (const overlap of overlappingPatterns(pattern, own)) {
+        conflicts.push(`its scope \`${overlap}\` overlaps \`${pattern}\` granted to ${other.status} task "${other.id}"`);
+      }
+    }
+    for (const pattern of ownGrants) {
+      for (const overlap of overlappingPatterns(pattern, effectiveTaskScope(other))) {
+        conflicts.push(`its granted \`${pattern}\` overlaps \`${overlap}\` of ${other.status} task "${other.id}"`);
+      }
+    }
+  }
+  return [...new Set(conflicts)];
+}
+
 export function effectiveTaskScope(task) {
   const granted = (task.scopeGrants ?? []).flatMap((grant) => grant.patterns ?? []);
   return [...new Set([...(task.scope ?? []), ...granted])];
@@ -1769,6 +1802,13 @@ export function claimTask(cwd, runId, taskId, lane) {
       throw new Error(
         `Run "${id}" cannot dispatch work because ${checkpoint.reason}. Record the reasoning behind the current plan first:\n` +
           `  orch run checkpoint ${id} --summary "<plan and why>" --decision "<decision>" --risk "<risk>" --next "<next action>"`
+      );
+    }
+    const grantConflicts = grantedSurfaceConflicts(run, task);
+    if (grantConflicts.length) {
+      throw new Error(
+        `Task "${task.id}" cannot launch yet: ${grantConflicts.join("; ")}. A scope granted through ` +
+          "run answer is exclusive while its task is active; wait until that task is integrated or cancelled."
       );
     }
     const route = effectiveTaskRoute(run, task);

@@ -29,6 +29,10 @@ Fixes:
 - A model fallback never lands a task other tasks depend on on `luna`, matching
   the plan-time leaf rule, unless the run is pinned to luna. With no other rung
   left the task fails for the supervisor to re-route.
+- A scope granted through `run answer` stays exclusive. A task that was still
+  pending when the grant was made is refused at launch if its scope overlaps
+  the grant (or its own grant overlaps an active task), instead of launching a
+  second worker onto the same paths.
 
 ## 0.6.0
 

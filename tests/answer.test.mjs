@@ -610,3 +610,22 @@ test("a model rejection on an answered resume fails the attempt instead of subst
   assert.equal(task.attempts[0].modelUnavailable, undefined);
   assert.deepEqual(loadRun(root, "run-answer-rejected").unavailableModels ?? [], []);
 });
+
+test("a pending task cannot launch onto scope granted to an active task", () => {
+  const root = repo();
+  plan(root, "run-grant-pending", [
+    { id: "work", kind: "write", scope: ["src/**"] },
+    { id: "helpers", kind: "write", scope: ["lib/**"] },
+    { id: "docs", kind: "write", scope: ["src/docs/**"] }
+  ]);
+  paused(root, "run-grant-pending", "work");
+  // helpers is pending, so the grant is not refused when it is made.
+  answerTask(root, "run-grant-pending", "work", lane(root), { grantScope: ["lib/helper.js"] });
+  assert.throws(
+    () => claimTask(root, "run-grant-pending", "helpers", lane(root)),
+    /Task "helpers" cannot launch yet: its scope `lib\/\*\*` overlaps `lib\/helper\.js` granted to dispatching task "work"/
+  );
+  assert.equal(loadRun(root, "run-grant-pending").tasks.helpers.status, "pending");
+  // Planned scopes that overlap each other are still the supervisor's call.
+  assert.doesNotThrow(() => claimTask(root, "run-grant-pending", "docs", lane(root)));
+});

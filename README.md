@@ -312,7 +312,8 @@ creates no new attempt, records no outcome, and does not count as a retry. A gra
 the task, never on the lane, and inspection and integration honour it for that task only. The
 supervisor may grant inside the lane on its own authority; a grant outside the lane is refused
 until the user agrees and `--user-approved` is passed. A grant that may overlap another running,
-paused, or unintegrated task's write surface is refused. Each task gets at most 3 answered round
+paused, or unintegrated task's write surface is refused, and a task still pending when the grant
+was made cannot launch onto it until the granted task is integrated or cancelled. Each task gets at most 3 answered round
 trips; a further request becomes an ordinary blocker.
 
 Supervisors can explicitly stop a reported task at a policy or authority boundary, or terminalize

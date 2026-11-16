@@ -332,7 +332,9 @@ Authority over a grant:
   unchanged, and `run inspect` and `run integrate` accept the granted paths for that task only.
   Everything else out of scope is still refused.
 - The runtime refuses a grant that may overlap the write surface of another task that is running,
-  paused, or reported but not yet integrated. Deny it, narrow it, or wait for that task.
+  paused, or reported but not yet integrated. Deny it, narrow it, or wait for that task. The
+  grant stays exclusive afterwards: a task that was pending when it was made cannot launch onto it
+  (`run launch` refuses and names the grant) until the granted task is integrated or cancelled.
 - Deny when the change belongs to another task or would widen the task's purpose; say in
   `--reply` how the worker should proceed within scope.
 
