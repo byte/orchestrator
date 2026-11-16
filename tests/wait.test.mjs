@@ -17,6 +17,7 @@ import {
   taskTimeoutMinutes,
   verifyTask
 } from "../plugins/orchestrator/scripts/lib/runs.mjs";
+import { atomicWrite } from "../plugins/orchestrator/scripts/lib/state.mjs";
 import { WAIT_EXIT_CODES, waitForRunChange } from "../plugins/orchestrator/scripts/lib/wait.mjs";
 import { launchTaskWorker, pollRunWorkers, stopTaskWorker } from "../plugins/orchestrator/scripts/lib/workers.mjs";
 import { CLI, checkpointPlan, cleanup, makeRepo, runCli } from "./helpers.mjs";
@@ -369,4 +370,35 @@ test("runs saved before wall-clock limits existed load and wait on the tier defa
   assert.equal(result.outcome, "changed");
   assert.equal(result.updates[0].status, "reported");
   assert.equal(pollRunWorkers(root, "run-v5-wait").length, 0);
+});
+
+test("a quiet worker does not make the wait poll on its own lock file", async () => {
+  const root = repo();
+  plan(root, "run-quiet");
+  launch(root, "run-quiet", "work", [process.execPath, slowFixture, "--delay=10000"]);
+  reap(root, "run-quiet", "work");
+  await waitForStatus(loadRun(root, "run-quiet").tasks.work.attempts.at(-1).runner.statusFile, "running");
+  const result = await waitForRunChange(root, "run-quiet", { timeoutMs: 3000, intervalMs: NO_FALLBACK_MS });
+  assert.equal(result.outcome, "timeout");
+  // start, rearm, maybe a watch wake from the worker starting, and the final look.
+  assert.ok(result.polls <= 6, `expected a handful of polls, got ${result.polls}`);
+});
+
+test("a change to run.json made by another process wakes the wait", async () => {
+  const root = repo();
+  plan(root, "run-external");
+  launch(root, "run-external", "work", [process.execPath, slowFixture, "--delay=10000"]);
+  reap(root, "run-external", "work");
+  await waitForStatus(loadRun(root, "run-external").tasks.work.attempts.at(-1).runner.statusFile, "running");
+  const started = Date.now();
+  const waiting = waitForRunChange(root, "run-external", { timeoutMs: 15000, intervalMs: NO_FALLBACK_MS });
+  setTimeout(() => {
+    const run = JSON.parse(fs.readFileSync(runFile(root, "run-external"), "utf8"));
+    run.tasks.work.status = "cancelled";
+    atomicWrite(runFile(root, "run-external"), `${JSON.stringify(run, null, 2)}\n`);
+  }, 500);
+  const result = await waiting;
+  assert.equal(result.outcome, "idle");
+  assert.equal(result.wakeSource, "watch");
+  assert.ok(Date.now() - started < 5000, "woken by the run.json rename, not a fallback poll");
 });

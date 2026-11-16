@@ -33,9 +33,13 @@ const DEBOUNCE_MS = 100;
 // Consecutive failed polls tolerated before the wait gives up with an error. A
 // single failure is usually a race with a concurrent `run poll`.
 const MAX_POLL_ERRORS = 3;
-// Files whose replacement means a worker's state may have changed. The wrapper
-// writes status.json by rename, so the event may name the temporary file.
-const WORKER_FILES = /^(status\.json|result\.json)/;
+// Files whose replacement means state may have changed. Both are written by
+// rename, so an event may name the temporary file (`<name>.<pid>[.<ms>].tmp`)
+// instead. Anything else must not match: every poll takes `run.json.lock`, and
+// a filter that let it through woke the wait on its own polling, about ten
+// times a second.
+const WORKER_FILES = /^(status|result)\.json(\.[\d.]+\.tmp)?$/;
+const RUN_FILES = /^run\.json(\.[\d.]+\.tmp)?$/;
 
 function activeTasks(run) {
   return Object.values(run.tasks).filter((task) => ["dispatching", "running"].includes(task.status));
@@ -186,7 +190,7 @@ export function waitForRunChange(
           const watcher = fs.watch(directory, { persistent: true }, (_event, filename) => {
             // Some platforms omit the filename; treat that as a possible change.
             const name = filename ? String(filename) : null;
-            if (name && (kind === "run" ? !name.startsWith("run.json") : !WORKER_FILES.test(name))) {
+            if (name && !(kind === "run" ? RUN_FILES : WORKER_FILES).test(name)) {
               return;
             }
             schedule("watch");
