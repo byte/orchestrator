@@ -105,6 +105,26 @@ function diffFiles(cwd, before, after) {
   return output.split("\0").filter(Boolean).sort();
 }
 
+/** Files declared by earlier attempts that worked in this attempt's worktree. */
+function carriedDeclarations(task, attempt) {
+  const index = task.attempts?.indexOf(attempt) ?? -1;
+  if (index <= 0) {
+    return [];
+  }
+  const carried = new Set();
+  for (const earlier of task.attempts.slice(0, index)) {
+    if (earlier.worktree?.path !== attempt.worktree.path) {
+      continue;
+    }
+    const files = earlier.review?.result?.structured?.files_touched ??
+      parseFileList(earlier.review?.result?.fields?.files_touched);
+    for (const file of files ?? []) {
+      carried.add(file);
+    }
+  }
+  return [...carried];
+}
+
 export function inspectTaskWorktree(task, attempt) {
   const worktree = attempt.worktree;
   if (!worktree?.path || !fs.existsSync(worktree.path)) {
@@ -134,8 +154,13 @@ export function inspectTaskWorktree(task, attempt) {
   const grantedScope = scope.filter((pattern) => !task.scope.includes(pattern));
   const declared = task.result?.structured?.files_touched ??
     parseFileList(task.result?.fields?.files_touched);
+  // A warm retry reuses its predecessor's worktree, so the diff from baseHead
+  // also holds the earlier attempts' commits. The worker reports only what this
+  // attempt changed; files an earlier attempt in the same worktree declared count
+  // as declared too, or a retry that fixed one file could never integrate.
+  const carried = carriedDeclarations(task, attempt);
   const fileSet = new Set(files);
-  const declaredSet = new Set(declared);
+  const declaredSet = new Set([...declared, ...carried]);
   return {
     path: worktree.path,
     branch: worktree.branch,
@@ -149,6 +174,7 @@ export function inspectTaskWorktree(task, attempt) {
     scope,
     grantedScope,
     declared,
+    carried,
     undeclared: files.filter((file) => !declaredSet.has(file)),
     phantom: declared.filter((file) => !fileSet.has(file)),
     ready:

@@ -1396,7 +1396,12 @@ function renderPreviousAttempt(task, attempt) {
     ? task.attempts.find((entry) => entry.id === attempt.retry.previousAttemptId)
     : priorWorkerAttempt(task, task.attempts.indexOf(attempt));
   if (!previous || previous === attempt) {
-    return "";
+    // No earlier attempt reached a worker (a launch failed, say), so there is
+    // nothing to carry over, but a retry note is still the supervisor's
+    // correction and must reach the worker.
+    return attempt.retry?.note
+      ? ["## Supervisor correction for this attempt", "", attempt.retry.note].join("\n")
+      : "";
   }
   const retry = attempt.retry ?? null;
   const warm = Boolean(attempt.resumedFromAttemptId);

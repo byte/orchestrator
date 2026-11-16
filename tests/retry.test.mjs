@@ -25,7 +25,7 @@ import {
 } from "../plugins/orchestrator/scripts/lib/runs.mjs";
 import { launchTaskWorker, pollRunWorkers } from "../plugins/orchestrator/scripts/lib/workers.mjs";
 import { inspectTaskWorktree } from "../plugins/orchestrator/scripts/lib/worktrees.mjs";
-import { checkpointPlan, cleanup, makeRepo, runCli } from "./helpers.mjs";
+import { checkpointPlan, cleanup, git, makeRepo, runCli } from "./helpers.mjs";
 
 const fixtures = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures");
 const resumeFixture = path.join(fixtures, "fake-codex-resume.mjs");
@@ -414,4 +414,55 @@ test("runs saved before warm retries existed still retry, warm when they can", (
   assert.equal(second.retry.resumeThreadId, "thread-old");
   assert.match(second.briefing, /old evidence/);
   assert.equal(loadRun(root, "run-old-state").version, 6);
+});
+
+test("a warm retry in a reused worktree integrates without redeclaring its predecessor's files", () => {
+  const root = makeRepo();
+  repos.push(root);
+  const baseHead = git(root, ["rev-parse", "HEAD"]).trim();
+  const commit = (file, text) => {
+    fs.mkdirSync(path.join(root, "src"), { recursive: true });
+    fs.writeFileSync(path.join(root, file), text, "utf8");
+    git(root, ["add", file]);
+    git(root, ["commit", "--quiet", "-m", text]);
+  };
+  commit("src/a.js", "a\n");
+  commit("src/b.js", "b\n");
+  commit("src/b.js", "b fixed\n");
+  const worktree = { path: root, branch: "main", baseHead };
+  const declared = (files) => ({ structured: { files_touched: files } });
+  const first = { id: "work-attempt-1", worktree, review: { result: declared(["src/a.js", "src/b.js"]) } };
+  const second = {
+    id: "work-attempt-2",
+    worktree,
+    resumedFromAttemptId: first.id,
+    retry: { worktree: { mode: "reuse", attemptId: first.id } }
+  };
+  const task = { id: "work", scope: ["src/**"], attempts: [first, second], result: declared(["src/b.js"]) };
+  const inspection = inspectTaskWorktree(task, second);
+  assert.deepEqual(inspection.undeclared, []);
+  assert.deepEqual(inspection.carried, ["src/a.js", "src/b.js"]);
+  assert.equal(inspection.ready, true);
+
+  // A fresh worktree carries nothing: an undeclared file there is still refused.
+  const fresh = { ...second, worktree: { ...worktree, path: `${root}/` } };
+  const unrelated = inspectTaskWorktree({ ...task, attempts: [first, fresh] }, fresh);
+  assert.deepEqual(unrelated.undeclared, ["src/a.js"]);
+  assert.equal(unrelated.ready, false);
+});
+
+test("a retry note reaches the worker when no earlier attempt reached one", () => {
+  const root = repo();
+  plan(root, "run-note-launch");
+  const first = claimTask(root, "run-note-launch", "work", lane);
+  failTaskAttempt(root, "run-note-launch", "work", {
+    attemptId: first.attemptId,
+    error: "spawn codex ENOENT",
+    reasonCode: "worker_launch_failed",
+    signals: ["worker_launch_error"],
+    launchFailed: true
+  });
+  retryTask(root, "run-note-launch", "work", { note: "Use the v2 API." });
+  const second = claimTask(root, "run-note-launch", "work", lane);
+  assert.match(second.briefing, /## Supervisor correction for this attempt\n\nUse the v2 API\./);
 });

@@ -17,6 +17,11 @@ Fixes:
 - An OVER LIMIT mark from before an answer no longer shows once the resumed
   worker's clock restarts, and route evidence no longer counts the time a
   worker sat paused awaiting an answer as model runtime.
+- A warm retry that reuses its predecessor's worktree can integrate when it
+  reports only the files it changed itself. Files an earlier attempt in the
+  same worktree declared count as declared, instead of failing inspection.
+- A `run retry --note` reaches the worker even when no earlier attempt reached
+  one (the first launch failed, say). Before, it was stored but never briefed.
 
 ## 0.6.0
 
