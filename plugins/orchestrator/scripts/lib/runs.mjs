@@ -596,7 +596,10 @@ export function effectiveTaskRoute(run, task) {
   }
   const start = MODEL_FALLBACK_LADDER.indexOf(requested.model);
   if (start === -1) {
-    return { ...requested, requestedModel: requested.model, substitution: null };
+    // A model off the ladder (a 0.5.x run's legacy slug) has nothing below it to
+    // fall back to, and launching the model Codex already rejected would only be
+    // rejected again.
+    return { ...requested, requestedModel: requested.model, substitution: null, exhausted: true, offLadder: true };
   }
   for (const candidate of MODEL_FALLBACK_LADDER.slice(start + 1)) {
     if (unavailable.has(candidate) ||
@@ -777,10 +780,42 @@ export function taskTimeoutMinutes(task, attempt = null) {
  */
 export class StaleRunnerError extends Error {}
 
+/**
+ * Thrown by attachExecution when the attempt left `dispatching` while its worker
+ * was being spawned (it was cancelled, say). The caller stops the worker; the
+ * attempt keeps the state it was moved to.
+ */
+export class AttachRefusedError extends Error {}
+
+/**
+ * Thrown by answerTask when the answer was saved but its event could not be
+ * appended. The answer is on disk with no runner attached, so the caller must
+ * revert it, which needs the attempt id this carries.
+ */
+export class AnswerSavedError extends Error {
+  constructor(message, { attemptId }) {
+    super(message);
+    this.attemptId = attemptId;
+  }
+}
+
+/**
+ * A poll's write is stale when the runner it read is no longer attached, or when
+ * the attempt has already left the states a runner reports from: a concurrent
+ * poll collected it (a paused request, say) before any answer replaced the runner.
+ */
 function assertCurrentRunner(attempt, runnerStatusFile) {
-  if (runnerStatusFile !== undefined && (attempt?.runner?.statusFile ?? null) !== runnerStatusFile) {
+  if (runnerStatusFile === undefined) {
+    return;
+  }
+  if ((attempt?.runner?.statusFile ?? null) !== runnerStatusFile) {
     throw new StaleRunnerError(
       `Attempt "${attempt?.id}" is no longer attached to the runner at ${runnerStatusFile}.`
+    );
+  }
+  if (!["dispatching", "running"].includes(attempt.status)) {
+    throw new StaleRunnerError(
+      `Attempt "${attempt.id}" was already collected (it is ${attempt.status}).`
     );
   }
 }
@@ -1842,9 +1877,11 @@ export function claimTask(cwd, runId, taskId, lane) {
     const route = effectiveTaskRoute(run, task);
     if (route.exhausted) {
       throw new Error(
-        `Task "${task.id}" routes to ${route.model}, which Codex rejected as unavailable in this run, and no ` +
-          "allowed model remains below it" +
-          `${fallbackCandidateAllowed(run, task, LUNA_MODEL) ? "" : " (luna is not used for a task others depend on)"}. ` +
+        `Task "${task.id}" routes to ${route.model}, which Codex rejected as unavailable in this run, and ` +
+          (route.offLadder
+            ? "it is not on the fallback ladder, so no model can stand in for it. "
+            : "no allowed model remains below it" +
+              `${fallbackCandidateAllowed(run, task, LUNA_MODEL) ? "" : " (luna is not used for a task others depend on)"}. `) +
           "Re-route the task with run plan, or ask the user how to proceed."
       );
     }
@@ -2349,18 +2386,22 @@ export function answerTask(
     task.updatedAt = nowIso();
     refreshRunStatus(run);
     writeRun(cwd, run);
-    appendEvent(cwd, id, {
-      type: "task.input_answered",
-      taskId: task.id,
-      attemptId: attempt.id,
-      round: round.round,
-      kind: request.kind,
-      mode: round.answer.mode,
-      patterns,
-      insideLane,
-      userApproved: round.answer.userApproved,
-      replyPresent: Boolean(text)
-    });
+    try {
+      appendEvent(cwd, id, {
+        type: "task.input_answered",
+        taskId: task.id,
+        attemptId: attempt.id,
+        round: round.round,
+        kind: request.kind,
+        mode: round.answer.mode,
+        patterns,
+        insideLane,
+        userApproved: round.answer.userApproved,
+        replyPresent: Boolean(text)
+      });
+    } catch (error) {
+      throw new AnswerSavedError(error.message, { attemptId: attempt.id });
+    }
     const route = { model: attempt.model, reasoningEffort: attempt.reasoningEffort };
     return {
       runId: id,
@@ -2397,6 +2438,11 @@ export function revertTaskAnswer(cwd, runId, taskId, { attemptId, error, failedR
     round.failedAnswers ??= [];
     round.failedAnswers.push({ ...round.answer, error: String(error ?? ""), failedAt: nowIso() });
     attempt.runner = round.answer.previousRunner ?? attempt.runner;
+    // A poll may have synced the failed runner's thread (a replacement thread,
+    // say) onto the attempt; the next answer must resume the original one.
+    if (Object.hasOwn(round.answer, "previousThreadId")) {
+      attempt.threadId = round.answer.previousThreadId;
+    }
     round.answer = null;
     task.scopeGrants = (task.scopeGrants ?? []).filter(
       (grant) => !(grant.attemptId === attempt.id && grant.round === round.round)
@@ -2425,6 +2471,13 @@ export function attachExecution(cwd, runId, taskId, { attemptId, worktree, runne
     const run = loadRun(cwd, id);
     const task = requireTask(run, taskId);
     const attempt = currentAttempt(task, attemptId);
+    // Only a dispatching attempt takes its worker. One cancelled while the worker
+    // was spawned must stay cancelled; the caller stops the worker instead.
+    if (attempt.status !== "dispatching" || task.status !== "dispatching") {
+      throw new AttachRefusedError(
+        `Attempt "${attempt.id}" is ${attempt.status}, not dispatching; its worker was not attached.`
+      );
+    }
     attempt.worktree = worktree;
     attempt.runner = runner;
     attempt.status = "running";

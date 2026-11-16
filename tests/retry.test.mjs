@@ -306,8 +306,8 @@ test("a resumed read-only task is still launched read-only", async () => {
   const [fresh, resumed] = readLog(calls);
   assert.equal(fresh.argv.includes("resume"), false);
   assert.ok(resumed.argv.includes("resume"));
-  assertReadOnlyLaunch(fresh);
-  assertReadOnlyLaunch(resumed);
+  // Each launch names its own profile, so no configured profile can contribute grants.
+  assert.notEqual(assertReadOnlyLaunch(fresh), assertReadOnlyLaunch(resumed));
   // Each worker gets its own scratch directory, and neither outlives its worker.
   assert.notEqual(fresh.tmpdir, resumed.tmpdir);
   assert.equal(fs.existsSync(fresh.tmpdir), false);
@@ -468,6 +468,82 @@ test("a warm retry in a reused worktree integrates without redeclaring its prede
   // A worktree saved without a reuse head carries nothing.
   const legacy = { ...second, worktree: { ...second.worktree, reusedHead: undefined } };
   assert.deepEqual(inspectTaskWorktree({ ...task, attempts: [first, legacy] }, legacy).undeclared, ["src/a.js", "src/c.js"]);
+});
+
+test("an older declaration does not cover a later attempt's undeclared change", () => {
+  const root = makeRepo();
+  repos.push(root);
+  const head = () => git(root, ["rev-parse", "HEAD"]).trim();
+  const commit = (file, text) => {
+    fs.mkdirSync(path.join(root, "src"), { recursive: true });
+    fs.writeFileSync(path.join(root, file), text, "utf8");
+    git(root, ["add", file]);
+    git(root, ["commit", "--quiet", "-m", text]);
+  };
+  const declared = (files) => ({ structured: { files_touched: files } });
+  const baseHead = head();
+  // Attempt 1 changes a and declares a and x (x is a phantom).
+  commit("src/a.js", "a\n");
+  const secondHead = head();
+  // Attempt 2 changes x without declaring it, and fails inspection.
+  commit("src/x.js", "x\n");
+  // Attempt 3 changes a declared file y only.
+  const thirdHead = head();
+  commit("src/y.js", "y\n");
+  const first = {
+    id: "work-attempt-1",
+    worktree: { path: root, branch: "main", baseHead },
+    review: { result: declared(["src/a.js", "src/x.js"]) }
+  };
+  const second = {
+    id: "work-attempt-2",
+    worktree: { path: root, branch: "main", baseHead, reusedHead: secondHead, reusedFromAttemptId: first.id },
+    review: { result: declared([]) }
+  };
+  const third = {
+    id: "work-attempt-3",
+    worktree: { path: root, branch: "main", baseHead, reusedHead: thirdHead, reusedFromAttemptId: second.id }
+  };
+  const task = { id: "work", scope: ["src/**"], attempts: [first, second, third], result: declared(["src/y.js"]) };
+  const inspection = inspectTaskWorktree(task, third);
+  // a is still attempt 1's declared change; x was last changed by attempt 2,
+  // which did not declare it, so attempt 1's phantom claim does not carry it.
+  assert.deepEqual(inspection.carried, ["src/a.js"]);
+  assert.deepEqual(inspection.undeclared, ["src/x.js"]);
+  assert.equal(inspection.ready, false);
+
+
+  // The same holds when a later attempt changes a file an earlier one declared:
+  // attempt 2 also rewrote a without declaring it, so a is no longer carried.
+  const root2 = makeRepo();
+  repos.push(root2);
+  const head2 = () => git(root2, ["rev-parse", "HEAD"]).trim();
+  const commit2 = (file, text) => {
+    fs.mkdirSync(path.join(root2, "src"), { recursive: true });
+    fs.writeFileSync(path.join(root2, file), text, "utf8");
+    git(root2, ["add", file]);
+    git(root2, ["commit", "--quiet", "-m", text]);
+  };
+  const base2 = head2();
+  commit2("src/a.js", "a\n");
+  const reuse2 = head2();
+  commit2("src/a.js", "a rewritten\n");
+  const reuse3 = head2();
+  commit2("src/y.js", "y\n");
+  const at = (extra) => ({ path: root2, branch: "main", baseHead: base2, ...extra });
+  const rewritten = {
+    id: "work",
+    scope: ["src/**"],
+    result: declared(["src/y.js"]),
+    attempts: [
+      { id: "work-attempt-1", worktree: at({}), review: { result: declared(["src/a.js"]) } },
+      { id: "work-attempt-2", worktree: at({ reusedHead: reuse2 }), review: { result: declared([]) } },
+      { id: "work-attempt-3", worktree: at({ reusedHead: reuse3 }) }
+    ]
+  };
+  const latest = inspectTaskWorktree(rewritten, rewritten.attempts[2]);
+  assert.deepEqual(latest.carried, []);
+  assert.deepEqual(latest.undeclared, ["src/a.js"]);
 });
 
 test("a retry note reaches the worker when no earlier attempt reached one", () => {

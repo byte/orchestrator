@@ -78,24 +78,29 @@ export function checkpointPlan(root, runId, summary = "plan approved") {
 
 /**
  * Assert that a logged Codex invocation (from a fixture's `--log`) ran read-only:
- * no `--sandbox` flag (it would override the profile), the orchestrator's
- * read profile extending `:read-only`, and write access granted only to the
- * private scratch directory the worker saw as TMPDIR, outside the worktree.
+ * no `--sandbox` flag (it would override the profile), a freshly named
+ * orchestrator read profile extending `:read-only`, and write access granted
+ * only to the private scratch directory the worker saw as TMPDIR, outside the
+ * worktree. Returns the profile name.
  */
 export function assertReadOnlyLaunch(entry) {
   const { argv } = entry;
   assert.equal(argv.includes("--sandbox"), false, "read-only launches must not pass --sandbox");
   assert.equal(argv.includes("workspace-write"), false);
   const values = argv.flatMap((arg, index) => (arg === "-c" ? [argv[index + 1]] : []));
-  assert.ok(values.includes('default_permissions="orchestrator-read"'), values.join(" "));
-  assert.ok(values.includes('permissions.orchestrator-read.extends=":read-only"'), values.join(" "));
-  const filesystem = values.filter((value) => value.startsWith("permissions.orchestrator-read.filesystem="));
+  const selected = values.map((value) => /^default_permissions="(orchestrator-read-[0-9a-f]{16})"$/.exec(value)).filter(Boolean);
+  assert.equal(selected.length, 1, values.join(" "));
+  const name = selected[0][1];
+  assert.ok(values.includes(`permissions.${name}.extends=":read-only"`), values.join(" "));
+  const filesystem = values.filter((value) => value.startsWith(`permissions.${name}.filesystem=`));
   assert.equal(filesystem.length, 1);
-  assert.equal(filesystem[0], `permissions.orchestrator-read.filesystem={${JSON.stringify(entry.tmpdir)}="write"}`);
+  assert.equal(filesystem[0], `permissions.${name}.filesystem={${JSON.stringify(entry.tmpdir)}="write"}`);
+  assert.equal(values.filter((value) => value.startsWith("permissions.")).length, 2, "no other permission keys");
   assert.ok(entry.tmpdirExists, "the scratch TMPDIR exists while the worker runs");
   assert.equal(path.relative(entry.cwd, entry.tmpdir).startsWith(".."), true, "scratch is outside the worktree");
   const resumeAt = argv.indexOf("resume");
   if (resumeAt !== -1) {
-    assert.ok(argv.lastIndexOf("-c", argv.indexOf(filesystem[0])) < resumeAt, "sandbox config precedes resume");
+    assert.ok(argv.indexOf(filesystem[0]) < resumeAt, "sandbox config precedes resume");
   }
+  return name;
 }

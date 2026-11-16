@@ -9,7 +9,9 @@ import { requireLane } from "../plugins/orchestrator/scripts/lib/lanes.mjs";
 import { collectLearningExamples, listLearningExamples } from "../plugins/orchestrator/scripts/lib/learning.mjs";
 import {
   MAX_INPUT_ROUNDS,
+  AttachRefusedError,
   answerTask,
+  attachExecution,
   bindAttempt,
   cancelTask,
   claimTask,
@@ -20,8 +22,10 @@ import {
   renderSupervisorBriefing,
   replacePlan,
   retryTask,
+  revertTaskAnswer,
   runFile,
   StaleRunnerError,
+  syncExecutionStatus,
   verifyTask
 } from "../plugins/orchestrator/scripts/lib/runs.mjs";
 import {
@@ -828,3 +832,197 @@ test("a poll racing run answer skips the runner it read instead of collecting it
   assert.equal(task.attempts[0].inputRequests.length, 1);
   stopTaskWorker(task.attempts[0]);
 });
+
+/** Wait until a process is gone; true if it exited within the deadline. */
+async function gone(pid, ms = 5000) {
+  const alive = () => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (error) {
+      return error.code !== "ESRCH";
+    }
+  };
+  const deadline = Date.now() + ms;
+  while (alive() && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return !alive();
+}
+
+/** Run `effect` once, the first time a directory matching `pattern` is created. */
+function onMkdir(pattern, effect) {
+  const original = fs.mkdirSync;
+  let fired = false;
+  fs.mkdirSync = function (target, ...rest) {
+    if (!fired && pattern.test(String(target))) {
+      fired = true;
+      effect();
+    }
+    return original.call(this, target, ...rest);
+  };
+  return { restore: () => { fs.mkdirSync = original; }, fired: () => fired };
+}
+
+test("a cancellation while an answered worker is spawned stays cancelled and the worker is stopped", async () => {
+  const root = repo();
+  plan(root, "run-answer-cancel");
+  launchTaskWorker(root, "run-answer-cancel", "work", lane(root), {
+    codexCommand: [process.execPath, askFixture, "--ask=scope:lib/helper.js", "--write=src/notes.txt"]
+  });
+  await settle(root, "run-answer-cancel");
+  // The answer is recorded; before its worker is attached, the user cancels.
+  const hook = onMkdir(/round-1$/, () => cancelTask(root, "run-answer-cancel", "work", "user stopped it"));
+  try {
+    assert.throws(
+      () => answerTaskWorker(root, "run-answer-cancel", "work", lane(root), {
+        grantScope: ["lib/helper.js"],
+        codexCommand: [process.execPath, path.join(fixtures, "fake-codex-slow.mjs"), "--delay=10000"]
+      }),
+      AttachRefusedError
+    );
+  } finally {
+    hook.restore();
+  }
+  assert.ok(hook.fired());
+  const task = loadRun(root, "run-answer-cancel").tasks.work;
+  assert.equal(task.status, "cancelled");
+  assert.equal(task.attempts[0].status, "cancelled");
+  const roundDir = path.join(path.dirname(task.attempts[0].inputRequests[0].answer.previousRunner.statusFile), "round-1");
+  const status = JSON.parse(fs.readFileSync(path.join(roundDir, "status.json"), "utf8"));
+  assert.ok(await gone(status.pid), `answered worker ${status.pid} still running after cancellation`);
+});
+
+test("a cancellation while a worker is launched stays cancelled and the worker is stopped", async () => {
+  const root = repo();
+  plan(root, "run-launch-cancel");
+  const hook = onMkdir(/work-attempt-1$/, () => cancelTask(root, "run-launch-cancel", "work", "user stopped it"));
+  try {
+    assert.throws(
+      () => launchTaskWorker(root, "run-launch-cancel", "work", lane(root), {
+        codexCommand: [process.execPath, path.join(fixtures, "fake-codex-slow.mjs"), "--delay=10000"]
+      }),
+      AttachRefusedError
+    );
+  } finally {
+    hook.restore();
+  }
+  assert.ok(hook.fired());
+  const task = loadRun(root, "run-launch-cancel").tasks.work;
+  assert.equal(task.status, "cancelled");
+  assert.equal(task.attempts[0].status, "cancelled");
+  assert.equal(task.attempts[0].outcome.terminalOutcome, "cancelled");
+  const status = JSON.parse(fs.readFileSync(path.join(path.dirname(runFile(root, "run-launch-cancel")), "workers", "work", "work-attempt-1", "status.json"), "utf8"));
+  assert.ok(await gone(status.pid), `launched worker ${status.pid} still running after cancellation`);
+});
+
+test("two polls racing on a paused worker do not crash the slower one", async () => {
+  const root = repo();
+  plan(root, "run-poll-race");
+  const launched = launchTaskWorker(root, "run-poll-race", "work", lane(root), {
+    codexCommand: [process.execPath, askFixture, "--ask=scope:lib/helper.js", "--write=src/notes.txt"]
+  });
+  const statusFile = launched.runner.statusFile;
+  const deadline = Date.now() + 10000;
+  while (Date.now() < deadline) {
+    try {
+      if (JSON.parse(fs.readFileSync(statusFile, "utf8")).status === "completed") {
+        break;
+      }
+    } catch {
+      // Not written yet.
+    }
+    await new Promise((resolve) => setTimeout(resolve, 40));
+  }
+  // The outer poll reads the finished runner; another poll collects the request
+  // before it acts, and no answer replaces the runner in between.
+  const original = fs.readFileSync;
+  let fired = false;
+  let inner;
+  fs.readFileSync = function (target, ...rest) {
+    const content = original.call(this, target, ...rest);
+    if (!fired && String(target) === statusFile) {
+      fired = true;
+      inner = pollRunWorkers(root, "run-poll-race");
+    }
+    return content;
+  };
+  try {
+    pollRunWorkers(root, "run-poll-race");
+  } finally {
+    fs.readFileSync = original;
+  }
+  assert.ok(fired);
+  assert.equal(inner.find((update) => update.taskId === "work").status, "needs_input");
+  const task = loadRun(root, "run-poll-race").tasks.work;
+  assert.equal(task.status, "needs_input");
+  assert.equal(task.attempts[0].inputRequests.length, 1);
+});
+
+test("an answer whose event cannot be written is reverted instead of left dispatching", async () => {
+  const root = repo();
+  plan(root, "run-answer-event");
+  launchTaskWorker(root, "run-answer-event", "work", lane(root), {
+    codexCommand: [process.execPath, askFixture, "--ask=scope:lib/helper.js", "--write=src/notes.txt", "--granted=lib/helper.js"]
+  });
+  await settle(root, "run-answer-event");
+  const events = eventsFile(root, "run-answer-event");
+  const original = fs.appendFileSync;
+  fs.appendFileSync = function (target, data, ...rest) {
+    if (String(target) === events && String(data).includes("task.input_answered")) {
+      throw new Error("disk full");
+    }
+    return original.call(this, target, data, ...rest);
+  };
+  try {
+    assert.throws(
+      () => answerTaskWorker(root, "run-answer-event", "work", lane(root), { grantScope: ["lib/helper.js"] }),
+      /disk full/
+    );
+  } finally {
+    fs.appendFileSync = original;
+  }
+  let task = loadRun(root, "run-answer-event").tasks.work;
+  assert.equal(task.status, "needs_input");
+  assert.ok(task.attempts[0].runner, "the paused runner is restored");
+  assert.equal(task.attempts[0].inputRequests[0].failedAnswers.length, 1);
+  assert.deepEqual(task.scopeGrants ?? [], []);
+
+  answerTaskWorker(root, "run-answer-event", "work", lane(root), { grantScope: ["lib/helper.js"] });
+  ({ task } = await settle(root, "run-answer-event"));
+  assert.equal(task.status, "reported");
+  assert.match(task.result.structured.summary, /granted=true/);
+});
+
+test("reverting a failed answer restores the thread the next answer resumes", async () => {
+  const root = repo();
+  plan(root, "run-answer-thread");
+  launchTaskWorker(root, "run-answer-thread", "work", lane(root), {
+    codexCommand: [process.execPath, askFixture, "--ask=scope:lib/helper.js", "--write=src/notes.txt"]
+  });
+  const { task: paused } = await settle(root, "run-answer-thread");
+  const original = paused.attempts[0].threadId;
+  assert.ok(original);
+  const answered = answerTask(root, "run-answer-thread", "work", lane(root), { grantScope: ["lib/helper.js"] });
+  const failedStatusFile = path.join(path.dirname(runFile(root, "run-answer-thread")), "failed-runner-status.json");
+  attachExecution(root, "run-answer-thread", "work", {
+    attemptId: answered.attemptId,
+    worktree: answered.worktree,
+    runner: { pid: null, status: "starting", statusFile: failedStatusFile, inputRound: 1 }
+  });
+  // A poll syncs the failed runner's replacement thread before the revert.
+  syncExecutionStatus(root, "run-answer-thread", "work", {
+    attemptId: answered.attemptId,
+    status: { status: "running", threadId: "discarded-replacement-thread" },
+    runnerStatusFile: failedStatusFile
+  });
+  revertTaskAnswer(root, "run-answer-thread", "work", {
+    attemptId: answered.attemptId,
+    error: "attach failed",
+    failedRunnerStatusFile: failedStatusFile
+  });
+  assert.equal(loadRun(root, "run-answer-thread").tasks.work.attempts[0].threadId, original);
+  const again = answerTask(root, "run-answer-thread", "work", lane(root), { grantScope: ["lib/helper.js"] });
+  assert.equal(again.resumeThreadId, original);
+});
+

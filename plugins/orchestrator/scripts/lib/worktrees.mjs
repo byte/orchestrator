@@ -109,11 +109,13 @@ function diffFiles(cwd, before, after) {
 }
 
 /**
- * Files earlier attempts in this reused worktree both declared and actually
- * changed before this attempt began, and that this attempt did not change again.
- * Anything this attempt committed must be in its own report; a file an earlier
- * attempt only claimed (a phantom) is never carried. A worktree saved before its
- * reuse head was recorded carries nothing.
+ * Files earlier attempts in this reused worktree changed and declared before
+ * this attempt began, and that this attempt did not change again. Each file is
+ * credited to the last earlier attempt whose own commits changed it, and only
+ * that attempt's declaration counts: a later undeclared change is never covered
+ * by an older declaration, and a file an attempt only claimed (a phantom) is
+ * never carried. Anything this attempt committed must be in its own report. A
+ * worktree saved before its reuse heads were recorded carries nothing.
  */
 function carriedDeclarations(task, attempt, head) {
   const worktree = attempt.worktree;
@@ -121,22 +123,37 @@ function carriedDeclarations(task, attempt, head) {
   if (index <= 0 || !worktree.reusedHead) {
     return [];
   }
-  const declared = new Set();
-  for (const earlier of task.attempts.slice(0, index)) {
-    if (earlier.worktree?.path !== worktree.path) {
-      continue;
-    }
-    const files = earlier.review?.result?.structured?.files_touched ??
-      parseFileList(earlier.review?.result?.fields?.files_touched);
-    for (const file of files ?? []) {
-      declared.add(file);
-    }
+  const chain = task.attempts.slice(0, index).filter((earlier) => earlier.worktree?.path === worktree.path);
+  // Each earlier attempt's commits run from where it began (its reuse head, or
+  // the worktree's base for the attempt that created it) to where the next began.
+  const starts = chain.map((earlier, position) =>
+    position === 0 ? earlier.worktree.reusedHead ?? earlier.worktree.baseHead : earlier.worktree.reusedHead);
+  if (!chain.length || starts.some((start) => !start)) {
+    return [];
   }
-  const before = worktree.reusedHead === worktree.baseHead
+  const ends = [...starts.slice(1), worktree.reusedHead];
+  const lastChangedBy = new Map();
+  chain.forEach((earlier, position) => {
+    if (starts[position] === ends[position]) {
+      return;
+    }
+    for (const file of diffFiles(worktree.path, starts[position], ends[position])) {
+      lastChangedBy.set(file, earlier);
+    }
+  });
+  const before = new Set(worktree.reusedHead === worktree.baseHead
     ? []
-    : diffFiles(worktree.path, worktree.baseHead, worktree.reusedHead);
+    : diffFiles(worktree.path, worktree.baseHead, worktree.reusedHead));
   const own = new Set(head === worktree.reusedHead ? [] : diffFiles(worktree.path, worktree.reusedHead, head));
-  return before.filter((file) => declared.has(file) && !own.has(file));
+  const declaredBy = (earlier) => new Set(
+    earlier.review?.result?.structured?.files_touched ??
+      parseFileList(earlier.review?.result?.fields?.files_touched) ??
+      []
+  );
+  return [...lastChangedBy]
+    .filter(([file, earlier]) => before.has(file) && !own.has(file) && declaredBy(earlier).has(file))
+    .map(([file]) => file)
+    .sort();
 }
 
 export function inspectTaskWorktree(task, attempt) {

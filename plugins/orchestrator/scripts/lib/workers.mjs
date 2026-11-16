@@ -5,7 +5,9 @@ import { fileURLToPath } from "node:url";
 
 import { requireLane } from "./lanes.mjs";
 import {
+  AnswerSavedError,
   answerTask,
+  AttachRefusedError,
   attachExecution,
   cancelTask,
   claimTask,
@@ -222,6 +224,64 @@ function executionDir(cwd, runId, taskId, attemptId) {
   return path.join(cwd, ".orchestrator", "local", "runs", runId, "workers", taskId, attemptId);
 }
 
+const TERMINAL_RUNNER_STATUSES = new Set(["completed", "failed", "cancelled"]);
+
+/**
+ * Remove scratch directories that read-only workers of this attempt left behind.
+ * A wrapper removes its own when it exits, even on SIGTERM; only a hard kill or
+ * a crash leaves one, recorded as `scratchDir` in that runner's status file. Only
+ * a finished runner's directory, named as the wrapper names them, is removed.
+ */
+export function removeLeftoverScratch(cwd, runId, taskId, attemptId) {
+  const root = executionDir(cwd, runId, taskId, attemptId);
+  const removed = [];
+  const visit = (directory) => {
+    let entries;
+    try {
+      entries = fs.readdirSync(directory, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const entryPath = path.join(directory, entry.name);
+      if (entry.isDirectory()) {
+        visit(entryPath);
+        continue;
+      }
+      if (entry.name !== "status.json") {
+        continue;
+      }
+      let status;
+      try {
+        status = readJson(entryPath);
+      } catch {
+        continue;
+      }
+      const scratch = typeof status.scratchDir === "string" ? status.scratchDir : null;
+      const finished = TERMINAL_RUNNER_STATUSES.has(status.status) || !processAlive(status.pid);
+      if (scratch && finished && path.isAbsolute(scratch) &&
+          path.basename(scratch).startsWith("orch-worker-") && fs.existsSync(scratch)) {
+        fs.rmSync(scratch, { recursive: true, force: true });
+        removed.push(scratch);
+      }
+    }
+  };
+  visit(root);
+  return removed;
+}
+
+function processAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) {
+    return false;
+  }
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error.code === "EPERM";
+  }
+}
+
 function readJson(filePath) {
   return JSON.parse(fs.readFileSync(filePath, "utf8"));
 }
@@ -311,6 +371,7 @@ export function launchTaskWorker(
   { codexCommand = ["codex"] } = {}
 ) {
   const dispatch = claimTask(cwd, runId, taskId, lane);
+  let runner = null;
   try {
     const run = loadRun(cwd, runId);
     const task = run.tasks[taskId];
@@ -323,7 +384,7 @@ export function launchTaskWorker(
           task.attempts.find((entry) => entry.id === retry.worktree.attemptId)
         )
       : createTaskWorktree(cwd, run, task, attempt);
-    const runner = spawnWorker(cwd, executionDir(cwd, runId, taskId, attempt.id), {
+    runner = spawnWorker(cwd, executionDir(cwd, runId, taskId, attempt.id), {
       prompt: dispatch.briefing,
       codexCommand,
       worktreePath: worktree.path,
@@ -339,16 +400,31 @@ export function launchTaskWorker(
     });
     return { ...dispatch, worktree, runner };
   } catch (error) {
-    const policyRefusal = error.kind === "refused";
-    failTaskAttempt(cwd, runId, taskId, {
-      attemptId: dispatch.attemptId,
-      error: error.message,
-      terminalOutcome: policyRefusal ? "policy_refused" : "execution_failed",
-      action: policyRefusal ? "refuse" : "execute",
-      reasonCode: error.reasonCode ?? "worker_launch_failed",
-      signals: error.signals ?? ["worker_launch_error"],
-      launchFailed: true
-    });
+    // Record the failure first, so no poll sees the task attached to a worker
+    // being stopped; then stop a worker spawned before the failure. An attempt
+    // cancelled during the launch keeps its cancellation.
+    try {
+      if (!(error instanceof AttachRefusedError)) {
+        const policyRefusal = error.kind === "refused";
+        failTaskAttempt(cwd, runId, taskId, {
+          attemptId: dispatch.attemptId,
+          error: error.message,
+          terminalOutcome: policyRefusal ? "policy_refused" : "execution_failed",
+          action: policyRefusal ? "refuse" : "execute",
+          reasonCode: error.reasonCode ?? "worker_launch_failed",
+          signals: error.signals ?? ["worker_launch_error"],
+          launchFailed: true
+        });
+      }
+    } finally {
+      if (runner) {
+        try {
+          stopTaskWorker({ runner });
+        } catch {
+          // A worker that cannot be stopped is reported by its own status file.
+        }
+      }
+    }
     throw error;
   }
 }
@@ -613,7 +689,17 @@ export function answerTaskWorker(
   lane,
   { grantScope = [], deny = false, reply = null, userApproved = false, codexCommand = null } = {}
 ) {
-  const answered = answerTask(cwd, runId, taskId, lane, { grantScope, deny, reply, userApproved });
+  let answered;
+  try {
+    answered = answerTask(cwd, runId, taskId, lane, { grantScope, deny, reply, userApproved });
+  } catch (error) {
+    // The answer reached disk but its event did not: undo it, or the task would
+    // sit dispatching with no runner and refuse every later answer.
+    if (error instanceof AnswerSavedError) {
+      revertTaskAnswer(cwd, runId, taskId, { attemptId: error.attemptId, error: error.message });
+    }
+    throw error;
+  }
   let runner = null;
   try {
     const run = loadRun(cwd, runId);

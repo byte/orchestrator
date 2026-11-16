@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -37,6 +38,7 @@ function writeStatus(fields) {
     ...(spec.resumeThreadId ? { resumeThreadId: spec.resumeThreadId } : {}),
     ...(resumeFallback ? { resumeFallback } : {}),
     ...(sandboxFallback ? { sandboxFallback } : {}),
+    ...(scratchDir ? { scratchDir } : {}),
     ...fields
   });
 }
@@ -48,8 +50,14 @@ function writeStatus(fields) {
 // with write access to one private scratch directory, exported as TMPDIR. The
 // worktree and everything else stay unwritable. `--sandbox` must be left out:
 // when both are given, it wins over the profile (verified against Codex CLI
-// 0.169.0). The scratch directory is removed when the worker finishes cleanly.
-const READ_PROFILE = "orchestrator-read";
+// 0.169.0). The scratch directory is removed when the wrapper exits, including
+// on SIGTERM; one left by a hard kill is recorded in the status file for
+// `run cleanup`.
+//
+// The profile name is fresh for every launch. Codex merges `-c` overrides into
+// the user's config, so a fixed name would inherit any grants a user's config
+// already gives a profile of that name, and the probe below could not see them.
+const READ_PROFILE = `orchestrator-read-${crypto.randomBytes(8).toString("hex")}`;
 const [command, ...prefixArgs] = spec.codexCommand;
 const scratchDir = spec.sandbox === "read-only"
   ? fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "orch-worker-")))
@@ -66,51 +74,89 @@ function readProfileArgs() {
   ];
 }
 
+function inside(parent, child) {
+  let base;
+  try {
+    base = fs.realpathSync(parent);
+  } catch {
+    return false;
+  }
+  const relative = path.relative(base, child);
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
 // Without `--sandbox`, a read worker is read-only only if Codex applies the
 // profile. A Codex that ignores or rejects it would fall back to the user's
 // default permissions, which may be writable. So before the first launch the
 // profile is proven on this machine with `codex sandbox`, under the same
 // arguments, cwd, and TMPDIR: the scratch directory must be writable and the
-// worktree must not. Anything else, including a probe that cannot run, falls
-// back to plain `--sandbox read-only` and records why; that is always safe and
-// only costs the worker its temp directory.
+// worktree must not, and the probe must exit cleanly. Anything else, including
+// a probe that cannot run, falls back to plain `--sandbox read-only` and records
+// why; that is always safe and only costs the worker its temp directory. The
+// probe creates a randomly named file exclusively, so it never touches an
+// existing one, and counts only a permission error as "not writable".
 const PROBE_SCRIPT = [
   'const fs = require("fs"), path = require("path");',
   "const [scratch, checkout, name] = process.argv.slice(1);",
   "const writable = (dir) => { const file = path.join(dir, name);",
-  '  try { fs.writeFileSync(file, ""); fs.unlinkSync(file); return true; } catch { return false; } };',
+  '  try { fs.writeFileSync(file, "", { flag: "wx" }); } catch (error) {',
+  '    return ["EPERM", "EACCES", "EROFS"].includes(error.code) ? false : `error:${error.code}`; }',
+  "  fs.unlinkSync(file); return true; };",
   "process.stdout.write(JSON.stringify({ scratch: writable(scratch), checkout: writable(checkout) }));"
 ].join("\n");
 
-function probeReadProfile() {
-  const marker = `.orch-sandbox-probe-${process.pid}`;
-  const result = spawnSync(
-    command,
-    [...prefixArgs, "sandbox", ...readProfileArgs(), "--", process.execPath, "-e", PROBE_SCRIPT,
-      scratchDir, spec.worktreePath, marker],
-    {
-      cwd: spec.worktreePath,
-      env: { ...process.env, TMPDIR: scratchDir },
-      encoding: "utf8",
-      timeout: 30000
-    }
-  );
-  // If a broken sandbox let the probe write, remove what it wrote.
-  fs.rmSync(path.join(spec.worktreePath, marker), { force: true });
+async function probeReadProfile() {
+  // A scratch directory inside the worktree or the repository would make part
+  // of the checkout writable, and a probe of the checkout root cannot see that.
+  if (inside(spec.worktreePath, scratchDir) || inside(process.cwd(), scratchDir)) {
+    return { reason: "scratch_inside_checkout", message: scratchDir };
+  }
+  const marker = `.orch-sandbox-probe-${crypto.randomBytes(8).toString("hex")}`;
+  const result = await new Promise((resolve) => {
+    let stdout = "";
+    let stderr = "";
+    const child = spawn(
+      command,
+      [...prefixArgs, "sandbox", ...readProfileArgs(), "--", process.execPath, "-e", PROBE_SCRIPT,
+        scratchDir, spec.worktreePath, marker],
+      { cwd: spec.worktreePath, env: { ...process.env, TMPDIR: scratchDir }, stdio: ["ignore", "pipe", "pipe"] }
+    );
+    current = child;
+    const timer = setTimeout(() => child.kill("SIGKILL"), 30000);
+    child.stdout.setEncoding("utf8").on("data", (chunk) => { stdout += chunk; });
+    child.stderr.setEncoding("utf8").on("data", (chunk) => { stderr += chunk; });
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      resolve({ error, stdout, stderr });
+    });
+    child.on("close", (code, signal) => {
+      clearTimeout(timer);
+      resolve({ code, signal, stdout, stderr });
+    });
+  });
+  current = null;
   let observed = null;
   try {
-    observed = JSON.parse(String(result.stdout ?? "").trim().split("\n").at(-1));
+    observed = JSON.parse(result.stdout.trim().split("\n").at(-1));
   } catch {
     observed = null;
   }
-  if (observed?.scratch === true && observed?.checkout === false) {
+  const clean = !result.error && result.code === 0 && !result.signal;
+  if (clean && observed?.scratch === true && observed?.checkout === false) {
     return null;
   }
-  if (observed && typeof observed.checkout === "boolean") {
-    return { reason: observed.checkout ? "checkout_writable" : "scratch_denied", message: "" };
+  if (clean && observed && observed.checkout === true) {
+    return { reason: "checkout_writable", message: "" };
   }
-  const detail = result.error?.message || String(result.stderr ?? "").trim().split("\n").at(-1) || "";
-  return { reason: "probe_failed", message: `exit ${result.status ?? "none"}: ${detail}`.slice(0, 500) };
+  if (clean && observed && observed.checkout === false && observed.scratch === false) {
+    return { reason: "scratch_denied", message: "" };
+  }
+  const detail = result.error?.message || result.stderr.trim().split("\n").at(-1) ||
+    (observed ? JSON.stringify(observed) : "");
+  return {
+    reason: "probe_failed",
+    message: `exit ${result.code ?? "none"}${result.signal ? ` (${result.signal})` : ""}: ${detail}`.slice(0, 500)
+  };
 }
 
 function sandboxArgs() {
@@ -125,14 +171,6 @@ writeStatus({ status: "running" });
 const output = fs.createWriteStream(spec.outputFile, { flags: "a", mode: 0o600 });
 const errors = fs.createWriteStream(spec.errorFile, { flags: "a", mode: 0o600 });
 
-if (scratchDir) {
-  sandboxFallback = probeReadProfile();
-  if (sandboxFallback) {
-    errors.write(`[orchestrator] read profile not applied (${sandboxFallback.reason}); ` +
-      "running under --sandbox read-only, without a writable TMPDIR.\n");
-    writeStatus({ status: "running" });
-  }
-}
 const prompt = fs.readFileSync(spec.promptFile);
 // A resume after `run answer` sends only the answer, because the thread already
 // holds the briefing. A fresh thread started in its place needs the full
@@ -246,6 +284,29 @@ function runCodex(resumeThreadId, input = prompt) {
   });
 }
 
+function finishScratch() {
+  if (scratchDir) {
+    fs.rmSync(scratchDir, { recursive: true, force: true });
+  }
+}
+
+if (scratchDir) {
+  sandboxFallback = await probeReadProfile();
+  if (sandboxFallback && !stopping) {
+    errors.write(`[orchestrator] read profile not applied (${sandboxFallback.reason}); ` +
+      "running under --sandbox read-only, without a writable TMPDIR.\n");
+    writeStatus({ status: "running" });
+  }
+  if (stopping) {
+    // Stopped while proving the profile: nothing was launched.
+    writeStatus({ status: "cancelled", finishedAt: new Date().toISOString(), exitCode: null, signal: null });
+    output.end();
+    errors.end();
+    finishScratch();
+    process.exit(0);
+  }
+}
+
 let result = await runCodex(spec.resumeThreadId ?? null);
 if (
   spec.resumeThreadId &&
@@ -293,6 +354,4 @@ if (result.error) {
 }
 output.end();
 errors.end();
-if (scratchDir) {
-  fs.rmSync(scratchDir, { recursive: true, force: true });
-}
+finishScratch();

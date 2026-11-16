@@ -793,3 +793,26 @@ test("a poll's run loads depend on its active tasks, not on how many tasks the r
   };
   assert.equal(await measure("run-loads-small", 2), await measure("run-loads-large", 8));
 });
+
+test("a rejected legacy slug off the fallback ladder is refused at launch, not relaunched", () => {
+  const root = repo();
+  createRun(root, { id: "run-legacy-rejected", lane: "api", objective: "Old run", workerModel: "sol", reasoningEffort: "high" });
+  replacePlan(root, "run-legacy-rejected", [{ id: "work", title: "work", objective: "work", kind: "read", acceptance: ["ok"] }]);
+  checkpointPlan(root, "run-legacy-rejected");
+  // A 0.5.x run saved the legacy slug, and Codex has since rejected it.
+  const file = runFile(root, "run-legacy-rejected");
+  const saved = JSON.parse(fs.readFileSync(file, "utf8"));
+  saved.tasks.work.model = "gpt-5.6-sol";
+  saved.unavailableModels = [{ model: "gpt-5.6-sol", at: new Date().toISOString(), message: "model not found" }];
+  fs.writeFileSync(file, `${JSON.stringify(saved, null, 2)}\n`);
+
+  const ready = JSON.parse(runCli(root, ["run", "ready", "run-legacy-rejected", "--json"]).stdout);
+  assert.deepEqual(ready.tasks.map((task) => task.id), []);
+  assert.deepEqual(ready.blocked.map((task) => task.id), ["work"]);
+  assert.match(ready.blocked[0].conflicts[0], /gpt-5\.6-sol was rejected as unavailable/);
+  assert.throws(
+    () => claimTask(root, "run-legacy-rejected", "work", { constraints: [] }),
+    /gpt-5\.6-sol, which Codex rejected as unavailable in this run, and it is not on the fallback ladder/
+  );
+  assert.equal(loadRun(root, "run-legacy-rejected").tasks.work.attempts?.length ?? 0, 0);
+});

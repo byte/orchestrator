@@ -327,13 +327,19 @@ real resume reports the same thread id it was given.
    checking:
 
    ```text
-   -c default_permissions="orchestrator-read"
-   -c permissions.orchestrator-read.extends=":read-only"
-   -c permissions.orchestrator-read.filesystem={"<scratch>"="write"}
+   -c default_permissions="orchestrator-read-<random>"
+   -c permissions.orchestrator-read-<random>.extends=":read-only"
+   -c permissions.orchestrator-read-<random>.filesystem={"<scratch>"="write"}
    ```
 
    `<scratch>` is a fresh private directory under the system temp root, exported to Codex as
-   `TMPDIR` and removed when the worker exits. Plain `--sandbox read-only` denies every write,
+   `TMPDIR` and removed when the wrapper exits, on SIGTERM too. A hard kill can leave it; its path
+   is in the runner's `status.json` as `scratchDir`, and `run cleanup` removes it once the runner
+   has finished. The profile name is random for every launch because Codex merges `-c` overrides
+   into the user's config: under a fixed name, grants a user's config already gave that profile
+   would survive the override, and the probe below could not see them. A scratch directory inside
+   the worktree or the repository (a `TMPDIR` pointing there) is refused, since it would make part
+   of the checkout writable. Plain `--sandbox read-only` denies every write,
    the temp root included, so a reviewer could not create the temporary repositories a test
    suite needs. The profile keeps the worktree and everything else unwritable. `--sandbox` must
    not be passed alongside it: with both, `--sandbox read-only` wins and the scratch directory is
@@ -345,9 +351,13 @@ real resume reports the same thread id it was given.
    ignored it would run with the user's default permissions, which may be writable. So before
    its first launch the wrapper proves the profile with `codex sandbox <profile arguments> --
    node -e <probe>`, in the worktree and with the same `TMPDIR`. The scratch directory must be
-   writable and the worktree must not. On any other outcome, including a probe that cannot run,
-   the worker launches under plain `--sandbox read-only` instead. The attempt records
-   `sandboxFallback` (`checkout_writable`, `scratch_denied`, or `probe_failed`), the run gets a
+   writable, the worktree must refuse a write with a permission error, and the probe must exit 0.
+   The probe creates a randomly named file exclusively, so it never touches an existing one, and
+   it runs after the wrapper's signal handlers are installed, so stopping the worker stops the
+   probe. On any other outcome, including a probe that cannot run, the worker launches under
+   plain `--sandbox read-only` instead. The attempt records `sandboxFallback`
+   (`checkout_writable`, `scratch_denied`, `scratch_inside_checkout`, or `probe_failed`), the run
+   gets a
    `task.sandbox_fallback` event, and the supervisor briefing marks the attempt, because its
    failing tests may be the missing temp directory. A config-level `sandbox_mode`, even
    `danger-full-access`, did not override the profile in testing on 0.169.0.

@@ -51,6 +51,7 @@ import {
   answerTaskWorker,
   launchTaskWorker,
   pollRunWorkers,
+  removeLeftoverScratch,
   stopTaskWorker
 } from "./lib/workers.mjs";
 import {
@@ -939,6 +940,7 @@ function commandRun(argv, cwd) {
         if (cleanupTaskWorktree(cwd, attempt)) {
           removed.push(attempt.worktree.path);
         }
+        removed.push(...removeLeftoverScratch(cwd, runId, task.id, attempt.id));
       }
     }
     return options.json ? emitJson(removed) : emit(removed.length ? `Removed:\n${removed.map((entry) => `- ${entry}`).join("\n")}` : "No completed worktrees to remove.");

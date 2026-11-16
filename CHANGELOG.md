@@ -12,9 +12,26 @@ Fixes:
   exits. The worktree stays unwritable. Before launch the worker proves the
   profile with `codex sandbox`; if the scratch directory is not writable or
   the worktree is, it falls back to `--sandbox read-only` and records a
-  `task.sandbox_fallback` event. The wait tests that need file-change events
-  skip, with the reason, inside the Codex sandbox (`CODEX_SANDBOX` set), where
-  those events are blocked.
+  `task.sandbox_fallback` event. The profile name is random for each launch,
+  so grants a user's config gives a profile of the same name cannot widen it,
+  and a `TMPDIR` inside the checkout is refused. `run cleanup` removes a
+  scratch directory a hard-killed worker left. The wait tests that need
+  file-change events skip, with the reason, inside the Codex sandbox
+  (`CODEX_SANDBOX` set), where those events are blocked.
+- A task cancelled while its worker was being launched, or while an answered
+  worker was being spawned, stays cancelled and its worker is stopped. Before,
+  attaching the worker set the task back to running.
+- A `run poll` that loses a race with another poll collecting a paused
+  worker's request skips the task instead of failing.
+- An answer whose event cannot be written is reverted, instead of leaving the
+  task dispatching with no worker and refusing every later answer. Reverting
+  an answer also restores the thread the next answer resumes.
+- A launch failure after the worker was spawned stops that worker.
+- A file carried into a warm retry must have been declared by the attempt that
+  last changed it. Before, an earlier attempt's claim could cover a later
+  attempt's undeclared change.
+- A 0.5.x run's legacy model, once Codex rejects it, is refused at launch and
+  listed under `blocked` by `run ready`, instead of being launched again.
 - `run wait` no longer wakes on its own lock file. Every poll takes
   `run.json.lock`, and the run-directory watch let that name through, so a wait
   on a quiet worker polled about ten times a second instead of sleeping.
