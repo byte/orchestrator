@@ -284,6 +284,8 @@ test("a warm retry resumes the thread with explicit model, effort, and sandbox i
   // Both attempts' commits are in the reused worktree and visible to inspection.
   const inspection = inspectTaskWorktree(task, attempt);
   assert.equal(inspection.commits.length, 2);
+  assert.equal(attempt.worktree.baseHead, task.attempts[0].worktree.baseHead);
+  assert.deepEqual(inspection.carried, ["src/notes.txt"]);
   assert.equal(fs.readFileSync(path.join(first.worktree.path, "src", "notes.txt"), "utf8"), "fresh\nresumed\n");
 });
 

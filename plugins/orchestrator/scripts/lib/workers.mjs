@@ -611,7 +611,12 @@ export function answerTaskWorker(
     // A worker spawned before the failure would run untracked once the answer is
     // reverted; stop it so the task can be answered again cleanly.
     if (runner) {
-      stopTaskWorker({ runner });
+      try {
+        stopTaskWorker({ runner });
+      } catch {
+        // The revert below must still run; a worker that cannot be stopped is
+        // reported by its own status file.
+      }
     }
     revertTaskAnswer(cwd, runId, taskId, { attemptId: answered.attemptId, error: error.message });
     throw error;

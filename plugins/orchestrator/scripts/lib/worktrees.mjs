@@ -107,7 +107,7 @@ function diffFiles(cwd, before, after) {
 
 /** Files declared by earlier attempts that worked in this attempt's worktree. */
 function carriedDeclarations(task, attempt) {
-  const index = task.attempts?.indexOf(attempt) ?? -1;
+  const index = task.attempts?.findIndex((entry) => entry.id === attempt.id) ?? -1;
   if (index <= 0) {
     return [];
   }
