@@ -179,6 +179,9 @@ if (
 
 if (result.replacedWithoutBriefing && !stopping) {
   errors.write("\n[orchestrator] resume started a new thread; relaunching it with the full briefing.\n");
+  // The stopped thread may have written a result before it was stopped; the
+  // relaunch must stand on its own result or report none.
+  fs.rmSync(spec.lastMessageFile, { force: true });
   writeStatus({ status: "running" });
   result = await runCodex(null, fallbackPrompt);
 }

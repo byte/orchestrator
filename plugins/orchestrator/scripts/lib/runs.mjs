@@ -620,7 +620,9 @@ export function effectiveTaskRoute(run, task) {
       }
     };
   }
-  return { ...requested, requestedModel: requested.model, substitution: null };
+  // Known unavailable and nothing allowed below it: launching would only be
+  // rejected again, so the claim refuses instead.
+  return { ...requested, requestedModel: requested.model, substitution: null, exhausted: true };
 }
 
 /** Next model a rejected launch can fall back to, or null when the ladder is exhausted. */
@@ -767,6 +769,22 @@ export function taskTimeoutMinutes(task, attempt = null) {
  * time, so an answered `needs_input` round (a new runner) starts a new clock and
  * time spent waiting for the supervisor never counts against the worker.
  */
+/**
+ * Thrown when a mutation was computed from a runner that is no longer attached to
+ * the attempt. A poll that read a finished runner's files can lose a race with a
+ * concurrent poll that collected it and a `run answer` that attached a resumed
+ * runner; applying its stale view would collect the old result a second time.
+ */
+export class StaleRunnerError extends Error {}
+
+function assertCurrentRunner(attempt, runnerStatusFile) {
+  if (runnerStatusFile !== undefined && (attempt?.runner?.statusFile ?? null) !== runnerStatusFile) {
+    throw new StaleRunnerError(
+      `Attempt "${attempt?.id}" is no longer attached to the runner at ${runnerStatusFile}.`
+    );
+  }
+}
+
 export function workerClockStart(attempt) {
   if (attempt && !attempt.runner && attempt.inputRequests?.at(-1)?.answer) {
     // Answered, and its resumed worker is not attached yet: nothing is running,
@@ -1822,6 +1840,14 @@ export function claimTask(cwd, runId, taskId, lane) {
       );
     }
     const route = effectiveTaskRoute(run, task);
+    if (route.exhausted) {
+      throw new Error(
+        `Task "${task.id}" routes to ${route.model}, which Codex rejected as unavailable in this run, and no ` +
+          "allowed model remains below it" +
+          `${fallbackCandidateAllowed(run, task, LUNA_MODEL) ? "" : " (luna is not used for a task others depend on)"}. ` +
+          "Re-route the task with run plan, or ask the user how to proceed."
+      );
+    }
     const expectedGuidance = selectGuidance(
       activeGuidancePolicy(run),
       activeGuidancePolicy(run) ? guidanceContext(run, task) : null
@@ -2061,13 +2087,14 @@ function parseStructuredResult(text) {
   };
 }
 
-export function recordTaskResult(cwd, runId, taskId, { attemptId, resultText }) {
+export function recordTaskResult(cwd, runId, taskId, { attemptId, resultText, runnerStatusFile }) {
   const id = assertId(runId, "run");
   const filePath = runFile(cwd, id);
   return withFileLock(filePath, () => {
     const run = loadRun(cwd, id);
     const task = requireTask(run, taskId);
     const attempt = currentAttempt(task, attemptId);
+    assertCurrentRunner(attempt, runnerStatusFile);
     if (!["dispatching", "running"].includes(attempt.status)) {
       throw new Error(`Attempt "${attempt.id}" cannot report from status "${attempt.status}".`);
     }
@@ -2352,7 +2379,7 @@ export function answerTask(
 }
 
 /** Undo a recorded answer whose resume could not be launched, returning the task to `needs_input`. */
-export function revertTaskAnswer(cwd, runId, taskId, { attemptId, error }) {
+export function revertTaskAnswer(cwd, runId, taskId, { attemptId, error, failedRunnerStatusFile = null }) {
   const id = assertId(runId, "run");
   const filePath = runFile(cwd, id);
   return withFileLock(filePath, () => {
@@ -2360,7 +2387,11 @@ export function revertTaskAnswer(cwd, runId, taskId, { attemptId, error }) {
     const task = requireTask(run, taskId);
     const attempt = currentAttempt(task, attemptId);
     const round = attempt.inputRequests?.at(-1);
-    if (!round?.answer || attempt.status !== "dispatching") {
+    // attachExecution may have saved the failed runner as running before it threw
+    // (its event append failed, say); that runner was stopped, so it is reverted too.
+    const attachedFailedRunner = attempt.status === "running" && failedRunnerStatusFile !== null &&
+      attempt.runner?.statusFile === failedRunnerStatusFile;
+    if (!round?.answer || (attempt.status !== "dispatching" && !attachedFailedRunner)) {
       return task;
     }
     round.failedAnswers ??= [];
@@ -2413,13 +2444,14 @@ export function attachExecution(cwd, runId, taskId, { attemptId, worktree, runne
   });
 }
 
-export function syncExecutionStatus(cwd, runId, taskId, { attemptId, status }) {
+export function syncExecutionStatus(cwd, runId, taskId, { attemptId, status, runnerStatusFile }) {
   const id = assertId(runId, "run");
   const filePath = runFile(cwd, id);
   return withFileLock(filePath, () => {
     const run = loadRun(cwd, id);
     const task = requireTask(run, taskId);
     const attempt = currentAttempt(task, attemptId);
+    assertCurrentRunner(attempt, runnerStatusFile);
     if (!attempt.runner) {
       throw new Error(`Attempt "${attempt.id}" has no runner to synchronize.`);
     }
@@ -2537,7 +2569,8 @@ export function failTaskAttempt(
     reasonCode = "worker_execution_failed",
     provenance = "automatic",
     signals = ["worker_process_error"],
-    launchFailed = false
+    launchFailed = false,
+    runnerStatusFile
   }
 ) {
   const id = assertId(runId, "run");
@@ -2546,6 +2579,7 @@ export function failTaskAttempt(
     const run = loadRun(cwd, id);
     const task = requireTask(run, taskId);
     const attempt = currentAttempt(task, attemptId);
+    assertCurrentRunner(attempt, runnerStatusFile);
     const outcomeCandidate = outcomeInput(terminalOutcome, action, reasonCode, {
       provenance,
       signals
@@ -2598,13 +2632,14 @@ export function failTaskAttempt(
  * fallback ladder has a model left, so the caller can relaunch it. The next claim
  * records the substitution on its attempt; nothing about it is silent.
  */
-export function recordModelUnavailable(cwd, runId, taskId, { attemptId, error }) {
+export function recordModelUnavailable(cwd, runId, taskId, { attemptId, error, runnerStatusFile }) {
   const id = assertId(runId, "run");
   const filePath = runFile(cwd, id);
   return withFileLock(filePath, () => {
     const run = loadRun(cwd, id);
     const task = requireTask(run, taskId);
     const attempt = currentAttempt(task, attemptId);
+    assertCurrentRunner(attempt, runnerStatusFile);
     if (attempt.outcome) {
       if (attempt.modelUnavailable) {
         return { task, attempt, fallbackModel: attempt.modelUnavailable.fallbackModel, duplicate: true };
@@ -3031,8 +3066,11 @@ export function retryTask(cwd, runId, taskId, { note = null, fresh = false } = {
     const decision = retryMode(task, source, fresh);
     // A note given on an earlier retry of the same attempt survives a retry that
     // was only needed because the relaunch itself failed.
-    const carriedNote = task.pendingRetry?.previousAttemptId === source?.id
-      ? task.pendingRetry?.note ?? null
+    // Compare as null on both sides: with no earlier worker, the saved id is null
+    // and `source?.id` is undefined.
+    const carriedNote = task.pendingRetry &&
+      (task.pendingRetry.previousAttemptId ?? null) === (source?.id ?? null)
+      ? task.pendingRetry.note ?? null
       : null;
     task.pendingRetry = {
       previousAttemptId: source?.id ?? null,
@@ -3085,7 +3123,7 @@ export function cancelTask(
   runId,
   taskId,
   reason = "",
-  { provenance = "user", reasonCode = "task_cancelled" } = {}
+  { provenance = "user", reasonCode = "task_cancelled", runnerStatusFile } = {}
 ) {
   const id = assertId(runId, "run");
   const filePath = runFile(cwd, id);
@@ -3096,6 +3134,7 @@ export function cancelTask(
       throw new Error(`Completed task "${task.id}" cannot be cancelled.`);
     }
     const attempt = task.attempts.at(-1);
+    assertCurrentRunner(attempt, runnerStatusFile);
     let outcome = attempt?.outcome ?? null;
     if (
       attempt &&

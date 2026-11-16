@@ -18,7 +18,8 @@ import {
   substitutionNotice,
   syncExecutionStatus,
   taskTimeoutMinutes,
-  workerClockStart
+  workerClockStart,
+  StaleRunnerError
 } from "./runs.mjs";
 import { atomicWrite } from "./state.mjs";
 import { createTaskWorktree, reuseTaskWorktree } from "./worktrees.mjs";
@@ -134,9 +135,11 @@ function eventStreamError(filePath) {
   return [...new Set(messages)].join(" | ");
 }
 
+const STREAM_TAIL_BYTES = 64000;
+
 function streamEvents(filePath) {
   const events = [];
-  for (const line of tail(filePath, 64000).split("\n")) {
+  for (const line of tail(filePath, STREAM_TAIL_BYTES).split("\n")) {
     const trimmed = line.trim();
     if (!trimmed.startsWith("{")) {
       continue;
@@ -182,6 +185,12 @@ const TRANSIENT_PHRASES =
 export function modelUnavailableError(filePath, model) {
   const slug = String(model ?? "").toLowerCase();
   if (!slug) {
+    return null;
+  }
+  // A rejection is a few short lines. A stream longer than the tail read below
+  // means the worker produced output, and its earliest events (the work that
+  // rules out a launch rejection) may have been cut off.
+  if (fs.existsSync(filePath) && fs.statSync(filePath).size > STREAM_TAIL_BYTES) {
     return null;
   }
   for (const event of streamEvents(filePath)) {
@@ -435,93 +444,106 @@ export function pollRunWorkers(cwd, runId, { now = Date.now() } = {}) {
       });
       continue;
     }
-    const status = readJson(statusFile);
-    const hadFallback = fallbackRecorded(attempt);
-    const synced = syncExecutionStatus(cwd, runId, task.id, {
-      attemptId: attempt.id,
-      status
-    });
-    if (status.status === "running") {
-      const fellBack = !hadFallback && fallbackRecorded(synced);
-      const overLimit = overLimitFields(cwd, runId, task, attempt, now);
-      updates.push({
-        taskId: task.id,
-        ...status,
-        ...overLimit,
-        ...(fellBack ? { changed: true } : {})
+    // Every write below is checked against the runner this poll read: if a
+    // concurrent poll collected it and `run answer` attached a resumed runner in
+    // the meantime, this poll's view is stale and the task is left to the next.
+    try {
+      const status = readJson(statusFile);
+      const hadFallback = fallbackRecorded(attempt);
+      const synced = syncExecutionStatus(cwd, runId, task.id, {
+        attemptId: attempt.id,
+        status,
+        runnerStatusFile: statusFile
       });
-      continue;
-    }
-    if (status.status === "cancelled") {
-      const cancelled = cancelTask(
-        cwd,
-        runId,
-        task.id,
-        status.error || "Worker runner was cancelled.",
-        { provenance: "automatic" }
-      );
+      if (status.status === "running") {
+        const fellBack = !hadFallback && fallbackRecorded(synced);
+        const overLimit = overLimitFields(cwd, runId, task, attempt, now);
+        updates.push({
+          taskId: task.id,
+          ...status,
+          ...overLimit,
+          ...(fellBack ? { changed: true } : {})
+        });
+        continue;
+      }
+      if (status.status === "cancelled") {
+        const cancelled = cancelTask(
+          cwd,
+          runId,
+          task.id,
+          status.error || "Worker runner was cancelled.",
+          { provenance: "automatic", runnerStatusFile: statusFile }
+        );
+        updates.push({
+          taskId: task.id,
+          attemptId: attempt.id,
+          changed: true,
+          status: cancelled.status,
+          threadId: status.threadId,
+          exitCode: status.exitCode
+        });
+        continue;
+      }
+      if (status.status === "completed" && fs.existsSync(attempt.runner.lastMessageFile)) {
+        const recorded = recordTaskResult(cwd, runId, task.id, {
+          attemptId: attempt.id,
+          resultText: fs.readFileSync(attempt.runner.lastMessageFile, "utf8"),
+          runnerStatusFile: statusFile
+        });
+        updates.push({
+          taskId: task.id,
+          attemptId: attempt.id,
+          changed: true,
+          status: recorded.task.status,
+          threadId: status.threadId,
+          exitCode: status.exitCode,
+          ...(recorded.inputRequest
+            ? { round: recorded.inputRequest.round, inputRequest: recorded.inputRequest.request }
+            : {}),
+          ...(recorded.task.result?.inputCapReached ? { inputCapReached: true } : {}),
+          ...(status.resumeFallback ? { resumeFallback: status.resumeFallback } : {})
+        });
+        continue;
+      }
+      // A runner launched by `run answer` resumes an attempt that has already
+      // worked, so its failure is never a launch rejection of the attempt.
+      const unavailable = status.status === "failed" && !attempt.runner.inputRound
+        ? modelUnavailableError(attempt.runner.outputFile, attempt.model)
+        : null;
+      if (unavailable) {
+        updates.push(substituteUnavailableModel(cwd, runId, task, attempt, status, unavailable));
+        continue;
+      }
+      const error = status.error
+        || tail(attempt.runner.errorFile)
+        || eventStreamError(attempt.runner.outputFile)
+        || `Codex exited ${status.exitCode}.`;
+      const missingResult = status.status === "completed";
+      const failed = failTaskAttempt(cwd, runId, task.id, {
+        attemptId: attempt.id,
+        error,
+        terminalOutcome: missingResult ? "contract_failed" : "execution_failed",
+        action: missingResult ? "replan" : "execute",
+        reasonCode: missingResult ? "missing_result" : "worker_process_failed",
+        signals: missingResult ? ["missing_result"] : ["worker_process_error"],
+        runnerStatusFile: statusFile
+      });
       updates.push({
         taskId: task.id,
         attemptId: attempt.id,
         changed: true,
-        status: cancelled.status,
-        threadId: status.threadId,
-        exitCode: status.exitCode
-      });
-      continue;
-    }
-    if (status.status === "completed" && fs.existsSync(attempt.runner.lastMessageFile)) {
-      const recorded = recordTaskResult(cwd, runId, task.id, {
-        attemptId: attempt.id,
-        resultText: fs.readFileSync(attempt.runner.lastMessageFile, "utf8")
-      });
-      updates.push({
-        taskId: task.id,
-        attemptId: attempt.id,
-        changed: true,
-        status: recorded.task.status,
+        status: failed.status,
         threadId: status.threadId,
         exitCode: status.exitCode,
-        ...(recorded.inputRequest
-          ? { round: recorded.inputRequest.round, inputRequest: recorded.inputRequest.request }
-          : {}),
-        ...(recorded.task.result?.inputCapReached ? { inputCapReached: true } : {}),
+        error,
         ...(status.resumeFallback ? { resumeFallback: status.resumeFallback } : {})
       });
-      continue;
+    } catch (error) {
+      if (error instanceof StaleRunnerError) {
+        continue;
+      }
+      throw error;
     }
-    // A runner launched by `run answer` resumes an attempt that has already
-    // worked, so its failure is never a launch rejection of the attempt.
-    const unavailable = status.status === "failed" && !attempt.runner.inputRound
-      ? modelUnavailableError(attempt.runner.outputFile, attempt.model)
-      : null;
-    if (unavailable) {
-      updates.push(substituteUnavailableModel(cwd, runId, task, attempt, status, unavailable));
-      continue;
-    }
-    const error = status.error
-      || tail(attempt.runner.errorFile)
-      || eventStreamError(attempt.runner.outputFile)
-      || `Codex exited ${status.exitCode}.`;
-    const missingResult = status.status === "completed";
-    const failed = failTaskAttempt(cwd, runId, task.id, {
-      attemptId: attempt.id,
-      error,
-      terminalOutcome: missingResult ? "contract_failed" : "execution_failed",
-      action: missingResult ? "replan" : "execute",
-      reasonCode: missingResult ? "missing_result" : "worker_process_failed",
-      signals: missingResult ? ["missing_result"] : ["worker_process_error"]
-    });
-    updates.push({
-      taskId: task.id,
-      attemptId: attempt.id,
-      changed: true,
-      status: failed.status,
-      threadId: status.threadId,
-      exitCode: status.exitCode,
-      error,
-      ...(status.resumeFallback ? { resumeFallback: status.resumeFallback } : {})
-    });
   }
   return updates;
 }
@@ -535,7 +557,8 @@ export function pollRunWorkers(cwd, runId, { now = Date.now() } = {}) {
 function substituteUnavailableModel(cwd, runId, task, attempt, status, error) {
   const recorded = recordModelUnavailable(cwd, runId, task.id, {
     attemptId: attempt.id,
-    error
+    error,
+    runnerStatusFile: attempt.runner?.statusFile ?? null
   });
   const update = {
     taskId: task.id,
@@ -596,9 +619,15 @@ export function answerTaskWorker(
     const run = loadRun(cwd, runId);
     const task = run.tasks[taskId];
     const previousRunner = answered.round.answer.previousRunner;
+    // Each try at answering a round gets its own directory: a failed try leaves a
+    // cancelled status file behind, which a poll must never read for the next.
+    const tries = answered.round.failedAnswers?.length ?? 0;
     runner = spawnWorker(
       cwd,
-      path.join(executionDir(cwd, runId, taskId, answered.attemptId), `round-${answered.round.round}`),
+      path.join(
+        executionDir(cwd, runId, taskId, answered.attemptId),
+        `round-${answered.round.round}${tries ? `-try-${tries + 1}` : ""}`
+      ),
       {
         prompt: answered.answerPrompt,
         fallbackPrompt: answered.briefing,
@@ -628,7 +657,11 @@ export function answerTaskWorker(
         // reported by its own status file.
       }
     }
-    revertTaskAnswer(cwd, runId, taskId, { attemptId: answered.attemptId, error: error.message });
+    revertTaskAnswer(cwd, runId, taskId, {
+      attemptId: answered.attemptId,
+      error: error.message,
+      failedRunnerStatusFile: runner?.statusFile ?? null
+    });
     throw error;
   }
 }

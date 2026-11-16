@@ -285,7 +285,10 @@ test("a warm retry resumes the thread with explicit model, effort, and sandbox i
   const inspection = inspectTaskWorktree(task, attempt);
   assert.equal(inspection.commits.length, 2);
   assert.equal(attempt.worktree.baseHead, task.attempts[0].worktree.baseHead);
-  assert.deepEqual(inspection.carried, ["src/notes.txt"]);
+  assert.ok(attempt.worktree.reusedHead);
+  // This attempt changed src/notes.txt again, so it must declare it itself.
+  assert.deepEqual(inspection.carried, []);
+  assert.deepEqual(inspection.undeclared, []);
   assert.equal(fs.readFileSync(path.join(first.worktree.path, "src", "notes.txt"), "utf8"), "fresh\nresumed\n");
 });
 
@@ -421,36 +424,47 @@ test("runs saved before warm retries existed still retry, warm when they can", (
 test("a warm retry in a reused worktree integrates without redeclaring its predecessor's files", () => {
   const root = makeRepo();
   repos.push(root);
-  const baseHead = git(root, ["rev-parse", "HEAD"]).trim();
+  const head = () => git(root, ["rev-parse", "HEAD"]).trim();
   const commit = (file, text) => {
     fs.mkdirSync(path.join(root, "src"), { recursive: true });
     fs.writeFileSync(path.join(root, file), text, "utf8");
     git(root, ["add", file]);
     git(root, ["commit", "--quiet", "-m", text]);
   };
+  const baseHead = head();
+  // Attempt 1 changed a and b and declared both, plus c, which it never changed.
   commit("src/a.js", "a\n");
   commit("src/b.js", "b\n");
+  const reusedHead = head();
+  // The warm retry fixes b and also changes c, but reports only b.
   commit("src/b.js", "b fixed\n");
-  const worktree = { path: root, branch: "main", baseHead };
+  commit("src/c.js", "c\n");
   const declared = (files) => ({ structured: { files_touched: files } });
-  const first = { id: "work-attempt-1", worktree, review: { result: declared(["src/a.js", "src/b.js"]) } };
+  const first = {
+    id: "work-attempt-1",
+    worktree: { path: root, branch: "main", baseHead },
+    review: { result: declared(["src/a.js", "src/b.js", "src/c.js"]) }
+  };
   const second = {
     id: "work-attempt-2",
-    worktree,
-    resumedFromAttemptId: first.id,
-    retry: { worktree: { mode: "reuse", attemptId: first.id } }
+    worktree: { path: root, branch: "main", baseHead, reusedHead, reusedFromAttemptId: first.id },
+    resumedFromAttemptId: first.id
   };
   const task = { id: "work", scope: ["src/**"], attempts: [first, second], result: declared(["src/b.js"]) };
   const inspection = inspectTaskWorktree(task, second);
-  assert.deepEqual(inspection.undeclared, []);
-  assert.deepEqual(inspection.carried, ["src/a.js", "src/b.js"]);
-  assert.equal(inspection.ready, true);
+  // a is carried (declared and changed before the reuse); c was only claimed
+  // earlier and changed now, so this attempt had to declare it.
+  assert.deepEqual(inspection.carried, ["src/a.js"]);
+  assert.deepEqual(inspection.undeclared, ["src/c.js"]);
+  assert.equal(inspection.ready, false);
 
-  // A fresh worktree carries nothing: an undeclared file there is still refused.
-  const fresh = { ...second, worktree: { ...worktree, path: `${root}/` } };
-  const unrelated = inspectTaskWorktree({ ...task, attempts: [first, fresh] }, fresh);
-  assert.deepEqual(unrelated.undeclared, ["src/a.js"]);
-  assert.equal(unrelated.ready, false);
+  const honest = inspectTaskWorktree({ ...task, result: declared(["src/b.js", "src/c.js"]) }, second);
+  assert.deepEqual(honest.undeclared, []);
+  assert.equal(honest.ready, true);
+
+  // A worktree saved without a reuse head carries nothing.
+  const legacy = { ...second, worktree: { ...second.worktree, reusedHead: undefined } };
+  assert.deepEqual(inspectTaskWorktree({ ...task, attempts: [first, legacy] }, legacy).undeclared, ["src/a.js", "src/c.js"]);
 });
 
 test("a retry note reaches the worker when no earlier attempt reached one", () => {
@@ -467,6 +481,18 @@ test("a retry note reaches the worker when no earlier attempt reached one", () =
   retryTask(root, "run-note-launch", "work", { note: "Use the v2 API." });
   const second = claimTask(root, "run-note-launch", "work", lane);
   assert.match(second.briefing, /## Supervisor correction for this attempt\n\nUse the v2 API\./);
+
+  // The relaunch fails to launch too; a plain retry keeps the note.
+  failTaskAttempt(root, "run-note-launch", "work", {
+    attemptId: second.attemptId,
+    error: "spawn codex ENOENT",
+    reasonCode: "worker_launch_failed",
+    signals: ["worker_launch_error"],
+    launchFailed: true
+  });
+  retryTask(root, "run-note-launch", "work");
+  const third = claimTask(root, "run-note-launch", "work", lane);
+  assert.match(third.briefing, /Use the v2 API\./);
 });
 
 test("warm attempts that never launched do not count toward escalation advice", () => {

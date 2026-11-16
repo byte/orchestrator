@@ -15,6 +15,7 @@ import {
   recordTaskResult,
   renderSupervisorBriefing,
   replacePlan,
+  retryTask,
   runFile,
   verifyTask
 } from "../plugins/orchestrator/scripts/lib/runs.mjs";
@@ -550,6 +551,15 @@ test("model unavailability is read only from top-level rejections that name the 
     writeEvents([{ type: "thread.started", thread_id: "t" }, { type: "turn.started" }, { type: "error", message }]);
     assert.equal(modelUnavailableError(file, "gpt-6-astra"), null, message);
   }
+  // Work that has scrolled out of the read tail still rules out a rejection.
+  writeEvents([
+    { type: "thread.started", thread_id: "t" },
+    { type: "item.completed", item: { type: "command_execution", command: "git commit -m work" } },
+    { type: "item.completed", item: { type: "agent_message", text: "x".repeat(70000) } },
+    { type: "error", message: "The 'gpt-6-astra' model is not supported when using Codex with a ChatGPT account." }
+  ]);
+  assert.equal(modelUnavailableError(file, "gpt-6-astra"), null);
+
   // Entitlement wording that happens to say "currently" is still a rejection.
   writeEvents([{ type: "error", message: "The model gpt-6-astra is currently not supported on your plan." }]);
   assert.match(modelUnavailableError(file, "gpt-6-astra"), /not supported on your plan/);
@@ -712,6 +722,18 @@ test("a fallback never lands a task others depend on on luna", async () => {
   const leaf = launchTaskWorker(root, "run-luna-leaf", "leaf", { constraints: [] }, { codexCommand: command });
   assert.equal(leaf.model, "gpt-5.6-luna");
   assert.equal(leaf.substitution.requestedModel, "gpt-6.1-terra");
+
+  // A retry of the depended-on task is refused at launch instead of spending
+  // another launch on the model already rejected, and run ready says why.
+  retryTask(root, "run-luna-leaf", "base");
+  const ready = JSON.parse(runCli(root, ["run", "ready", "run-luna-leaf", "--json"]).stdout);
+  assert.deepEqual(ready.blocked.map((task) => task.id), ["base"]);
+  assert.match(ready.blocked[0].conflicts[0], /gpt-6\.1-terra was rejected as unavailable/);
+  assert.throws(
+    () => launchTaskWorker(root, "run-luna-leaf", "base", { constraints: [] }, { codexCommand: command }),
+    /no allowed model remains below it \(luna is not used for a task others depend on\)/
+  );
+  assert.equal(loadRun(root, "run-luna-leaf").tasks.base.attempts.length, 1);
 });
 
 test("a poll reloads the run only for tasks that are active", () => {

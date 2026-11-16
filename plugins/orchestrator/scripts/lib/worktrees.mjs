@@ -96,6 +96,9 @@ export function reuseTaskWorktree(cwd, run, previousAttempt) {
     baseHead: source.baseHead,
     createdAt: source.createdAt,
     reusedFromAttemptId: previousAttempt.id,
+    // The head the earlier attempts left: commits up to here are theirs, commits
+    // after it are this attempt's. Inspection carries declarations only for the former.
+    reusedHead: headSha(source.path),
     reusedAt: new Date().toISOString()
   };
 }
@@ -105,24 +108,35 @@ function diffFiles(cwd, before, after) {
   return output.split("\0").filter(Boolean).sort();
 }
 
-/** Files declared by earlier attempts that worked in this attempt's worktree. */
-function carriedDeclarations(task, attempt) {
+/**
+ * Files earlier attempts in this reused worktree both declared and actually
+ * changed before this attempt began, and that this attempt did not change again.
+ * Anything this attempt committed must be in its own report; a file an earlier
+ * attempt only claimed (a phantom) is never carried. A worktree saved before its
+ * reuse head was recorded carries nothing.
+ */
+function carriedDeclarations(task, attempt, head) {
+  const worktree = attempt.worktree;
   const index = task.attempts?.findIndex((entry) => entry.id === attempt.id) ?? -1;
-  if (index <= 0) {
+  if (index <= 0 || !worktree.reusedHead) {
     return [];
   }
-  const carried = new Set();
+  const declared = new Set();
   for (const earlier of task.attempts.slice(0, index)) {
-    if (earlier.worktree?.path !== attempt.worktree.path) {
+    if (earlier.worktree?.path !== worktree.path) {
       continue;
     }
     const files = earlier.review?.result?.structured?.files_touched ??
       parseFileList(earlier.review?.result?.fields?.files_touched);
     for (const file of files ?? []) {
-      carried.add(file);
+      declared.add(file);
     }
   }
-  return [...carried];
+  const before = worktree.reusedHead === worktree.baseHead
+    ? []
+    : diffFiles(worktree.path, worktree.baseHead, worktree.reusedHead);
+  const own = new Set(head === worktree.reusedHead ? [] : diffFiles(worktree.path, worktree.reusedHead, head));
+  return before.filter((file) => declared.has(file) && !own.has(file));
 }
 
 export function inspectTaskWorktree(task, attempt) {
@@ -158,7 +172,7 @@ export function inspectTaskWorktree(task, attempt) {
   // also holds the earlier attempts' commits. The worker reports only what this
   // attempt changed; files an earlier attempt in the same worktree declared count
   // as declared too, or a retry that fixed one file could never integrate.
-  const carried = carriedDeclarations(task, attempt);
+  const carried = carriedDeclarations(task, attempt, head);
   const fileSet = new Set(files);
   const declaredSet = new Set([...declared, ...carried]);
   return {

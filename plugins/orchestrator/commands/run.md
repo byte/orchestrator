@@ -158,7 +158,9 @@ substitute. The substitution is never silent: it is recorded on the attempt (req
 model), appended as a run event, and shown by `run poll`, `run resume`, and the supervisor
 briefing. A substituted user pin is flagged as such; tell the user which model actually ran. If no
 rung is left, the task fails with a `model_unavailable` outcome for you to escalate. A task other
-tasks depend on never falls to `luna` (the plan-time leaf rule), unless the run is pinned to it.
+tasks depend on never falls to `luna` (the plan-time leaf rule), unless the run is pinned to it
+or was saved before automatic routing existed. Once its model is known unavailable and nothing
+allowed is left, `run launch` refuses it and `run ready` lists it under `blocked`.
 Only a rejection before the worker did anything counts: an error naming the model after work
 began, or on a resume after `run answer`, is an ordinary failure, and so is one worded as an outage
 ("currently unavailable", "try again", "overloaded", a 5xx); retry those rather than re-route.
@@ -230,8 +232,10 @@ Get the ready queue:
 node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" run ready <run-id> --json
 ```
 
-`tasks` is what can launch now. A task in `blocked` has its dependencies met but overlaps scope
-granted to another active task; it becomes launchable once that task is integrated or cancelled.
+`tasks` is what can launch now. A task in `blocked` has its dependencies met but cannot launch:
+it overlaps scope granted to another active task (it becomes launchable once that task is
+integrated or cancelled), or its model was rejected as unavailable with no allowed model below it
+(re-route it with `run plan`).
 
 Select at most the run's remaining worker capacity. Launch each selected task:
 

@@ -33,6 +33,7 @@ import {
   listRuns,
   loadRun,
   readyTasks,
+  effectiveTaskRoute,
   grantedSurfaceConflicts,
   summarizeInputRequest,
   recordIntegrationDiagnostic,
@@ -639,6 +640,10 @@ function commandRun(argv, cwd) {
     const blocked = [];
     const tasks = readyTasks(run).filter((task) => {
       const conflicts = grantedSurfaceConflicts(run, task);
+      const route = effectiveTaskRoute(run, task);
+      if (route.exhausted) {
+        conflicts.push(`${route.model} was rejected as unavailable and no allowed model remains; re-route it`);
+      }
       if (conflicts.length) {
         blocked.push({ id: task.id, title: task.title, conflicts });
       }
@@ -652,7 +657,7 @@ function commandRun(argv, cwd) {
       ? tasks.map((task) => `${task.id}\t${task.title}`)
       : ["No tasks are ready."];
     for (const entry of blocked) {
-      lines.push(`${entry.id}\twaiting on a granted scope: ${entry.conflicts.join("; ")}`);
+      lines.push(`${entry.id}\tcannot launch: ${entry.conflicts.join("; ")}`);
     }
     if (checkpoint.stale) {
       lines.push(

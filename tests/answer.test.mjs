@@ -21,12 +21,14 @@ import {
   replacePlan,
   retryTask,
   runFile,
+  StaleRunnerError,
   verifyTask
 } from "../plugins/orchestrator/scripts/lib/runs.mjs";
 import {
   answerTaskWorker,
   launchTaskWorker,
-  pollRunWorkers
+  pollRunWorkers,
+  stopTaskWorker
 } from "../plugins/orchestrator/scripts/lib/workers.mjs";
 import { inspectTaskWorktree } from "../plugins/orchestrator/scripts/lib/worktrees.mjs";
 import { checkpointPlan, cleanup, makeRepo, runCli } from "./helpers.mjs";
@@ -635,7 +637,7 @@ test("a pending task cannot launch onto scope granted to an active task", () => 
   const ready = JSON.parse(runCli(root, ["run", "ready", "run-grant-pending", "--json"]).stdout);
   assert.deepEqual(ready.tasks.map((task) => task.id), ["docs"]);
   assert.deepEqual(ready.blocked.map((task) => task.id), ["helpers"]);
-  assert.match(runCli(root, ["run", "ready", "run-grant-pending"]).stdout, /helpers\twaiting on a granted scope: its scope `lib\/\*\*` overlaps/);
+  assert.match(runCli(root, ["run", "ready", "run-grant-pending"]).stdout, /helpers\tcannot launch: its scope `lib\/\*\*` overlaps/);
   // Planned scopes that overlap each other are still the supervisor's call.
   assert.doesNotThrow(() => claimTask(root, "run-grant-pending", "docs", lane(root)));
 });
@@ -676,4 +678,93 @@ test("a resumed worker that cannot be attached is stopped and the answer reverte
   // The process itself is gone, not just marked cancelled.
   await new Promise((resolve) => setTimeout(resolve, 500));
   assert.throws(() => process.kill(status.pid, 0), { code: "ESRCH" });
+});
+
+test("a poll that read a runner since replaced by an answered resume cannot collect from it", async () => {
+  const root = repo();
+  plan(root, "run-answer-stale");
+  launchTaskWorker(root, "run-answer-stale", "work", lane(root), {
+    codexCommand: [process.execPath, askFixture, "--ask=scope:lib/helper.js", "--write=src/notes.txt"]
+  });
+  await settle(root, "run-answer-stale");
+  // A slow poll read the paused runner's files before the answer ...
+  const stale = loadRun(root, "run-answer-stale").tasks.work.attempts[0].runner;
+  answerTaskWorker(root, "run-answer-stale", "work", lane(root), {
+    grantScope: ["lib/helper.js"],
+    codexCommand: [process.execPath, path.join(fixtures, "fake-codex-slow.mjs"), "--delay=10000"]
+  });
+  // ... and only now tries to apply what it read.
+  assert.throws(
+    () => recordTaskResult(root, "run-answer-stale", "work", {
+      attemptId: "work-attempt-1",
+      resultText: fs.readFileSync(stale.lastMessageFile, "utf8"),
+      runnerStatusFile: stale.statusFile
+    }),
+    StaleRunnerError
+  );
+  const task = loadRun(root, "run-answer-stale").tasks.work;
+  assert.equal(task.status, "running");
+  assert.equal(task.attempts[0].inputRequests.length, 1);
+  stopTaskWorker(task.attempts[0]);
+});
+
+test("a failed attach that was already saved is reverted, and the next answer starts clean", async () => {
+  const root = repo();
+  plan(root, "run-answer-attach");
+  launchTaskWorker(root, "run-answer-attach", "work", lane(root), {
+    codexCommand: [process.execPath, askFixture, "--ask=scope:lib/helper.js", "--write=src/notes.txt", "--granted=lib/helper.js"]
+  });
+  await settle(root, "run-answer-attach");
+  // attachExecution saves the run, then its event append fails.
+  const events = eventsFile(root, "run-answer-attach");
+  const original = fs.appendFileSync;
+  fs.appendFileSync = function (target, data, ...rest) {
+    if (String(target) === events && String(data).includes("task.execution_started")) {
+      throw new Error("disk full");
+    }
+    return original.call(this, target, data, ...rest);
+  };
+  try {
+    assert.throws(
+      () => answerTaskWorker(root, "run-answer-attach", "work", lane(root), {
+        grantScope: ["lib/helper.js"],
+        codexCommand: [process.execPath, path.join(fixtures, "fake-codex-slow.mjs"), "--delay=10000"]
+      }),
+      /disk full/
+    );
+  } finally {
+    fs.appendFileSync = original;
+  }
+  let task = loadRun(root, "run-answer-attach").tasks.work;
+  assert.equal(task.status, "needs_input");
+  assert.equal(task.attempts[0].inputRequests[0].failedAnswers.length, 1);
+
+  // Answering again runs in a fresh directory: the stopped try's cancelled
+  // status file is never read for it.
+  const answered = answerTaskWorker(root, "run-answer-attach", "work", lane(root), { grantScope: ["lib/helper.js"] });
+  assert.match(answered.runner.statusFile, /round-1-try-2/);
+  ({ task } = await settle(root, "run-answer-attach"));
+  assert.equal(task.status, "reported");
+  assert.match(task.result.structured.summary, /granted=true/);
+});
+
+test("a result written by a discarded replacement thread is never collected for the relaunch", async () => {
+  const root = repo();
+  plan(root, "run-answer-replaced-result");
+  launchTaskWorker(root, "run-answer-replaced-result", "work", lane(root), {
+    codexCommand: [process.execPath, askFixture, "--ask=scope:lib/helper.js", "--write=src/notes.txt"]
+  });
+  let { task } = await settle(root, "run-answer-replaced-result");
+  const threadId = task.attempts[0].threadId;
+  answerTaskWorker(root, "run-answer-replaced-result", "work", lane(root), {
+    grantScope: ["lib/helper.js"],
+    codexCommand: [
+      process.execPath, askFixture, "--ask=scope:lib/helper.js", "--write=src/notes.txt",
+      `--replace=${threadId}`, "--replaced-writes", "--fallback-silent"
+    ]
+  });
+  ({ task } = await settle(root, "run-answer-replaced-result"));
+  // The relaunch wrote nothing, so the attempt has no result: not the discarded one.
+  assert.equal(task.status, "failed");
+  assert.equal(task.attempts[0].outcome.reasonCode, "missing_result");
 });

@@ -18,6 +18,9 @@ import path from "node:path";
 //   --replace=<id>        resuming this thread id silently starts a new thread, which
 //                         idles 5s before it carries on (Codex does this for ids it
 //                         cannot parse)
+//   --replaced-writes     the replacing thread writes a result at once, before it idles
+//   --fallback-silent     a fresh thread briefed with earlier answers exits 0 without
+//                         writing a result
 //   --unavailable=<slug>  reject this model the way fake-codex-model-unavailable.mjs does
 const args = process.argv.slice(2);
 const option = (name) => args.find((arg) => arg.startsWith(`--${name}=`))?.split("=").slice(1).join("=");
@@ -61,8 +64,25 @@ process.stdin.on("end", () => {
   }
   const replaced = Boolean(resumeThreadId) && resumeThreadId === replace;
   const threadId = replaced ? `thread-replaced-${process.pid}` : resumeThreadId ?? `thread-ask-${process.pid}`;
+  if (replaced && args.includes("--replaced-writes")) {
+    fs.writeFileSync(outputFile, JSON.stringify({
+      summary: "Result from the discarded replacement thread.",
+      files_touched: [],
+      tests: [],
+      decisions: [],
+      assumptions: [],
+      blockers: [],
+      blocker_code: null,
+      needs_input: null,
+      confidence: "high"
+    }), "utf8");
+  }
   emit({ type: "thread.started", thread_id: threadId });
   emit({ type: "turn.started" });
+  if (!resumeThreadId && args.includes("--fallback-silent") && /### Request \d+/.test(prompt)) {
+    emit({ type: "turn.completed" });
+    return;
+  }
   setTimeout(work, replaced ? 5000 : 0);
 });
 

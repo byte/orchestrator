@@ -43,6 +43,23 @@ Fixes:
   task on every poll.
 - Poll output and the supervisor briefing describe a paused worker's request
   with the same wording.
+- A poll that read a worker's files before `run answer` attached a resumed
+  worker can no longer apply that stale view: every write it makes is checked
+  against the runner it read, so an answered request is never collected twice.
+- A replacement thread stopped for the full-briefing relaunch can no longer
+  leave its `result.json` behind to be collected for the relaunch.
+- A failed `run answer` is reverted even when its attach was already saved,
+  and answering again runs in a fresh directory, so the stopped try's
+  cancelled status is never read for the new worker.
+- A warm retry carries only declarations for files earlier attempts actually
+  changed before it started and it did not change again; a file an earlier
+  attempt merely claimed is never carried.
+- A retry note survives repeated launch failures with no earlier worker.
+- A long worker stream whose early work scrolled out of the read window is no
+  longer mistaken for a launch rejection.
+- A task whose model is known unavailable, with no allowed model below it, is
+  refused by `run launch` and listed under `blocked` by `run ready`, instead
+  of launching the rejected model again.
 
 ## 0.6.0
 
