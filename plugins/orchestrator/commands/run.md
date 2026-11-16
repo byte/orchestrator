@@ -228,6 +228,9 @@ Get the ready queue:
 node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" run ready <run-id> --json
 ```
 
+`tasks` is what can launch now. A task in `blocked` has its dependencies met but overlaps scope
+granted to another active task; it becomes launchable once that task is integrated or cancelled.
+
 Select at most the run's remaining worker capacity. Launch each selected task:
 
 ```bash

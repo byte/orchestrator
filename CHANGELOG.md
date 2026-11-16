@@ -32,7 +32,17 @@ Fixes:
 - A scope granted through `run answer` stays exclusive. A task that was still
   pending when the grant was made is refused at launch if its scope overlaps
   the grant (or its own grant overlaps an active task), instead of launching a
-  second worker onto the same paths.
+  second worker onto the same paths. `run ready` lists such a task under
+  `blocked`, with the grant it overlaps, instead of offering it for dispatch.
+- An error that reads as an outage ("currently unavailable", "try again",
+  "overloaded", a 5xx) is an ordinary failure even before any work, so a brief
+  outage no longer marks the model unavailable for the rest of the run.
+- `run retry` no longer counts warm attempts that never launched toward its
+  advice to escalate.
+- `run poll` and `run wait` reload the run only for active tasks, not once per
+  task on every poll.
+- Poll output and the supervisor briefing describe a paused worker's request
+  with the same wording.
 
 ## 0.6.0
 

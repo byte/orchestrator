@@ -33,6 +33,8 @@ import {
   listRuns,
   loadRun,
   readyTasks,
+  grantedSurfaceConflicts,
+  summarizeInputRequest,
   recordIntegrationDiagnostic,
   recordTaskResult,
   recordIntegration,
@@ -382,10 +384,7 @@ function renderPollUpdate(update) {
       `${update.overLimit.timeoutMinutes}-minute limit; still running (not stopped). Keep waiting or \`run cancel\` it.`;
   }
   if (update.inputRequest) {
-    const request = update.inputRequest;
-    const detail = request.kind === "scope_extension"
-      ? `asks for scope: ${request.paths.join(", ")} — ${request.reason}`
-      : `asks: ${request.question}${request.options.length ? ` [${request.options.join(" | ")}]` : ""} — ${request.reason}`;
+    const detail = summarizeInputRequest(update.inputRequest);
     return `${update.taskId}\t${update.status}\trequest ${update.round}: ${detail}; answer with \`run answer\``;
   }
   if (update.inputCapReached) {
@@ -635,14 +634,26 @@ function commandRun(argv, cwd) {
 
   if (action === "ready") {
     const run = loadRun(cwd, runId);
-    const tasks = readyTasks(run);
+    // A ready task whose scope overlaps another active task's grant is refused by
+    // `run launch`, so it is listed apart instead of offered for dispatch.
+    const blocked = [];
+    const tasks = readyTasks(run).filter((task) => {
+      const conflicts = grantedSurfaceConflicts(run, task);
+      if (conflicts.length) {
+        blocked.push({ id: task.id, title: task.title, conflicts });
+      }
+      return !conflicts.length;
+    });
     const checkpoint = checkpointStatus(run);
     if (options.json) {
-      return emitJson({ tasks, checkpoint });
+      return emitJson({ tasks, blocked, checkpoint });
     }
     const lines = tasks.length
       ? tasks.map((task) => `${task.id}\t${task.title}`)
       : ["No tasks are ready."];
+    for (const entry of blocked) {
+      lines.push(`${entry.id}\twaiting on a granted scope: ${entry.conflicts.join("; ")}`);
+    }
     if (checkpoint.stale) {
       lines.push(
         `checkpoint: stale — ${checkpoint.reason}`,

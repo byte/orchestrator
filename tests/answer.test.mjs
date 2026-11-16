@@ -160,7 +160,7 @@ test("a granted scope extension resumes the same attempt and integrates with the
   assert.equal(loadRun(root, "run-grant").status, "running");
   assert.match(
     renderSupervisorBriefing(root, loadRun(root, "run-grant"), lane(root)),
-    /## Workers awaiting your answer[\s\S]+work \(work-attempt-1, request 1 of at most 3\) asks for lib\/helper\.js/
+    /## Workers awaiting your answer[\s\S]+work \(work-attempt-1, request 1 of at most 3\) asks for scope: lib\/helper\.js/
   );
   const threadId = attempt.threadId;
 
@@ -626,6 +626,46 @@ test("a pending task cannot launch onto scope granted to an active task", () => 
     /Task "helpers" cannot launch yet: its scope `lib\/\*\*` overlaps `lib\/helper\.js` granted to dispatching task "work"/
   );
   assert.equal(loadRun(root, "run-grant-pending").tasks.helpers.status, "pending");
+  // run ready lists it apart instead of offering it for dispatch.
+  const ready = JSON.parse(runCli(root, ["run", "ready", "run-grant-pending", "--json"]).stdout);
+  assert.deepEqual(ready.tasks.map((task) => task.id), ["docs"]);
+  assert.deepEqual(ready.blocked.map((task) => task.id), ["helpers"]);
+  assert.match(runCli(root, ["run", "ready", "run-grant-pending"]).stdout, /helpers\twaiting on a granted scope: its scope `lib\/\*\*` overlaps/);
   // Planned scopes that overlap each other are still the supervisor's call.
   assert.doesNotThrow(() => claimTask(root, "run-grant-pending", "docs", lane(root)));
+});
+
+test("a resumed worker that cannot be attached is stopped and the answer reverted", async () => {
+  const root = repo();
+  plan(root, "run-answer-orphan");
+  launchTaskWorker(root, "run-answer-orphan", "work", lane(root), {
+    codexCommand: [process.execPath, askFixture, "--ask=scope:lib/helper.js"]
+  });
+  await settle(root, "run-answer-orphan");
+  // Fail the second run.json write (attachExecution's); the first is answerTask's.
+  const file = runFile(root, "run-answer-orphan");
+  const original = fs.renameSync;
+  let writes = 0;
+  fs.renameSync = function (from, to, ...rest) {
+    if (String(to) === file && ++writes === 2) {
+      throw new Error("disk full");
+    }
+    return original.call(this, from, to, ...rest);
+  };
+  try {
+    assert.throws(
+      () => answerTaskWorker(root, "run-answer-orphan", "work", lane(root), {
+        grantScope: ["lib/helper.js"],
+        codexCommand: [process.execPath, path.join(fixtures, "fake-codex-slow.mjs"), "--delay=10000"]
+      }),
+      /disk full/
+    );
+  } finally {
+    fs.renameSync = original;
+  }
+  const task = loadRun(root, "run-answer-orphan").tasks.work;
+  assert.equal(task.status, "needs_input");
+  const roundDir = path.join(path.dirname(task.attempts[0].runner.statusFile), "round-1");
+  const status = JSON.parse(fs.readFileSync(path.join(roundDir, "status.json"), "utf8"));
+  assert.equal(status.status, "cancelled");
 });

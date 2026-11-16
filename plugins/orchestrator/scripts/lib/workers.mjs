@@ -152,6 +152,11 @@ function streamEvents(filePath) {
 
 const UNAVAILABLE_PHRASES =
   /not supported|not available|unavailable|does not exist|not found|do(?:es)? not have access|no access|not enabled|not allowed/i;
+// Wording that marks an outage rather than an entitlement. Such an error, even one
+// naming the model before any work, is an ordinary failure to retry: marking the
+// model unavailable would skip it for the rest of the run.
+const TRANSIENT_PHRASES =
+  /currently|temporar|try again|retry|overloaded|capacity|rate.?limit|too many requests|timed? ?out|\b5\d\d\b/i;
 
 /**
  * Decide whether Codex rejected the requested model itself, as opposed to the
@@ -197,7 +202,7 @@ export function modelUnavailableError(filePath, model) {
     const namesModel = message.toLowerCase().includes(slug);
     if (namesModel && (code === "model_not_found" ||
         (/\bmodel\b/i.test(message) && UNAVAILABLE_PHRASES.test(message) &&
-          !/fallback metadata/i.test(message)))) {
+          !TRANSIENT_PHRASES.test(message) && !/fallback metadata/i.test(message)))) {
       return message;
     }
   }
@@ -404,8 +409,13 @@ export function pollRunWorkers(cwd, runId, { now = Date.now() } = {}) {
   const run = loadRun(cwd, runId);
   const updates = [];
   for (const listed of Object.values(run.tasks)) {
-    // Re-read each task: a concurrent `run poll` or `run wait` may have collected
-    // it since the run was loaded, and collecting it twice would fail.
+    // Only an active or paused task has anything to collect. Skipping the rest
+    // without a reload keeps a poll at one run load plus one per active task.
+    if (!["dispatching", "running", "needs_input"].includes(listed.status)) {
+      continue;
+    }
+    // Re-read an active task: a concurrent `run poll` or `run wait` may have
+    // collected it since the run was loaded, and collecting it twice would fail.
     const task = loadRun(cwd, runId).tasks[listed.id];
     if (task?.status === "needs_input") {
       updates.push(awaitingAnswer(task));

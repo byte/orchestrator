@@ -468,3 +468,25 @@ test("a retry note reaches the worker when no earlier attempt reached one", () =
   const second = claimTask(root, "run-note-launch", "work", lane);
   assert.match(second.briefing, /## Supervisor correction for this attempt\n\nUse the v2 API\./);
 });
+
+test("warm attempts that never launched do not count toward escalation advice", () => {
+  const root = repo();
+  plan(root, "run-escalate");
+  reportedAttempt(root, "run-escalate");
+  verifyTask(root, "run-escalate", "work", { verdict: "fail", evidence: ["wrong"] });
+  for (let index = 0; index < 2; index += 1) {
+    retryTask(root, "run-escalate", "work");
+    const claimed = claimTask(root, "run-escalate", "work", lane);
+    assert.ok(claimed.resumedFromAttemptId);
+    failTaskAttempt(root, "run-escalate", "work", {
+      attemptId: claimed.attemptId,
+      error: "spawn codex ENOENT",
+      reasonCode: "worker_launch_failed",
+      signals: ["worker_launch_error"],
+      launchFailed: true
+    });
+  }
+  const retried = retryTask(root, "run-escalate", "work");
+  assert.equal(retried.retryPlan.warmFailures, 0);
+  assert.equal(retried.retryPlan.escalationAdvised, false);
+});

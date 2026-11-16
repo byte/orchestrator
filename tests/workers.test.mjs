@@ -15,6 +15,7 @@ import {
   recordTaskResult,
   renderSupervisorBriefing,
   replacePlan,
+  runFile,
   verifyTask
 } from "../plugins/orchestrator/scripts/lib/runs.mjs";
 import {
@@ -539,6 +540,16 @@ test("model unavailability is read only from top-level rejections that name the 
     { type: "error", message: "The 'gpt-6-astra' model is not supported when using Codex with a ChatGPT account." }
   ]);
   assert.equal(modelUnavailableError(file, "gpt-6-astra"), null);
+
+  // An outage before any work is still not an entitlement rejection.
+  for (const message of [
+    "The model gpt-6-astra is currently unavailable. Please try again later.",
+    "gpt-6-astra model is temporarily unavailable (503).",
+    "The model gpt-6-astra is overloaded; not available right now due to capacity."
+  ]) {
+    writeEvents([{ type: "thread.started", thread_id: "t" }, { type: "turn.started" }, { type: "error", message }]);
+    assert.equal(modelUnavailableError(file, "gpt-6-astra"), null, message);
+  }
 });
 
 test("an unavailable supervisor-routed model is substituted down the ladder and recorded", async () => {
@@ -698,4 +709,27 @@ test("a fallback never lands a task others depend on on luna", async () => {
   const leaf = launchTaskWorker(root, "run-luna-leaf", "leaf", { constraints: [] }, { codexCommand: command });
   assert.equal(leaf.model, "gpt-5.6-luna");
   assert.equal(leaf.substitution.requestedModel, "gpt-6.1-terra");
+});
+
+test("a poll reloads the run only for tasks that are active", () => {
+  const root = repo();
+  createRun(root, { id: "run-poll-loads", lane: "api", objective: "Build safely", workerModel: "sol", reasoningEffort: "high" });
+  replacePlan(root, "run-poll-loads", ["a", "b", "c", "d", "e"].map((id) => ({
+    id, title: id, objective: id, kind: "read", acceptance: ["ok"]
+  })));
+  const file = runFile(root, "run-poll-loads");
+  const original = fs.readFileSync;
+  let loads = 0;
+  fs.readFileSync = function (target, ...rest) {
+    if (String(target) === file) {
+      loads += 1;
+    }
+    return original.call(this, target, ...rest);
+  };
+  try {
+    assert.deepEqual(pollRunWorkers(root, "run-poll-loads"), []);
+  } finally {
+    fs.readFileSync = original;
+  }
+  assert.equal(loads, 1);
 });

@@ -957,7 +957,7 @@ function validateLunaLeaves(run, tasks) {
  * Planned scopes are not compared with each other here: overlapping plans are
  * the supervisor's decision, but a grant was promised to be exclusive.
  */
-function grantedSurfaceConflicts(run, task) {
+export function grantedSurfaceConflicts(run, task) {
   if (task.kind !== "write") {
     return [];
   }
@@ -1419,6 +1419,7 @@ function warmFailureCount(task) {
   return task.attempts.filter((attempt) =>
     attempt.resumedFromAttemptId &&
     !attempt.modelUnavailable &&
+    !attempt.launchFailed &&
     attempt.outcome &&
     attempt.outcome.terminalOutcome !== "accepted"
   ).length;
@@ -1536,6 +1537,15 @@ function describeInputRequest(request) {
   }
   const options = request.options.length ? ` Options you gave: ${request.options.join(" | ")}.` : "";
   return `question: ${request.question} — ${request.reason}.${options}`;
+}
+
+/** A paused worker's request as the supervisor reads it, in poll output and the briefing. */
+export function summarizeInputRequest(request) {
+  if (request.kind === "scope_extension") {
+    return `asks for scope: ${request.paths.join(", ")} — ${request.reason}`;
+  }
+  return `asks: ${request.question} — ${request.reason}` +
+    `${request.options.length ? ` (options: ${request.options.join(" | ")})` : ""}`;
 }
 
 function describeAnswer(answer) {
@@ -3336,10 +3346,7 @@ function pendingInputRequests(run) {
         return `${task.id}: needs_input, but no unanswered request is recorded`;
       }
       const request = round.request;
-      const detail = request.kind === "scope_extension"
-        ? `asks for ${request.paths.join(", ")} — ${request.reason}`
-        : `asks: ${request.question} — ${request.reason}` +
-          `${request.options.length ? ` (options: ${request.options.join(" | ")})` : ""}`;
+      const detail = summarizeInputRequest(request);
       const answer = request.kind === "scope_extension"
         ? `orch run answer ${run.id} ${task.id} --grant-scope <glob> | --deny [--reply <text>]`
         : `orch run answer ${run.id} ${task.id} --reply <text> | --deny`;
