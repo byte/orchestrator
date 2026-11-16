@@ -57,7 +57,8 @@ const SAFE_EVENT_TYPE_LIST = Object.freeze([
   "task.integration_refused",
   "task.integration_failed",
   "task.cancelled",
-  "task.resume_fallback"
+  "task.resume_fallback",
+  "task.sandbox_fallback"
 ]);
 const SAFE_EVENT_TYPES = new Set(SAFE_EVENT_TYPE_LIST);
 const LABEL_PROVENANCE = new Set(["supervisor", "user", "imported"]);

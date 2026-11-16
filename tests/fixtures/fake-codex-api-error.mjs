@@ -1,3 +1,4 @@
+import "./sandbox-shim.mjs";
 // Reproduces an API-level rejection: Codex reports the failure as a JSON event
 // on stdout, writes nothing to stderr, and exits non-zero.
 process.stdin.resume();

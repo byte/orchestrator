@@ -2490,11 +2490,30 @@ export function syncExecutionStatus(cwd, runId, taskId, { attemptId, status, run
         at: nowIso()
       };
     }
-    if (!fellBack && JSON.stringify(previous) === JSON.stringify(current)) {
+    // A read worker whose permissions profile could not be proven ran under
+    // plain `--sandbox read-only`: still read-only, but with no writable temp
+    // directory, so any test it reports as failing may have failed on that.
+    const sandboxFellBack = Boolean(status.sandboxFallback && !attempt.sandboxFallback);
+    if (sandboxFellBack) {
+      attempt.sandboxFallback = {
+        reason: String(status.sandboxFallback.reason ?? "probe_failed"),
+        message: String(status.sandboxFallback.message ?? ""),
+        at: nowIso()
+      };
+    }
+    if (!fellBack && !sandboxFellBack && JSON.stringify(previous) === JSON.stringify(current)) {
       return attempt;
     }
     task.updatedAt = nowIso();
     writeRun(cwd, run);
+    if (sandboxFellBack) {
+      appendEvent(cwd, id, {
+        type: "task.sandbox_fallback",
+        taskId: task.id,
+        attemptId: attempt.id,
+        ...attempt.sandboxFallback
+      });
+    }
     if (fellBack) {
       appendEvent(cwd, id, {
         type: "task.resume_fallback",
@@ -3357,6 +3376,12 @@ function retryLabel(attempt) {
   return attempt.retry ? ` — fresh retry (${attempt.retry.reason})` : "";
 }
 
+function sandboxLabel(attempt) {
+  return attempt.sandboxFallback
+    ? ` — ran under plain --sandbox read-only with no writable TMPDIR (read profile ${attempt.sandboxFallback.reason}); failing tests may be the sandbox`
+    : "";
+}
+
 function inputLabel(attempt) {
   const answered = (attempt.inputRequests ?? []).filter((round) => round.answer);
   if (!answered.length) {
@@ -3444,7 +3469,7 @@ export function renderSupervisorBriefing(cwd, run, lane, { routeEvidence = null 
         attempt?.worktree?.path ? `worktree ${attempt.worktree.path}` : null
       ].filter(Boolean).join("; ");
       const attemptOutcomes = task.attempts.map(
-        (entry) => `${entry.id}: ${outcomeSummary(entry)}${retryLabel(entry)}${inputLabel(entry)}`
+        (entry) => `${entry.id}: ${outcomeSummary(entry)}${retryLabel(entry)}${sandboxLabel(entry)}${inputLabel(entry)}`
       );
       const grants = renderScopeGrants(task);
       const pendingRetry = task.status === "pending" && task.pendingRetry

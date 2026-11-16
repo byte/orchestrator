@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -26,6 +26,7 @@ const startedAt = new Date().toISOString();
 let threadId = null;
 let childPid = null;
 let resumeFallback = null;
+let sandboxFallback = null;
 
 function writeStatus(fields) {
   atomicWrite(spec.statusFile, {
@@ -35,6 +36,7 @@ function writeStatus(fields) {
     threadId,
     ...(spec.resumeThreadId ? { resumeThreadId: spec.resumeThreadId } : {}),
     ...(resumeFallback ? { resumeFallback } : {}),
+    ...(sandboxFallback ? { sandboxFallback } : {}),
     ...fields
   });
 }
@@ -46,16 +48,14 @@ function writeStatus(fields) {
 // with write access to one private scratch directory, exported as TMPDIR. The
 // worktree and everything else stay unwritable. `--sandbox` must be left out:
 // when both are given, it wins over the profile (verified against Codex CLI
-// 0.169.0). The scratch directory is removed when the worker finishes.
+// 0.169.0). The scratch directory is removed when the worker finishes cleanly.
 const READ_PROFILE = "orchestrator-read";
+const [command, ...prefixArgs] = spec.codexCommand;
 const scratchDir = spec.sandbox === "read-only"
   ? fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "orch-worker-")))
   : null;
 
-function sandboxArgs() {
-  if (!scratchDir) {
-    return ["--sandbox", spec.sandbox];
-  }
+function readProfileArgs() {
   return [
     "-c",
     `default_permissions="${READ_PROFILE}"`,
@@ -66,16 +66,78 @@ function sandboxArgs() {
   ];
 }
 
+// Without `--sandbox`, a read worker is read-only only if Codex applies the
+// profile. A Codex that ignores or rejects it would fall back to the user's
+// default permissions, which may be writable. So before the first launch the
+// profile is proven on this machine with `codex sandbox`, under the same
+// arguments, cwd, and TMPDIR: the scratch directory must be writable and the
+// worktree must not. Anything else, including a probe that cannot run, falls
+// back to plain `--sandbox read-only` and records why; that is always safe and
+// only costs the worker its temp directory.
+const PROBE_SCRIPT = [
+  'const fs = require("fs"), path = require("path");',
+  "const [scratch, checkout, name] = process.argv.slice(1);",
+  "const writable = (dir) => { const file = path.join(dir, name);",
+  '  try { fs.writeFileSync(file, ""); fs.unlinkSync(file); return true; } catch { return false; } };',
+  "process.stdout.write(JSON.stringify({ scratch: writable(scratch), checkout: writable(checkout) }));"
+].join("\n");
+
+function probeReadProfile() {
+  const marker = `.orch-sandbox-probe-${process.pid}`;
+  const result = spawnSync(
+    command,
+    [...prefixArgs, "sandbox", ...readProfileArgs(), "--", process.execPath, "-e", PROBE_SCRIPT,
+      scratchDir, spec.worktreePath, marker],
+    {
+      cwd: spec.worktreePath,
+      env: { ...process.env, TMPDIR: scratchDir },
+      encoding: "utf8",
+      timeout: 30000
+    }
+  );
+  // If a broken sandbox let the probe write, remove what it wrote.
+  fs.rmSync(path.join(spec.worktreePath, marker), { force: true });
+  let observed = null;
+  try {
+    observed = JSON.parse(String(result.stdout ?? "").trim().split("\n").at(-1));
+  } catch {
+    observed = null;
+  }
+  if (observed?.scratch === true && observed?.checkout === false) {
+    return null;
+  }
+  if (observed && typeof observed.checkout === "boolean") {
+    return { reason: observed.checkout ? "checkout_writable" : "scratch_denied", message: "" };
+  }
+  const detail = result.error?.message || String(result.stderr ?? "").trim().split("\n").at(-1) || "";
+  return { reason: "probe_failed", message: `exit ${result.status ?? "none"}: ${detail}`.slice(0, 500) };
+}
+
+function sandboxArgs() {
+  if (!scratchDir || sandboxFallback) {
+    return ["--sandbox", spec.sandbox];
+  }
+  return readProfileArgs();
+}
+
 writeStatus({ status: "running" });
 
 const output = fs.createWriteStream(spec.outputFile, { flags: "a", mode: 0o600 });
 const errors = fs.createWriteStream(spec.errorFile, { flags: "a", mode: 0o600 });
+
+if (scratchDir) {
+  sandboxFallback = probeReadProfile();
+  if (sandboxFallback) {
+    errors.write(`[orchestrator] read profile not applied (${sandboxFallback.reason}); ` +
+      "running under --sandbox read-only, without a writable TMPDIR.\n");
+    writeStatus({ status: "running" });
+  }
+}
 const prompt = fs.readFileSync(spec.promptFile);
 // A resume after `run answer` sends only the answer, because the thread already
 // holds the briefing. A fresh thread started in its place needs the full
 // briefing instead, which the launcher writes to `fallbackPromptFile`.
 const fallbackPrompt = spec.fallbackPromptFile ? fs.readFileSync(spec.fallbackPromptFile) : prompt;
-const [command, ...prefixArgs] = spec.codexCommand;
 
 // A resumed thread does not inherit its model, effort, or sandbox (verified against
 // Codex CLI 0.169.0), so every launch passes all three explicitly. `-C` and the

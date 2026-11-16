@@ -1,3 +1,4 @@
+import "./sandbox-shim.mjs";
 import fs from "node:fs";
 
 // A fake Codex worker that stays busy. Options placed before `exec`:

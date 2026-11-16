@@ -1,3 +1,4 @@
+import "./sandbox-shim.mjs";
 import fs from "node:fs";
 
 // Reproduces how Codex CLI 0.169.0 rejects a model the account cannot use

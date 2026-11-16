@@ -1,3 +1,4 @@
+import "./sandbox-shim.mjs";
 import fs from "node:fs";
 
 const args = process.argv.slice(2);

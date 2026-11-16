@@ -341,6 +341,17 @@ real resume reports the same thread id it was given.
    `exec ... resume`: a write to the scratch directory succeeded and a write to the worktree
    failed with EPERM.
 
+   Without `--sandbox`, the worker is read-only only if Codex applies the profile; a Codex that
+   ignored it would run with the user's default permissions, which may be writable. So before
+   its first launch the wrapper proves the profile with `codex sandbox <profile arguments> --
+   node -e <probe>`, in the worktree and with the same `TMPDIR`. The scratch directory must be
+   writable and the worktree must not. On any other outcome, including a probe that cannot run,
+   the worker launches under plain `--sandbox read-only` instead. The attempt records
+   `sandboxFallback` (`checkout_writable`, `scratch_denied`, or `probe_failed`), the run gets a
+   `task.sandbox_fallback` event, and the supervisor briefing marks the attempt, because its
+   failing tests may be the missing temp directory. A config-level `sandbox_mode`, even
+   `danger-full-access`, did not override the profile in testing on 0.169.0.
+
    For a warm retry it resumes the previous attempt's thread instead, with `-C` and the sandbox
    arguments on `exec` (Codex rejects them after `resume`) and the attempt's own route after it:
 

@@ -9,8 +9,12 @@ Fixes:
   suite that creates temporary files. These workers now get a Codex
   permissions profile that extends `:read-only` with write access to one
   private scratch directory, exported as `TMPDIR` and removed when the worker
-  exits. The worktree stays unwritable. The wait tests that need file-change
-  events skip, with the reason, where the sandbox blocks those events.
+  exits. The worktree stays unwritable. Before launch the worker proves the
+  profile with `codex sandbox`; if the scratch directory is not writable or
+  the worktree is, it falls back to `--sandbox read-only` and records a
+  `task.sandbox_fallback` event. The wait tests that need file-change events
+  skip, with the reason, inside the Codex sandbox (`CODEX_SANDBOX` set), where
+  those events are blocked.
 - `run wait` no longer wakes on its own lock file. Every poll takes
   `run.json.lock`, and the run-directory watch let that name through, so a wait
   on a quiet worker polled about ten times a second instead of sleeping.

@@ -23,7 +23,10 @@ All support `--json` where structured output is useful.
 - Read and verify workers cannot write the checkout but can run commands and tests: each gets a
   private writable `TMPDIR` that is removed when it exits. A read task's acceptance criteria can
   therefore ask for test output as evidence. Tests that need file-change events may skip inside
-  the sandbox; a skipped test is not a pass, so run those yourself.
+  the sandbox; a skipped test is not a pass, so run those yourself. If an attempt shows
+  `sandboxFallback` (a `task.sandbox_fallback` event), the profile could not be proven and the
+  worker ran under plain `--sandbox read-only` with no writable temp directory; its test failures
+  may be the sandbox, so rerun them yourself before acting on them.
 - When Codex rejects a model as unavailable to the account, `run poll` and `run resume` relaunch
   the task one rung down `astra` → `sol` → `terra` → `luna` with the same effort and record the
   substitution on the attempt, in the run events, and in the briefing. Substitution is never
