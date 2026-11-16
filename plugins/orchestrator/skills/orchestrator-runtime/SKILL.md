@@ -24,7 +24,9 @@ All support `--json` where structured output is useful.
   the task one rung down `astra` → `sol` → `terra` → `luna` with the same effort and record the
   substitution on the attempt, in the run events, and in the briefing. Substitution is never
   silent. A substituted user pin is flagged; tell the user. An exhausted ladder fails the task
-  with a `model_unavailable` outcome.
+  with a `model_unavailable` outcome; a task others depend on never falls to `luna` unless the
+  run is pinned to it. A model error after the worker began, or on an answered resume, is an
+  ordinary failure, not a substitution.
 - `run retry <run-id> <task-id> [--note <text>] [--fresh]` is warm by default: when the previous
   attempt reached a result or verdict and has a thread id, the next `run launch` resumes that
   Codex thread with the attempt's own model, effort, and sandbox, in the previous worktree (a

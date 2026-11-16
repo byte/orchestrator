@@ -22,6 +22,13 @@ Fixes:
   same worktree declared count as declared, instead of failing inspection.
 - A `run retry --note` reaches the worker even when no earlier attempt reached
   one (the first launch failed, say). Before, it was stored but never briefed.
+- An error naming the model counts as an unavailable-model rejection only when
+  it comes before the worker did anything, and never on a resume after `run
+  answer`. A temporary mid-run error no longer marks the model unavailable for
+  the run and relaunches in a fresh worktree, discarding the work.
+- A model fallback never lands a task other tasks depend on on `luna`, matching
+  the plan-time leaf rule, unless the run is pinned to luna. With no other rung
+  left the task fails for the supervisor to re-route.
 
 ## 0.6.0
 

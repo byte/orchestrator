@@ -591,3 +591,22 @@ test("an over-limit flag from before an answer is not shown once the resumed wor
   answerTask(root, "run-answer-clock", "work", lane(root), { grantScope: ["lib/helper.js"] });
   assert.doesNotMatch(renderSupervisorBriefing(root, loadRun(root, "run-answer-clock"), lane(root)), /OVER LIMIT/);
 });
+
+test("a model rejection on an answered resume fails the attempt instead of substituting it", async () => {
+  const root = repo();
+  plan(root, "run-answer-rejected");
+  launchTaskWorker(root, "run-answer-rejected", "work", lane(root), {
+    codexCommand: [process.execPath, askFixture, "--ask=scope:lib/helper.js", "--partial"]
+  });
+  await settle(root, "run-answer-rejected");
+  answerTaskWorker(root, "run-answer-rejected", "work", lane(root), {
+    grantScope: ["lib/helper.js"],
+    codexCommand: [process.execPath, askFixture, "--ask=scope:lib/helper.js", "--partial", "--unavailable=gpt-6.1-sol"]
+  });
+  const { task } = await settle(root, "run-answer-rejected");
+  // The attempt worked before it paused; it is not "never reached a worker".
+  assert.equal(task.status, "failed");
+  assert.equal(task.attempts.length, 1);
+  assert.equal(task.attempts[0].modelUnavailable, undefined);
+  assert.deepEqual(loadRun(root, "run-answer-rejected").unavailableModels ?? [], []);
+});

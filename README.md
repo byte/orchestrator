@@ -456,7 +456,8 @@ finalization, and cleanup without consuming model quota.
   belongs to the account authenticated in Codex CLI. A launch Codex rejects as unavailable is
   closed with a `model_unavailable` outcome (it never reached a worker, so route evidence does not
   count it) and the task relaunches on the next model down the ladder; only when no model is left
-  does the task fail for the supervisor to escalate. Only the ChatGPT-account rejection wording has
+  does the task fail for the supervisor to escalate. A task others depend on never falls to luna
+  unless the run is pinned to it, and only a rejection before the worker did anything counts. Only the ChatGPT-account rejection wording has
   been observed; detection on an API-key login is inferred.
 - Route evidence is local history, not a benchmark. It covers only this machine's saved runs and
   says nothing about tasks unlike the ones that produced it.

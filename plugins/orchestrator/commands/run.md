@@ -157,7 +157,10 @@ remembers the model as unavailable for the rest of the run so later launches go 
 substitute. The substitution is never silent: it is recorded on the attempt (requested and actual
 model), appended as a run event, and shown by `run poll`, `run resume`, and the supervisor
 briefing. A substituted user pin is flagged as such; tell the user which model actually ran. If no
-rung is left, the task fails with a `model_unavailable` outcome for you to escalate. Runs saved by
+rung is left, the task fails with a `model_unavailable` outcome for you to escalate. A task other
+tasks depend on never falls to `luna` (the plan-time leaf rule), unless the run is pinned to it.
+Only a rejection before the worker did anything counts: an error naming the model after work
+began, or on a resume after `run answer`, is an ordinary failure. Runs saved by
 0.5.x that route to `gpt-5.6-sol` or `gpt-5.6-terra` keep those exact slugs and are not substituted.
 
 Size tasks by write-surface independence, not to a target count. Split work into separate tasks

@@ -523,6 +523,22 @@ test("model unavailability is read only from top-level rejections that name the 
 
   writeEvents([{ type: "turn.failed", error: { code: "model_not_found", message: "The model `gpt-6-astra` does not exist or you do not have access to it." } }]);
   assert.match(modelUnavailableError(file, "gpt-6-astra"), /do not have access/);
+
+  // After the worker has done anything, an error naming the model is a mid-run
+  // failure, not a launch rejection.
+  writeEvents([
+    { type: "thread.started", thread_id: "t" },
+    { type: "turn.started" },
+    { type: "item.completed", item: { type: "command_execution", command: "git commit -m work" } },
+    { type: "error", message: "The model gpt-6-astra is currently unavailable. Please try again later." },
+    { type: "turn.failed", error: { message: "The model gpt-6-astra is currently unavailable." } }
+  ]);
+  assert.equal(modelUnavailableError(file, "gpt-6-astra"), null);
+  writeEvents([
+    { type: "turn.completed" },
+    { type: "error", message: "The 'gpt-6-astra' model is not supported when using Codex with a ChatGPT account." }
+  ]);
+  assert.equal(modelUnavailableError(file, "gpt-6-astra"), null);
 });
 
 test("an unavailable supervisor-routed model is substituted down the ladder and recorded", async () => {
@@ -651,4 +667,35 @@ test("an unavailable model with no rung left fails the task for escalation", asy
     ["execution_failed", "escalate", "model_unavailable"]
   );
   assert.match(task.result.summary, /No model remains on the fallback ladder below gpt-5\.6-luna/);
+});
+
+test("a fallback never lands a task others depend on on luna", async () => {
+  const root = repo();
+  createRun(root, { id: "run-luna-leaf", lane: "api", objective: "Build safely" });
+  const routed = (id, extra = {}) => ({
+    id,
+    title: id,
+    objective: `Do ${id}`,
+    scope: [`src/${id}/**`],
+    acceptance: ["tests pass"],
+    model: "terra",
+    effort: "high",
+    routingReason: "The supervisor selected this route for the bounded task.",
+    ...extra
+  });
+  replacePlan(root, "run-luna-leaf", [routed("base"), routed("leaf"), routed("next", { dependsOn: ["base"] })]);
+  checkpointPlan(root, "run-luna-leaf");
+  const command = [process.execPath, unavailableFixture, "--unavailable=gpt-6.1-terra"];
+  launchTaskWorker(root, "run-luna-leaf", "base", { constraints: [] }, { codexCommand: command });
+  await pollUntil(root, "run-luna-leaf", (run) => run.tasks.base.status !== "running");
+  let run = loadRun(root, "run-luna-leaf");
+  assert.equal(run.tasks.base.status, "failed");
+  assert.equal(run.tasks.base.attempts.length, 1);
+  assert.equal(run.tasks.base.attempts[0].modelUnavailable.fallbackModel, null);
+  assert.match(run.tasks.base.result.summary, /luna is not used for a task others depend on/);
+
+  // A leaf still falls back to luna.
+  const leaf = launchTaskWorker(root, "run-luna-leaf", "leaf", { constraints: [] }, { codexCommand: command });
+  assert.equal(leaf.model, "gpt-5.6-luna");
+  assert.equal(leaf.substitution.requestedModel, "gpt-6.1-terra");
 });

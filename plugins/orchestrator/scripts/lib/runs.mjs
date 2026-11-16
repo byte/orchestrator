@@ -566,6 +566,22 @@ function unavailableModelSet(run) {
 }
 
 /**
+ * Whether a fallback may land this task on luna. The plan-time luna-leaf rule
+ * (validateLunaLeaves) applies to substitutions too: a task others depend on
+ * never falls to luna unless the whole run is pinned to it. With no other rung
+ * left the task fails and the supervisor re-routes it.
+ */
+function fallbackCandidateAllowed(run, task, candidate) {
+  if (candidate !== LUNA_MODEL || !task) {
+    return true;
+  }
+  if (!Object.hasOwn(run.workerPolicy, "routingMode") || run.workerPolicy.model === LUNA_MODEL) {
+    return true;
+  }
+  return !Object.values(run.tasks ?? {}).some((other) => other.dependsOn?.includes(task.id));
+}
+
+/**
  * The route a new attempt will actually launch on. It is the saved route unless
  * Codex has already rejected that model for this account during the run, in which
  * case it walks down MODEL_FALLBACK_LADDER keeping the effort. The substitution is
@@ -584,7 +600,8 @@ export function effectiveTaskRoute(run, task) {
   }
   for (const candidate of MODEL_FALLBACK_LADDER.slice(start + 1)) {
     if (unavailable.has(candidate) ||
-        !WORKER_MODELS[candidate].efforts.includes(requested.reasoningEffort)) {
+        !WORKER_MODELS[candidate].efforts.includes(requested.reasoningEffort) ||
+        !fallbackCandidateAllowed(run, task, candidate)) {
       continue;
     }
     return {
@@ -607,7 +624,7 @@ export function effectiveTaskRoute(run, task) {
 }
 
 /** Next model a rejected launch can fall back to, or null when the ladder is exhausted. */
-export function fallbackModel(run, model, reasoningEffort) {
+export function fallbackModel(run, model, reasoningEffort, task = null) {
   const unavailable = unavailableModelSet(run);
   unavailable.add(model);
   const start = MODEL_FALLBACK_LADDER.indexOf(model);
@@ -615,7 +632,9 @@ export function fallbackModel(run, model, reasoningEffort) {
     return null;
   }
   return MODEL_FALLBACK_LADDER.slice(start + 1).find((candidate) =>
-    !unavailable.has(candidate) && WORKER_MODELS[candidate].efforts.includes(reasoningEffort)
+    !unavailable.has(candidate) &&
+    WORKER_MODELS[candidate].efforts.includes(reasoningEffort) &&
+    fallbackCandidateAllowed(run, task, candidate)
   ) ?? null;
 }
 
@@ -2545,7 +2564,7 @@ export function recordModelUnavailable(cwd, runId, taskId, { attemptId, error })
       );
     }
     const message = String(error ?? `Codex rejected ${attempt.model} as unavailable.`);
-    const next = fallbackModel(run, attempt.model, attempt.reasoningEffort);
+    const next = fallbackModel(run, attempt.model, attempt.reasoningEffort, task);
     run.unavailableModels ??= [];
     if (!run.unavailableModels.some((entry) => entry.model === attempt.model)) {
       run.unavailableModels.push({
@@ -2576,7 +2595,8 @@ export function recordModelUnavailable(cwd, runId, taskId, { attemptId, error })
     } else {
       task.status = "failed";
       task.result = {
-        summary: `${message} No model remains on the fallback ladder below ${attempt.model}; ` +
+        summary: `${message} No model remains on the fallback ladder below ${attempt.model}` +
+          `${fallbackCandidateAllowed(run, task, LUNA_MODEL) ? "" : " (luna is not used for a task others depend on)"}; ` +
           "re-route the task or ask the user how to proceed.",
         contractFound: false,
         missingFields: [],

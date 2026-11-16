@@ -167,6 +167,12 @@ const UNAVAILABLE_PHRASES =
  * message must name the requested slug, so an unrelated API error never triggers
  * a substitution. An API-key account reporting `model_not_found` is matched by
  * code as well; that shape is inferred from the OpenAI API, not observed here.
+ *
+ * A rejection comes before any work. Once the stream shows the worker doing
+ * something (an item other than an "error" warning, or a finished turn), a later
+ * error naming the model is a mid-run failure, not a launch rejection: treating
+ * it as one would close the attempt as never reaching a worker and relaunch in a
+ * fresh worktree, discarding the work.
  */
 export function modelUnavailableError(filePath, model) {
   const slug = String(model ?? "").toLowerCase();
@@ -174,6 +180,12 @@ export function modelUnavailableError(filePath, model) {
     return null;
   }
   for (const event of streamEvents(filePath)) {
+    if (
+      event?.type === "turn.completed" ||
+      (String(event?.type ?? "").startsWith("item.") && event.item?.type !== "error")
+    ) {
+      return null;
+    }
     if (event?.type !== "error" && event?.type !== "turn.failed") {
       continue;
     }
@@ -468,7 +480,9 @@ export function pollRunWorkers(cwd, runId, { now = Date.now() } = {}) {
       });
       continue;
     }
-    const unavailable = status.status === "failed"
+    // A runner launched by `run answer` resumes an attempt that has already
+    // worked, so its failure is never a launch rejection of the attempt.
+    const unavailable = status.status === "failed" && !attempt.runner.inputRound
       ? modelUnavailableError(attempt.runner.outputFile, attempt.model)
       : null;
     if (unavailable) {
