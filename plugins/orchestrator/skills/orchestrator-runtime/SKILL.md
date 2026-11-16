@@ -26,7 +26,8 @@ All support `--json` where structured output is useful.
   silent. A substituted user pin is flagged; tell the user. An exhausted ladder fails the task
   with a `model_unavailable` outcome; a task others depend on never falls to `luna` unless the
   run is pinned to it. A model error after the worker began, or on an answered resume, is an
-  ordinary failure, not a substitution.
+  ordinary failure, not a substitution, as is one worded as an outage ("currently unavailable",
+  "try again", "overloaded", a 5xx; inferred from wording). Retry those; don't re-route.
 - `run retry <run-id> <task-id> [--note <text>] [--fresh]` is warm by default: when the previous
   attempt reached a result or verdict and has a thread id, the next `run launch` resumes that
   Codex thread with the attempt's own model, effort, and sandbox, in the previous worktree (a

@@ -550,6 +550,9 @@ test("model unavailability is read only from top-level rejections that name the 
     writeEvents([{ type: "thread.started", thread_id: "t" }, { type: "turn.started" }, { type: "error", message }]);
     assert.equal(modelUnavailableError(file, "gpt-6-astra"), null, message);
   }
+  // Entitlement wording that happens to say "currently" is still a rejection.
+  writeEvents([{ type: "error", message: "The model gpt-6-astra is currently not supported on your plan." }]);
+  assert.match(modelUnavailableError(file, "gpt-6-astra"), /not supported on your plan/);
 });
 
 test("an unavailable supervisor-routed model is substituted down the ladder and recorded", async () => {

@@ -11,6 +11,7 @@ import {
   MAX_INPUT_ROUNDS,
   answerTask,
   bindAttempt,
+  cancelTask,
   claimTask,
   createRun,
   eventsFile,
@@ -545,6 +546,10 @@ test("a poll between recording an answer and attaching its worker does not colle
   assert.equal(task.status, "dispatching");
   assert.equal(task.attempts[0].inputRequests.length, 1);
   assert.equal(updates.some((update) => update.changed), false);
+  // If `run answer` died here, the task is dispatching with no worker; the
+  // supervisor can cancel it and retry, as for a launch that never attached.
+  assert.equal(cancelTask(root, "run-answer-race", "work", "the answer never launched").status, "cancelled");
+  assert.equal(retryTask(root, "run-answer-race", "work").status, "pending");
 });
 
 test("a resume that Codex silently replaces with a new thread is relaunched with the full briefing", async () => {
@@ -668,4 +673,7 @@ test("a resumed worker that cannot be attached is stopped and the answer reverte
   const roundDir = path.join(path.dirname(task.attempts[0].runner.statusFile), "round-1");
   const status = JSON.parse(fs.readFileSync(path.join(roundDir, "status.json"), "utf8"));
   assert.equal(status.status, "cancelled");
+  // The process itself is gone, not just marked cancelled.
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  assert.throws(() => process.kill(status.pid, 0), { code: "ESRCH" });
 });

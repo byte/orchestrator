@@ -156,7 +156,7 @@ const UNAVAILABLE_PHRASES =
 // naming the model before any work, is an ordinary failure to retry: marking the
 // model unavailable would skip it for the rest of the run.
 const TRANSIENT_PHRASES =
-  /currently|temporar|try again|retry|overloaded|capacity|rate.?limit|too many requests|timed? ?out|\b5\d\d\b/i;
+  /currently (?:unavailable|overloaded|experiencing)|temporar|try again|retry later|overloaded|over capacity|rate.?limit|too many requests|timed? ?out|\b5\d\d\b/i;
 
 /**
  * Decide whether Codex rejected the requested model itself, as opposed to the

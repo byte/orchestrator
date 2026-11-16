@@ -160,7 +160,9 @@ briefing. A substituted user pin is flagged as such; tell the user which model a
 rung is left, the task fails with a `model_unavailable` outcome for you to escalate. A task other
 tasks depend on never falls to `luna` (the plan-time leaf rule), unless the run is pinned to it.
 Only a rejection before the worker did anything counts: an error naming the model after work
-began, or on a resume after `run answer`, is an ordinary failure. Runs saved by
+began, or on a resume after `run answer`, is an ordinary failure, and so is one worded as an outage
+("currently unavailable", "try again", "overloaded", a 5xx); retry those rather than re-route.
+That split is inferred from wording: only the ChatGPT-account rejection has been observed. Runs saved by
 0.5.x that route to `gpt-5.6-sol` or `gpt-5.6-terra` keep those exact slugs and are not substituted.
 
 Size tasks by write-surface independence, not to a target count. Split work into separate tasks
