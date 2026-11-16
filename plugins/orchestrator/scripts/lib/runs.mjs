@@ -2510,13 +2510,20 @@ export function attachExecution(cwd, runId, taskId, { attemptId, worktree, runne
     task.updatedAt = nowIso();
     refreshRunStatus(run);
     writeRun(cwd, run);
-    appendEvent(cwd, id, {
-      type: "task.execution_started",
-      taskId: task.id,
-      attemptId: attempt.id,
-      worktree,
-      runner
-    });
+    try {
+      appendEvent(cwd, id, {
+        type: "task.execution_started",
+        taskId: task.id,
+        attemptId: attempt.id,
+        worktree,
+        runner
+      });
+    } catch (error) {
+      // The runner is saved as attached: a caller undoing the launch must check
+      // it is still the attached one, as a poll or answer may have moved on.
+      error.runnerAttached = true;
+      throw error;
+    }
     return attempt;
   });
 }
@@ -3162,6 +3169,11 @@ export function retryTask(cwd, runId, taskId, { note = null, fresh = false } = {
   return withFileLock(filePath, () => {
     const run = loadRun(cwd, id);
     const task = requireTask(run, taskId);
+    // A cancelled run stays cancelled, so work retried in it could complete and
+    // pass finalization while the run still reads cancelled. Start a new run.
+    if (run.status === "cancelled") {
+      throw new Error(`Run "${run.id}" was cancelled; its tasks cannot be retried. Create a new run.`);
+    }
     if (!RETRYABLE_TASK_STATUSES.has(task.status)) {
       throw new Error(`Task "${task.id}" cannot be retried from status "${task.status}".`);
     }

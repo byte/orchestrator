@@ -20,6 +20,38 @@ function git(cwd, args, gitDir = null) {
  * creation, the pointer file is never read.
  */
 const emptyTrees = new Map();
+const filterDrivers = new Map();
+
+/**
+ * Every filter driver defined in git config. Attributes outside the worktree
+ * (`.git/info/attributes`) still select drivers, and a driver may run a script
+ * kept in the worktree, so each one is overridden: `cat` for clean and smudge
+ * passes content through, and a `cat` process fails git's handshake, so git
+ * continues unfiltered (`required` is turned off). An empty value would not
+ * override an earlier one.
+ */
+function definedFilterDrivers(gitDir) {
+  if (!filterDrivers.has(gitDir)) {
+    let output = "";
+    try {
+      output = execFileSync("git", ["config", "--name-only", "--get-regexp", "^filter\\."], {
+        encoding: "utf8",
+        env: { ...process.env, GIT_DIR: gitDir }
+      });
+    } catch {
+      // Exit 1: no filter is configured.
+    }
+    const names = new Set();
+    for (const key of output.split("\n").filter(Boolean)) {
+      const match = key.match(/^filter\.(.+)\.[^.]+$/);
+      if (match) {
+        names.add(match[1]);
+      }
+    }
+    filterDrivers.set(gitDir, [...names]);
+  }
+  return filterDrivers.get(gitDir);
+}
 
 /** The empty tree of the repository's hash format, so attributes can be read from it. */
 function emptyTree(gitDir) {
@@ -51,7 +83,13 @@ export function worktreeGitEnv(worktreePath, gitDir) {
     ["diff.ignoreSubmodules", "all"],
     ["submodule.recurse", "false"],
     ["status.submoduleSummary", "false"],
-    ["commit.gpgsign", "false"]
+    ["commit.gpgsign", "false"],
+    ...definedFilterDrivers(gitDir).flatMap((name) => [
+      [`filter.${name}.clean`, "cat"],
+      [`filter.${name}.smudge`, "cat"],
+      [`filter.${name}.process`, "cat"],
+      [`filter.${name}.required`, "false"]
+    ])
   ];
   const env = {
     ...process.env,
@@ -130,7 +168,10 @@ export function changedFiles(cwd, { gitDir = null } = {}) {
     files.add(filePath);
   }
 
-  return [...files].filter((filePath) => !SELF_STATE.test(filePath)).sort();
+  // Only the supervisor checkout's own bookkeeping is excluded. In a worker's
+  // worktree (gitDir given) every change counts: an uncommitted edit to a
+  // tracked .orchestrator/ledger.md there is work that cleanup must not delete.
+  return [...files].filter((filePath) => gitDir || !SELF_STATE.test(filePath)).sort();
 }
 
 export function diffStat(cwd) {

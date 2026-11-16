@@ -472,14 +472,27 @@ export function launchTaskWorker(
           reasonCode,
           signals,
           launchFailed: true,
-          worktree
+          worktree,
+          // Fail the attempt only while it is still this launch's: attached to
+          // this runner if the attach was saved, to no runner otherwise. A poll
+          // and an answer may have collected and resumed it in between.
+          runnerStatusFile: error.runnerAttached ? runner.statusFile : null
         });
+        const tolerateStale = (operation) => {
+          try {
+            operation();
+          } catch (failure) {
+            if (!(failure instanceof StaleRunnerError)) {
+              throw failure;
+            }
+          }
+        };
         try {
-          fail(error.reasonCode ?? "worker_launch_failed", error.signals ?? ["worker_launch_error"]);
+          tolerateStale(() => fail(error.reasonCode ?? "worker_launch_failed", error.signals ?? ["worker_launch_error"]));
         } catch {
           // A reason code the outcome cannot take must not leave the task
           // dispatching with no worker: record the generic launch failure.
-          fail(policyRefusal ? "policy_boundary" : "worker_launch_failed", ["worker_launch_error"]);
+          tolerateStale(() => fail(policyRefusal ? "policy_boundary" : "worker_launch_failed", ["worker_launch_error"]));
         }
       }
     } finally {
@@ -577,6 +590,17 @@ export function pollRunWorkers(cwd, runId, { now = Date.now() } = {}) {
     }
     const attempt = task.attempts.at(-1);
     const statusFile = attempt.runner?.statusFile;
+    const wrapperGone = () => Number.isInteger(attempt.runner?.pid) && !processAlive(attempt.runner.pid);
+    // A wrapper that died before writing any status (it could not start, say)
+    // gets a failed one, or its task would wait forever.
+    if (statusFile && !fs.existsSync(statusFile) && wrapperGone()) {
+      atomicWrite(statusFile, `${JSON.stringify({
+        pid: attempt.runner.pid,
+        status: "failed",
+        error: "The worker wrapper exited without writing a status.",
+        finishedAt: new Date().toISOString()
+      }, null, 2)}\n`);
+    }
     if (!statusFile || !fs.existsSync(statusFile)) {
       updates.push({
         taskId: task.id,
@@ -590,7 +614,17 @@ export function pollRunWorkers(cwd, runId, { now = Date.now() } = {}) {
     // concurrent poll collected it and `run answer` attached a resumed runner in
     // the meantime, this poll's view is stale and the task is left to the next.
     try {
-      const status = readJson(statusFile);
+      let status = readJson(statusFile);
+      // A wrapper that died without a final status (an uncaught error, a hard
+      // kill) leaves "running" behind; read again in case it wrote one as it
+      // exited, then treat it as failed instead of running forever.
+      if (["starting", "running"].includes(status.status) && Number.isInteger(status.pid) &&
+          !processAlive(status.pid)) {
+        status = readJson(statusFile);
+        if (["starting", "running"].includes(status.status)) {
+          status = { ...status, status: "failed", error: "The worker wrapper exited without a final status." };
+        }
+      }
       const hadFallback = fallbackRecorded(attempt);
       const synced = syncExecutionStatus(cwd, runId, task.id, {
         attemptId: attempt.id,

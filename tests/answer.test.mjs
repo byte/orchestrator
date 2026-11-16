@@ -1221,3 +1221,111 @@ test("a worker attached during a cancellation whose event fails is still stopped
   assert.equal(attempt.status, "cancelled");
   assert.ok(await gone(attempt.runner.pid), `worker ${attempt.runner.pid} still running after cancellation`);
 });
+
+test("cancelling stops a started process even when Codex itself exits first", async () => {
+  const root = repo();
+  plan(root, "run-cancel-quiet");
+  const pidFile = path.join(path.dirname(runFile(root, "run-cancel-quiet")), "descendant.pid");
+  const launched = launchTaskWorker(root, "run-cancel-quiet", "work", lane(root), {
+    codexCommand: [process.execPath, path.join(fixtures, "fake-codex-slow.mjs"), "--delay=60000", `--descendant=${pidFile}`, "--quiet-descendant"]
+  });
+  const deadline = Date.now() + 10000;
+  while (!fs.existsSync(pidFile) && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 40));
+  }
+  const descendant = Number(fs.readFileSync(pidFile, "utf8"));
+  try {
+    cancelWorkers(root, "run-cancel-quiet", "work", "user stopped it");
+    assert.ok(await gone(launched.runner.pid, 10000), "wrapper exits");
+    assert.ok(await gone(descendant, 3000), `descendant ${descendant} survived the cancellation`);
+  } finally {
+    try {
+      process.kill(descendant, "SIGKILL");
+    } catch {
+      // Already gone.
+    }
+  }
+});
+
+test("a replaced resume whose launcher left a process holding its pipes still relaunches with the briefing", async () => {
+  const root = repo();
+  plan(root, "run-replaced-tree");
+  launchTaskWorker(root, "run-replaced-tree", "work", lane(root), {
+    codexCommand: [process.execPath, askFixture, "--ask=scope:lib/helper.js", "--write=src/notes.txt", "--granted=lib/helper.js"]
+  });
+  let { task } = await settle(root, "run-replaced-tree");
+  const threadId = task.attempts[0].threadId;
+  const pidFile = path.join(path.dirname(runFile(root, "run-replaced-tree")), "replaced-descendant.pid");
+  answerTaskWorker(root, "run-replaced-tree", "work", lane(root), {
+    grantScope: ["lib/helper.js"],
+    codexCommand: [
+      process.execPath, askFixture, "--ask=scope:lib/helper.js", "--write=src/notes.txt",
+      "--granted=lib/helper.js", `--replace=${threadId}`, `--replaced-descendant=${pidFile}`
+    ]
+  });
+  let descendant = null;
+  try {
+    for (let index = 0; index < 500; index += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      if (descendant === null && fs.existsSync(pidFile)) {
+        descendant = Number(fs.readFileSync(pidFile, "utf8"));
+      }
+      pollRunWorkers(root, "run-replaced-tree");
+      task = loadRun(root, "run-replaced-tree").tasks.work;
+      if (!["running", "dispatching"].includes(task.status)) {
+        break;
+      }
+    }
+    assert.equal(task.status, "reported");
+    assert.match(task.result.structured.summary, /granted=true/);
+    assert.ok(descendant && await gone(descendant, 3000), "the replaced launcher's process was stopped");
+  } finally {
+    if (descendant) {
+      try {
+        process.kill(descendant, "SIGKILL");
+      } catch {
+        // Already gone.
+      }
+    }
+  }
+});
+
+test("a launch undone after its attach was saved leaves an attempt another process moved on alone", () => {
+  const root = repo();
+  plan(root, "run-attach-moved");
+  const events = eventsFile(root, "run-attach-moved");
+  const file = runFile(root, "run-attach-moved");
+  const original = fs.appendFileSync;
+  fs.appendFileSync = function (target, data, ...rest) {
+    if (String(target) === events && String(data).includes("\"task.execution_started\"")) {
+      // Before this launch can undo itself, another process collects the worker
+      // and attaches a resumed runner.
+      const run = JSON.parse(fs.readFileSync(file, "utf8"));
+      const attempt = run.tasks.work.attempts.at(-1);
+      attempt.runner = { ...attempt.runner, statusFile: path.join(path.dirname(file), "resumed-status.json") };
+      fs.writeFileSync(file, JSON.stringify(run, null, 2));
+      throw new Error("disk full");
+    }
+    return original.call(this, target, data, ...rest);
+  };
+  let launched;
+  try {
+    assert.throws(() => {
+      launched = launchTaskWorker(root, "run-attach-moved", "work", lane(root), {
+        codexCommand: [process.execPath, path.join(fixtures, "fake-codex-slow.mjs"), "--delay=10000"]
+      });
+    }, /disk full/);
+  } finally {
+    fs.appendFileSync = original;
+  }
+  const attempt = loadRun(root, "run-attach-moved").tasks.work.attempts.at(-1);
+  assert.equal(attempt.status, "running", "the attempt the other process now owns is not failed");
+  assert.match(attempt.runner.statusFile, /resumed-status\.json$/);
+});
+
+test("a cancelled run's tasks cannot be retried", () => {
+  const root = repo();
+  plan(root, "run-cancelled-retry");
+  runCli(root, ["run", "cancel", "run-cancelled-retry"]);
+  assert.throws(() => retryTask(root, "run-cancelled-retry", "work"), /was cancelled; its tasks cannot be retried/);
+});

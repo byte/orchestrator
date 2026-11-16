@@ -42,6 +42,26 @@ Fixes:
   their exact bytes in inspection (a trailing space is part of the name), and
   a worktree recorded before its git directory was recorded resolves it from
   the supervisor repository instead of the worktree's `.git` file.
+- Scope patterns match a newline in a filename like any other character, so
+  `!src/private/**` cannot be slipped past with one. A conflicted
+  integration's rollback (`cherry-pick --abort`) also runs with fsmonitor off.
+  Cleanup of a worker's worktree counts an uncommitted edit to a tracked
+  `.orchestrator/` file as a change and refuses, instead of deleting it.
+- Every filter driver defined in git config is overridden for git in a
+  worker's worktree, so a filter selected by the repository's own
+  `.git/info/attributes` cannot run a script the worker wrote either.
+- `run poll` fails a worker whose wrapper died without a final status (a hard
+  kill, an uncaught error) instead of reporting it running forever, and the
+  wrapper reports a commit that throws (Git older than 2.42) as a failure.
+- After a stop, the wrapper kills whatever is left of Codex's process group
+  even when Codex itself exited first, and stopping a silently replaced
+  resume uses the same group stop, so a process holding the pipes cannot
+  block the relaunch with the full briefing.
+- A launch undone after its attach was saved fails the attempt only if it is
+  still attached to that launch's runner, so it no longer fails an attempt a
+  poll and an answer have already resumed. `run retry` refuses a task in a
+  cancelled run, which would otherwise finish while the run still read
+  cancelled.
 - `run cleanup` marks a worktree under the run lock before removing it, so a
   warm retry launched meanwhile refuses to reuse it instead of losing its work.
   A worktree that is gone now fails the retry as `execution_failed /

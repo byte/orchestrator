@@ -1,6 +1,10 @@
 import "./sandbox-shim.mjs";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import fs from "node:fs";
+
+// A process that ignores SIGTERM, and writes its own pid (argv[1]) only once that
+// handler is installed, so a test never signals it before it can ignore it.
+const HOLDER = "process.on('SIGTERM', () => {}); require('fs').writeFileSync(process.argv[1], String(process.pid)); setInterval(() => {}, 1000)";
 import path from "node:path";
 
 // A fake Codex worker that pauses with `needs_input` and finishes once the
@@ -20,6 +24,8 @@ import path from "node:path";
 //                         idles 5s before it carries on (Codex does this for ids it
 //                         cannot parse)
 //   --replaced-writes     the replacing thread writes a result at once, before it idles
+//   --replaced-descendant=<file> the replacing thread starts a long-running child that
+//                         holds its output pipes and ignores SIGTERM, and writes its pid
 //   --fallback-silent     a fresh thread briefed with earlier answers exits 0 without
 //                         writing a result
 //   --unavailable=<slug>  reject this model the way fake-codex-model-unavailable.mjs does
@@ -77,6 +83,14 @@ process.stdin.on("end", () => {
       needs_input: null,
       confidence: "high"
     }), "utf8");
+  }
+  const descendantFile = option("replaced-descendant");
+  if (replaced && descendantFile) {
+    spawn(process.execPath, ["-e", HOLDER, descendantFile], { stdio: "inherit" });
+    // Carry on only once it can ignore SIGTERM.
+    while (!fs.existsSync(descendantFile)) {
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+    }
   }
   emit({ type: "thread.started", thread_id: threadId });
   emit({ type: "turn.started" });

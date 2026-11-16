@@ -374,8 +374,9 @@ real resume reports the same thread id it was given.
    worker could re-aim at a repository config it wrote), with hooks, fsmonitor, signing and
    submodule recursion off: a worker could otherwise plant a hook, or a nested repository whose
    config git would run during `git status`. Attributes are read from the empty tree
-   (`GIT_ATTR_SOURCE`, Git 2.42 or later; older Git is refused), so no clean, smudge or process
-   filter runs either: a repository whose config runs an in-tree script as a filter would
+   (`GIT_ATTR_SOURCE`, Git 2.42 or later; older Git is refused), and every filter driver defined in
+   git config is overridden (`cat` for clean, smudge and process, not required), since
+   `.git/info/attributes` can still select one; so no clean, smudge or process filter runs either: a repository whose config runs an in-tree script as a filter would
    otherwise run whatever the worker wrote there. The cost is that a worker's changes are committed
    without filters, so a Git LFS file is committed as content, not as a pointer. Integration's
    cherry-pick into the supervisor checkout runs with hooks and fsmonitor off, so a hook the worker

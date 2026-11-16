@@ -103,3 +103,8 @@ test("scope coverage proves containment or reports it as not covered", () => {
   assert.equal(scopeCovers(["src/**", "!src/secret/**"], "src/*.js"), false);
   assert.equal(scopeCovers([], "src/a.js"), false);
 });
+
+test("a newline in a filename cannot slip past an exclusion", () => {
+  assert.equal(matchesScope("src/private/a\nb.js", ["**/*.js", "!src/private/**"]), false);
+  assert.equal(matchesScope("src/a\nb.js", ["src/**"]), true);
+});

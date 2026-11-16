@@ -333,7 +333,7 @@ export function integrateTaskWorktree(cwd, run, task, attempt) {
     git(cwd, ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "cherry-pick", ...inspection.commits]);
   } catch (error) {
     try {
-      git(cwd, ["-c", "core.hooksPath=/dev/null", "cherry-pick", "--abort"]);
+      git(cwd, ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "cherry-pick", "--abort"]);
     } catch {
       // Preserve the original cherry-pick error; the caller reports manual recovery.
     }

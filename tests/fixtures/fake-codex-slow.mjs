@@ -1,6 +1,10 @@
 import "./sandbox-shim.mjs";
 import fs from "node:fs";
 
+// A process that ignores SIGTERM, and writes its own pid (argv[1]) only once that
+// handler is installed, so a test never signals it before it can ignore it.
+const HOLDER = "process.on('SIGTERM', () => {}); require('fs').writeFileSync(process.argv[1], String(process.pid)); setInterval(() => {}, 1000)";
+
 // A fake Codex worker that stays busy. Options placed before `exec`:
 //   --delay=<ms>   how long it runs (default 10000)
 //   --complete     finish with a valid structured result and exit 0 instead of
@@ -16,8 +20,13 @@ const outputFile = args[args.indexOf("--output-last-message") + 1];
 const descendantFile = option("descendant");
 if (descendantFile) {
   const { spawn } = await import("node:child_process");
-  const child = spawn(process.execPath, ["-e", "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)"], { stdio: "inherit" });
-  fs.writeFileSync(descendantFile, String(child.pid));
+  // --quiet-descendant gives it no pipes at all, so Codex's own exit closes them.
+  const stdio = args.includes("--quiet-descendant") ? "ignore" : "inherit";
+  spawn(process.execPath, ["-e", HOLDER, descendantFile], { stdio });
+  // Carry on only once it can ignore SIGTERM.
+  while (!fs.existsSync(descendantFile)) {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+  }
 }
 
 process.stdin.resume();

@@ -43,7 +43,9 @@ export function globToRegExp(pattern) {
     out += char.replace(SPECIAL, "\\$&");
   }
 
-  return new RegExp(`^${out}$`);
+  // dotAll: a filename may contain a newline, and `**` must match it like any
+  // other character, or an exclusion could be slipped past with one.
+  return new RegExp(`^${out}$`, "s");
 }
 
 /** A pattern is supervisor input, so a Windows-style `src\\**` means `src/**`. */

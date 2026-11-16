@@ -259,6 +259,15 @@ function commitWorkerChanges() {
   return commit.status === 0 ? null : `git commit failed: ${(commit.stderr || commit.error?.message || "").trim()}`;
 }
 
+/** commitWorkerChanges, with any exception (an unsupported Git, say) as its error. */
+function commitOrError() {
+  try {
+    return commitWorkerChanges();
+  } catch (error) {
+    return `could not commit the worker's changes: ${error.message}`;
+  }
+}
+
 /** Whether the worker's final message pauses for input rather than finishing. */
 function pausedForInput() {
   try {
@@ -331,10 +340,16 @@ function runCodex(resumeThreadId, input = prompt) {
     });
     const timers = [];
     let settled = false;
+    let stopRequested = false;
     const resolve = (value) => {
       if (!settled) {
         settled = true;
         timers.forEach(clearTimeout);
+        // Codex exiting does not end what it started: after a stop, kill
+        // whatever is left of its group before the escalation timers go.
+        if (stopRequested) {
+          killGroup("SIGKILL");
+        }
         resolveRun(value);
       }
     };
@@ -354,6 +369,7 @@ function runCodex(resumeThreadId, input = prompt) {
     // even SIGKILL (it left the group) cannot keep the wrapper running.
     current = {
       kill: (signal) => {
+        stopRequested = true;
         killGroup(signal);
         timers.push(setTimeout(() => {
           killGroup("SIGKILL");
@@ -395,11 +411,9 @@ function runCodex(resumeThreadId, input = prompt) {
               };
               if (input !== fallbackPrompt) {
                 replacedWithoutBriefing = true;
-                try {
-                  child.kill("SIGTERM");
-                } catch {
-                  // Already gone; the relaunch below still runs.
-                }
+                // Stop the whole group, with the same escalation as a cancel,
+                // so a process holding the pipes cannot block the relaunch.
+                current.kill("SIGTERM");
               }
             }
             writeStatus({ status: "running" });
@@ -489,7 +503,7 @@ if (result.replacedWithoutBriefing && !stopping) {
 // them uncommitted for its resume, and a failed or stopped one is left as is.
 const commitError = spec.sandbox === "workspace-write" && !result.error && !stopping &&
   result.code === 0 && !pausedForInput()
-  ? commitWorkerChanges()
+  ? commitOrError()
   : null;
 if (commitError) {
   errors.write(`\n[orchestrator] ${commitError}\n`);
