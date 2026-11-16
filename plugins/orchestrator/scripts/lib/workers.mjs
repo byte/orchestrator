@@ -567,11 +567,12 @@ export function answerTaskWorker(
   { grantScope = [], deny = false, reply = null, userApproved = false, codexCommand = null } = {}
 ) {
   const answered = answerTask(cwd, runId, taskId, lane, { grantScope, deny, reply, userApproved });
+  let runner = null;
   try {
     const run = loadRun(cwd, runId);
     const task = run.tasks[taskId];
     const previousRunner = answered.round.answer.previousRunner;
-    const runner = spawnWorker(
+    runner = spawnWorker(
       cwd,
       path.join(executionDir(cwd, runId, taskId, answered.attemptId), `round-${answered.round.round}`),
       {
@@ -593,6 +594,11 @@ export function answerTaskWorker(
     });
     return { ...answered, runner };
   } catch (error) {
+    // A worker spawned before the failure would run untracked once the answer is
+    // reverted; stop it so the task can be answered again cleanly.
+    if (runner) {
+      stopTaskWorker({ runner });
+    }
     revertTaskAnswer(cwd, runId, taskId, { attemptId: answered.attemptId, error: error.message });
     throw error;
   }

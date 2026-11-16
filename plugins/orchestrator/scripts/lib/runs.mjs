@@ -749,7 +749,17 @@ export function taskTimeoutMinutes(task, attempt = null) {
  * time spent waiting for the supervisor never counts against the worker.
  */
 export function workerClockStart(attempt) {
+  if (attempt && !attempt.runner && attempt.inputRequests?.at(-1)?.answer) {
+    // Answered, and its resumed worker is not attached yet: nothing is running,
+    // so nothing is on the clock.
+    return null;
+  }
   return attempt?.runner?.launchedAt ?? attempt?.startedAt ?? attempt?.claimedAt ?? null;
+}
+
+/** Whether the attempt's current worker process has been recorded over its limit. */
+export function overLimitNow(attempt) {
+  return Boolean(attempt?.overLimit) && attempt.overLimit.clockStart === workerClockStart(attempt);
 }
 
 function normalizeTask(raw, defaultScope, workerPolicy, { allowLegacy = [] } = {}) {
@@ -2227,6 +2237,11 @@ export function answerTask(
         grantedAt: round.answer.answeredAt
       });
     }
+    // Detach the finished runner in the same write that reopens the task. Left
+    // attached, a concurrent poll would see a "dispatching" task whose status file
+    // says "completed" and collect the request it already answered a second time.
+    // The answer keeps it as previousRunner, which a failed launch restores.
+    attempt.runner = null;
     attempt.status = "dispatching";
     task.status = "dispatching";
     task.result = null;
@@ -3338,7 +3353,7 @@ export function renderSupervisorBriefing(cwd, run, lane, { routeEvidence = null 
 - kind: ${task.kind}
 - worker route: ${route.model} (${route.reasoningEffort})${substituted}
 - routing reason: ${task.routingReason || "legacy or explicitly pinned run"}
-- wall-clock limit: ${taskTimeoutMinutes(task, task.status === "pending" ? { model: route.model } : attempt)} min${task.timeoutMinutes ? " (planned)" : " (tier default)"}${attempt?.overLimit && ACTIVE_TASK_STATUSES.has(task.status) ? ` — OVER LIMIT since ${attempt.overLimit.detectedAt}; still running, cancel or keep waiting` : ""}
+- wall-clock limit: ${taskTimeoutMinutes(task, task.status === "pending" ? { model: route.model } : attempt)} min${task.timeoutMinutes ? " (planned)" : " (tier default)"}${overLimitNow(attempt) && ACTIVE_TASK_STATUSES.has(task.status) ? ` — OVER LIMIT since ${attempt.overLimit.detectedAt}; still running, cancel or keep waiting` : ""}
 - provisional guidance: ${guidance?.enabled ? `${guidance.policyVersion} / ${guidance.policyHash}` : "disabled"}
 - guidance items:
 ${renderList(guidanceItems)}

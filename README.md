@@ -289,7 +289,8 @@ orch run routes [--lane <lane>] [--include-legacy] [--json]
 It reads local run state only and changes nothing. Per actual model and effort it shows finished
 attempts, first-attempt acceptance, retries, substitutes, and median duration. An attempt counts
 for the model it ran on; a launch Codex rejected as unavailable counts for neither model, answered
-worker requests are part of their attempt, and the retired `gpt-5.6-sol` and `gpt-5.6-terra`
+worker requests are part of their attempt (the time spent paused awaiting an answer is left out of
+its duration), and the retired `gpt-5.6-sol` and `gpt-5.6-terra`
 attempts are left out unless `--include-legacy` is passed. Counts sit beside every rate, and no rate
 is printed for fewer than 5 samples. `run plan`, `run briefing`, and `run resume` show the table
 for the run's lane once it holds at least 5 counted attempts.

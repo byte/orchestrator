@@ -530,3 +530,64 @@ test("a malformed needs_input request fails the result contract", () => {
   assert.deepEqual(task.result.missingFields, ["needs_input"]);
   assert.equal(task.attempts[0].outcome.terminalOutcome, "contract_failed");
 });
+
+test("a poll between recording an answer and attaching its worker does not collect the answered request again", async () => {
+  const root = repo();
+  plan(root, "run-answer-race");
+  launchTaskWorker(root, "run-answer-race", "work", lane(root), {
+    codexCommand: [process.execPath, askFixture, "--ask=scope:lib/helper.js", "--write=src/notes.txt"]
+  });
+  await settle(root, "run-answer-race");
+  // `run answer` has recorded the answer but not yet attached the resumed worker.
+  answerTask(root, "run-answer-race", "work", lane(root), { grantScope: ["lib/helper.js"] });
+  const updates = pollRunWorkers(root, "run-answer-race");
+  const task = loadRun(root, "run-answer-race").tasks.work;
+  assert.equal(task.status, "dispatching");
+  assert.equal(task.attempts[0].inputRequests.length, 1);
+  assert.equal(updates.some((update) => update.changed), false);
+});
+
+test("a resume that Codex silently replaces with a new thread is relaunched with the full briefing", async () => {
+  const root = repo();
+  plan(root, "run-answer-replaced");
+  const calls = logFile();
+  launchTaskWorker(root, "run-answer-replaced", "work", lane(root), {
+    codexCommand: [process.execPath, askFixture, `--log=${calls}`, "--ask=scope:lib/helper.js", "--write=src/notes.txt", "--granted=lib/helper.js"]
+  });
+  let { task } = await settle(root, "run-answer-replaced");
+  const threadId = task.attempts[0].threadId;
+  answerTaskWorker(root, "run-answer-replaced", "work", lane(root), {
+    grantScope: ["lib/helper.js"],
+    codexCommand: [
+      process.execPath, askFixture, `--log=${calls}`, "--ask=scope:lib/helper.js",
+      "--write=src/notes.txt", "--granted=lib/helper.js", `--replace=${threadId}`
+    ]
+  });
+  ({ task } = await settle(root, "run-answer-replaced"));
+  assert.equal(task.status, "reported");
+  assert.match(task.result.structured.summary, /granted=true/);
+  assert.equal(task.attempts[0].inputRequests[0].answer.resumeFallback.reason, "thread_replaced");
+  const log = readLog(calls);
+  assert.equal(log.length, 3);
+  assert.ok(log[1].argv.includes("resume"));
+  assert.equal(log[2].argv.includes("resume"), false);
+  assert.match(log[2].prompt, /## Assignment/);
+  assert.match(log[2].prompt, /## Supervisor answers[\s\S]+### Request 1/);
+});
+
+test("an over-limit flag from before an answer is not shown once the resumed worker has a new clock", async () => {
+  const root = repo();
+  plan(root, "run-answer-clock");
+  launchTaskWorker(root, "run-answer-clock", "work", lane(root), {
+    codexCommand: [process.execPath, askFixture, "--ask=scope:lib/helper.js", "--write=src/notes.txt"]
+  });
+  await settle(root, "run-answer-clock");
+  // The paused worker had gone over its limit before it asked.
+  const file = runFile(root, "run-answer-clock");
+  const state = JSON.parse(fs.readFileSync(file, "utf8"));
+  const first = state.tasks.work.attempts[0];
+  first.overLimit = { clockStart: first.runner.launchedAt, detectedAt: first.runner.launchedAt, elapsedMinutes: 99, timeoutMinutes: 1 };
+  fs.writeFileSync(file, `${JSON.stringify(state, null, 2)}\n`);
+  answerTask(root, "run-answer-clock", "work", lane(root), { grantScope: ["lib/helper.js"] });
+  assert.doesNotMatch(renderSupervisorBriefing(root, loadRun(root, "run-answer-clock"), lane(root)), /OVER LIMIT/);
+});

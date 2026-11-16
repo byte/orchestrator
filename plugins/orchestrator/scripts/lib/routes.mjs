@@ -72,10 +72,26 @@ function attemptRoute(run, task, attempt) {
   }
 }
 
+/** Time the attempt spent paused on needs_input requests, which is not model runtime. */
+function pausedMs(attempt, end) {
+  let paused = 0;
+  for (const round of attempt.inputRequests ?? []) {
+    const from = Date.parse(round.requestedAt ?? "");
+    const until = Date.parse(round.answer?.answeredAt ?? "") || end;
+    if (Number.isFinite(from) && Number.isFinite(until) && until > from) {
+      paused += until - from;
+    }
+  }
+  return paused;
+}
+
 function durationMs(attempt) {
   const start = Date.parse(attempt.startedAt ?? attempt.claimedAt ?? "");
   const end = Date.parse(attempt.finishedAt ?? "");
-  return Number.isFinite(start) && Number.isFinite(end) && end >= start ? end - start : null;
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) {
+    return null;
+  }
+  return Math.max(0, end - start - pausedMs(attempt, end));
 }
 
 function median(values) {

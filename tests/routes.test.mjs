@@ -354,3 +354,22 @@ test("run routes rejects a positional argument", () => {
   assert.equal(result.code, 1);
   assert.match(result.stderr, /--lane <lane>/);
 });
+
+test("time paused on a needs_input request is not counted as model runtime", () => {
+  const root = repo();
+  const at = (minutes) => new Date(Date.parse("2026-11-15T10:00:00.000Z") + minutes * 60_000).toISOString();
+  savedRun(root, "run-paused", "api", [
+    task("answered", [attempt("answered-attempt-1", "gpt-6.1-sol", "high", ACCEPTED, 195, {
+      // Worked 10 minutes, waited 3 hours for the answer, then finished in 5.
+      inputRequests: [{ round: 1, requestedAt: at(10), answer: { answeredAt: at(190) } }]
+    })]),
+    task("cancelled-while-paused", [attempt("cancelled-while-paused-attempt-1", "gpt-6.1-sol", "high", BLOCKED, 70, {
+      // Worked 10 minutes, then sat unanswered until it ended.
+      inputRequests: [{ round: 1, requestedAt: at(10), answer: null }]
+    })])
+  ]);
+  const evidence = routeEvidence(root, { lane: "api" });
+  const sol = row(evidence, "gpt-6.1-sol", "high");
+  assert.equal(sol.durationSamples, 2);
+  assert.equal(sol.medianDurationMs, 12.5 * 60_000);
+});

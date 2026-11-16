@@ -15,6 +15,9 @@ import path from "node:path";
 //   --stray=<path>        also write this path on the finishing turn, granted or not
 //   --partial             commit src/partial.txt on the asking turn
 //   --missing=<id>        treat this thread id as having no rollout
+//   --replace=<id>        resuming this thread id silently starts a new thread, which
+//                         idles 5s before it carries on (Codex does this for ids it
+//                         cannot parse)
 //   --unavailable=<slug>  reject this model the way fake-codex-model-unavailable.mjs does
 const args = process.argv.slice(2);
 const option = (name) => args.find((arg) => arg.startsWith(`--${name}=`))?.split("=").slice(1).join("=");
@@ -23,6 +26,7 @@ const log = option("log");
 const ask = option("ask") ?? "";
 const asks = Number(option("asks") ?? 1);
 const missing = option("missing");
+const replace = option("replace");
 const execIndex = args.indexOf("exec");
 const resumeIndex = args.indexOf("resume");
 const resumeThreadId = resumeIndex === -1 ? null : args.at(-2);
@@ -55,9 +59,14 @@ process.stdin.on("end", () => {
     process.exitCode = 1;
     return;
   }
-  const threadId = resumeThreadId ?? `thread-ask-${process.pid}`;
+  const replaced = Boolean(resumeThreadId) && resumeThreadId === replace;
+  const threadId = replaced ? `thread-replaced-${process.pid}` : resumeThreadId ?? `thread-ask-${process.pid}`;
   emit({ type: "thread.started", thread_id: threadId });
   emit({ type: "turn.started" });
+  setTimeout(work, replaced ? 5000 : 0);
+});
+
+function work() {
   const model = args[args.indexOf("--model") + 1];
   if (model === option("unavailable")) {
     const message = `The '${model}' model is not supported when using Codex with a ChatGPT account.`;
@@ -129,4 +138,4 @@ process.stdin.on("end", () => {
   }
   fs.writeFileSync(outputFile, JSON.stringify(result), "utf8");
   emit({ type: "turn.completed" });
-});
+}

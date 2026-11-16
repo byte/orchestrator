@@ -97,6 +97,7 @@ function runCodex(resumeThreadId, input = prompt) {
     current = child;
     childPid = child.pid ?? childPid;
     let sawThread = false;
+    let replacedWithoutBriefing = false;
     let stderrText = "";
     let buffered = "";
     child.stdout.setEncoding("utf8");
@@ -112,13 +113,24 @@ function runCodex(resumeThreadId, input = prompt) {
             sawThread = true;
             threadId = event.thread_id;
             // A thread id Codex cannot parse as a UUID is not an error: Codex
-            // silently starts a new thread instead (observed 2026-11-15). The full
-            // briefing was sent, so the attempt continues cold, but it is recorded.
+            // silently starts a new thread instead (observed 2026-11-15). It is
+            // recorded either way. When the input was the full briefing, the
+            // attempt continues cold on that thread. When it was only an answer,
+            // the new thread has no assignment, so it is stopped and the full
+            // briefing is sent as a fresh thread, as for a missing thread.
             if (resumeThreadId && threadId !== resumeThreadId && !resumeFallback) {
               resumeFallback = {
                 reason: "thread_replaced",
                 message: `Codex started thread ${threadId} instead of resuming ${resumeThreadId}.`
               };
+              if (input !== fallbackPrompt) {
+                replacedWithoutBriefing = true;
+                try {
+                  child.kill("SIGTERM");
+                } catch {
+                  // Already gone; the relaunch below still runs.
+                }
+              }
             }
             writeStatus({ status: "running" });
           }
@@ -139,7 +151,7 @@ function runCodex(resumeThreadId, input = prompt) {
     child.on("error", (error) => resolve({ error }));
     // `close` rather than `exit`: stderr must be fully read before deciding
     // whether a failed resume reported a missing thread.
-    child.on("close", (code, signal) => resolve({ code, signal, sawThread, stderrText }));
+    child.on("close", (code, signal) => resolve({ code, signal, sawThread, stderrText, replacedWithoutBriefing }));
   });
 }
 
@@ -161,6 +173,12 @@ if (
     message: result.stderrText.trim().split("\n").at(-1).slice(0, 500)
   };
   errors.write("\n[orchestrator] resume failed; relaunching as a fresh thread.\n");
+  writeStatus({ status: "running" });
+  result = await runCodex(null, fallbackPrompt);
+}
+
+if (result.replacedWithoutBriefing && !stopping) {
+  errors.write("\n[orchestrator] resume started a new thread; relaunching it with the full briefing.\n");
   writeStatus({ status: "running" });
   result = await runCodex(null, fallbackPrompt);
 }

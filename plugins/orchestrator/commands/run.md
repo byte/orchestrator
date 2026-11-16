@@ -93,7 +93,8 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" run routes --lane <lane>
 It is a read-only table over local run state: per actual model and effort, the finished attempts
 that reached a worker, first-attempt acceptance, retries, and median duration. A substituted
 attempt counts for the model that ran; a launch Codex rejected as unavailable counts for neither
-model; answered input requests are part of their attempt; attempts on the retired `gpt-5.6-sol` and
+model; answered input requests are part of their attempt, but the time paused awaiting an answer
+is not counted in its duration; attempts on the retired `gpt-5.6-sol` and
 `gpt-5.6-terra` slugs are left out unless you pass `--include-legacy`. Every rate sits next to its counts,
 and no rate is printed below 5 samples, so a cell with two attempts is an anecdote, not a trend.
 `run plan`, `run briefing`, and `run resume` print the same table for the run's lane once it holds

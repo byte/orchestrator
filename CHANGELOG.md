@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+Fixes:
+
+- `run wait` no longer wakes on its own lock file. Every poll takes
+  `run.json.lock`, and the run-directory watch let that name through, so a wait
+  on a quiet worker polled about ten times a second instead of sleeping.
+- `run answer` detaches the paused worker's finished runner in the same write
+  that reopens the task, so a concurrent `run poll` or `run wait` cannot collect
+  the request it already answered a second time. A resumed worker that was
+  spawned but could not be attached is stopped instead of left running.
+- An answered resume that Codex silently starts as a new thread is relaunched
+  with the full briefing, as for a missing thread. Before, the new thread got
+  only the answer and worked without its assignment.
+- An OVER LIMIT mark from before an answer no longer shows once the resumed
+  worker's clock restarts, and route evidence no longer counts the time a
+  worker sat paused awaiting an answer as model runtime.
+
 ## 0.6.0
 
 This release changes the worker roster and removes the single-task commands.
