@@ -19,12 +19,33 @@ function git(cwd, args, gitDir = null) {
  * next time the supervisor ran git there. With the git directory recorded at
  * creation, the pointer file is never read.
  */
+const emptyTrees = new Map();
+
+/** The empty tree of the repository's hash format, so attributes can be read from it. */
+function emptyTree(gitDir) {
+  if (!emptyTrees.has(gitDir)) {
+    const version = execFileSync("git", ["version"], { encoding: "utf8" }).match(/(\d+)\.(\d+)/);
+    if (!version || Number(version[1]) < 2 || (Number(version[1]) === 2 && Number(version[2]) < 42)) {
+      throw new Error("Git 2.42 or later is required to run git safely in a worker's worktree (GIT_ATTR_SOURCE).");
+    }
+    emptyTrees.set(gitDir, execFileSync("git", ["hash-object", "-t", "tree", "/dev/null"], {
+      encoding: "utf8",
+      env: { ...process.env, GIT_DIR: gitDir }
+    }).trim());
+  }
+  return emptyTrees.get(gitDir);
+}
+
 export function worktreeGitEnv(worktreePath, gitDir) {
   // A worker can also plant a nested repository with its own config: git would
   // run `git status` inside it for a committed gitlink, and that config's
   // fsmonitor with it. So nothing recurses into submodules, and no fsmonitor or
   // hook runs. Passed as GIT_CONFIG_* so every git command gets them.
+  // Attributes come from the empty tree, not from the worktree's .gitattributes,
+  // so no clean, smudge or process filter a worker attributed (to a script it
+  // can edit) runs either; a global attributes file is ignored too.
   const config = [
+    ["core.attributesFile", "/dev/null"],
     ["core.fsmonitor", "false"],
     ["core.hooksPath", "/dev/null"],
     ["diff.ignoreSubmodules", "all"],
@@ -32,7 +53,13 @@ export function worktreeGitEnv(worktreePath, gitDir) {
     ["status.submoduleSummary", "false"],
     ["commit.gpgsign", "false"]
   ];
-  const env = { ...process.env, GIT_DIR: gitDir, GIT_WORK_TREE: worktreePath, GIT_CONFIG_COUNT: String(config.length) };
+  const env = {
+    ...process.env,
+    GIT_DIR: gitDir,
+    GIT_WORK_TREE: worktreePath,
+    GIT_ATTR_SOURCE: emptyTree(gitDir),
+    GIT_CONFIG_COUNT: String(config.length)
+  };
   config.forEach(([key, value], index) => {
     env[`GIT_CONFIG_KEY_${index}`] = key;
     env[`GIT_CONFIG_VALUE_${index}`] = value;

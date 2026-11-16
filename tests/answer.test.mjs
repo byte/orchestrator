@@ -1100,3 +1100,124 @@ test("an answer whose briefing cannot be rendered stays waiting for input", asyn
   ({ task } = await settle(root, "run-answer-briefing"));
   assert.equal(task.status, "reported");
 });
+
+test("a poll holding an older status snapshot cannot overwrite a newer one already synchronized", async () => {
+  const root = repo();
+  plan(root, "run-stale-snapshot");
+  launchTaskWorker(root, "run-stale-snapshot", "work", lane(root), {
+    codexCommand: [process.execPath, askFixture, "--ask=scope:lib/helper.js", "--write=src/notes.txt"]
+  });
+  await settle(root, "run-stale-snapshot");
+  const answered = answerTask(root, "run-stale-snapshot", "work", lane(root), { grantScope: ["lib/helper.js"] });
+  const statusFile = path.join(path.dirname(runFile(root, "run-stale-snapshot")), "stale-status.json");
+  attachExecution(root, "run-stale-snapshot", "work", {
+    attemptId: answered.attemptId,
+    worktree: answered.worktree,
+    runner: { pid: null, status: "starting", statusFile, inputRound: 1 }
+  });
+  const sync = (seq, threadId) => syncExecutionStatus(root, "run-stale-snapshot", "work", {
+    attemptId: answered.attemptId,
+    status: { seq, status: "running", threadId },
+    runnerStatusFile: statusFile
+  });
+  // Poll B synchronizes the wrapper's later write; poll A then saves the earlier one it read.
+  sync(4, "thread-full-briefing");
+  assert.throws(() => sync(2, "thread-discarded-replacement"), StaleRunnerError);
+  assert.equal(loadRun(root, "run-stale-snapshot").tasks.work.attempts[0].threadId, "thread-full-briefing");
+  // The same snapshot again is harmless.
+  sync(4, "thread-full-briefing");
+});
+
+test("cancelling a worker also stops the processes it started", async () => {
+  const root = repo();
+  plan(root, "run-cancel-tree");
+  const pidFile = path.join(path.dirname(runFile(root, "run-cancel-tree")), "descendant.pid");
+  const launched = launchTaskWorker(root, "run-cancel-tree", "work", lane(root), {
+    codexCommand: [process.execPath, path.join(fixtures, "fake-codex-slow.mjs"), "--delay=60000", `--descendant=${pidFile}`]
+  });
+  const deadline = Date.now() + 10000;
+  while (!fs.existsSync(pidFile) && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 40));
+  }
+  const descendant = Number(fs.readFileSync(pidFile, "utf8"));
+  try {
+    cancelWorkers(root, "run-cancel-tree", "work", "user stopped it");
+    // The descendant ignores SIGTERM, so it takes the wrapper's SIGKILL after 5 s.
+    assert.ok(await gone(descendant, 10000), `descendant ${descendant} still running after cancellation`);
+    assert.ok(await gone(launched.runner.pid, 10000), `wrapper ${launched.runner.pid} still running after cancellation`);
+  } finally {
+    try {
+      process.kill(descendant, "SIGKILL");
+    } catch {
+      // Already gone.
+    }
+  }
+  assert.equal(loadRun(root, "run-cancel-tree").tasks.work.status, "cancelled");
+});
+
+test("a launch whose briefing cannot be rendered leaves the task launchable", () => {
+  const root = repo();
+  plan(root, "run-claim-briefing");
+  const ledger = path.join(root, ".orchestrator", "ledger.md");
+  const original = fs.readFileSync;
+  fs.readFileSync = function (target, ...rest) {
+    if (String(target) === ledger) {
+      throw Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
+    }
+    return original.call(this, target, ...rest);
+  };
+  try {
+    assert.throws(
+      () => launchTaskWorker(root, "run-claim-briefing", "work", lane(root), {
+        codexCommand: [process.execPath, path.join(fixtures, "fake-codex-slow.mjs"), "--delay=10000"]
+      }),
+      /EACCES/
+    );
+  } finally {
+    fs.readFileSync = original;
+  }
+  const task = loadRun(root, "run-claim-briefing").tasks.work;
+  assert.equal(task.status, "pending");
+  assert.equal(task.attempts.length, 0);
+  const launched = launchTaskWorker(root, "run-claim-briefing", "work", lane(root), {
+    codexCommand: [process.execPath, path.join(fixtures, "fake-codex-slow.mjs"), "--delay=10000"]
+  });
+  stopTaskWorker({ runner: launched.runner });
+});
+
+test("a worker attached during a cancellation whose event fails is still stopped", async () => {
+  const root = repo();
+  plan(root, "run-cancel-event");
+  const file = runFile(root, "run-cancel-event");
+  const events = eventsFile(root, "run-cancel-event");
+  const originalRead = fs.readFileSync;
+  const originalAppend = fs.appendFileSync;
+  let fired = false;
+  fs.readFileSync = function (target, ...rest) {
+    const content = originalRead.call(this, target, ...rest);
+    if (!fired && String(target) === file) {
+      fired = true;
+      fs.readFileSync = originalRead;
+      launchTaskWorker(root, "run-cancel-event", "work", lane(root), {
+        codexCommand: [process.execPath, path.join(fixtures, "fake-codex-slow.mjs"), "--delay=10000"]
+      });
+    }
+    return content;
+  };
+  fs.appendFileSync = function (target, data, ...rest) {
+    if (String(target) === events && String(data).includes("\"task.cancelled\"")) {
+      throw new Error("disk full");
+    }
+    return originalAppend.call(this, target, data, ...rest);
+  };
+  try {
+    assert.throws(() => cancelWorkers(root, "run-cancel-event", "work", "user stopped it"), /disk full/);
+  } finally {
+    fs.readFileSync = originalRead;
+    fs.appendFileSync = originalAppend;
+  }
+  assert.ok(fired);
+  const attempt = loadRun(root, "run-cancel-event").tasks.work.attempts[0];
+  assert.equal(attempt.status, "cancelled");
+  assert.ok(await gone(attempt.runner.pid), `worker ${attempt.runner.pid} still running after cancellation`);
+});

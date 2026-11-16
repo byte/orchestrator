@@ -16,10 +16,15 @@ process.stdin.on("end", () => {
   // (.git is read-only in its sandbox); the wrapper commits it.
   // --hooks=<marker> also writes .husky/pre-commit and .husky/post-commit hooks
   // that would create <marker> if anything ran them.
+  // --hooks-dir=<dir> puts them in <dir> instead, and --declare-hooks lists them
+  // in files_touched.
   const hooks = args.find((arg) => arg.startsWith("--hooks="))?.slice("--hooks=".length);
+  const hooksDir = args.find((arg) => arg.startsWith("--hooks-dir="))?.slice("--hooks-dir=".length) ?? ".husky";
+  const hookFiles = [];
   if (hooks) {
     for (const name of ["pre-commit", "post-commit", "commit-msg"]) {
-      const hook = path.join(process.cwd(), ".husky", name);
+      hookFiles.push(`${hooksDir}/${name}`);
+      const hook = path.join(process.cwd(), hooksDir, name);
       fs.mkdirSync(path.dirname(hook), { recursive: true });
       fs.writeFileSync(hook, `#!/bin/sh\necho ${name} >> ${JSON.stringify(hooks)}\n`, { mode: 0o755 });
     }
@@ -29,6 +34,14 @@ process.stdin.on("end", () => {
     execFileSync("git", ["commit", "--quiet", "-m", "Add generated module"], {
       cwd: process.cwd()
     });
+  }
+  // --filter=<marker> writes a script and attributes a payload to the "local"
+  // filter, which the test's repository config runs as `sh filter.sh`.
+  const filter = args.find((arg) => arg.startsWith("--filter="))?.slice("--filter=".length);
+  if (filter) {
+    fs.writeFileSync(path.join(process.cwd(), "filter.sh"), `echo filter >> ${JSON.stringify(filter)}\ncat\n`);
+    fs.writeFileSync(path.join(process.cwd(), ".gitattributes"), "*.dat filter=local\n");
+    fs.writeFileSync(path.join(process.cwd(), "src", "payload.dat"), "data\n");
   }
   // --lock-index leaves the worktree's index locked, so the wrapper's commit fails.
   if (args.includes("--lock-index")) {
@@ -55,7 +68,7 @@ process.stdin.on("end", () => {
     JSON.stringify({
       ...(asking ? { needs_input: { kind: "question", question: "Which name?" } } : {}),
       summary: "Added and committed the generated module.",
-      files_touched: ["src/generated.js"],
+      files_touched: ["src/generated.js", ...(args.includes("--declare-hooks") ? hookFiles : [])],
       tests: [{ command: "test -f src/generated.js", outcome: "passed" }],
       decisions: [],
       assumptions: [],

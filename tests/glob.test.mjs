@@ -57,9 +57,15 @@ test("an empty scope list matches nothing", () => {
   assert.equal(matchesScope("anything.js", []), false);
 });
 
-test("windows separators and ./ prefixes normalize", () => {
-  assert.equal(matchesScope("src\\a.js", ["src/*.js"]), true);
+test("windows separators in patterns and ./ prefixes normalize", () => {
+  assert.equal(matchesScope("src/a.js", ["src\\*.js"]), true);
   assert.equal(matchesScope("./src/a.js", ["src/*.js"]), true);
+});
+
+test("a backslash in a path is a filename character, not a separator", () => {
+  // git reports "src\\outside.txt" for a root-level file of that name.
+  assert.equal(matchesScope("src\\outside.txt", ["src/**"]), false);
+  assert.equal(matchesScope("src\\outside.txt", ["src/*"]), false);
 });
 
 test("partitionByScope splits on the same rules", () => {

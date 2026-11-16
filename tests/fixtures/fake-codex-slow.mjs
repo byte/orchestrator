@@ -11,6 +11,15 @@ const delay = Number(option("delay") ?? 10000);
 const complete = args.includes("--complete");
 const outputFile = args[args.indexOf("--output-last-message") + 1];
 
+//   --descendant=<file>  start a long-running child that holds this process's
+//                  output pipes, write its pid to <file>, and ignore SIGTERM in it
+const descendantFile = option("descendant");
+if (descendantFile) {
+  const { spawn } = await import("node:child_process");
+  const child = spawn(process.execPath, ["-e", "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)"], { stdio: "inherit" });
+  fs.writeFileSync(descendantFile, String(child.pid));
+}
+
 process.stdin.resume();
 process.stdin.on("end", () => {
   process.stdout.write(`${JSON.stringify({

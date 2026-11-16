@@ -13,6 +13,7 @@ import {
   eventsFile,
   failTaskAttempt,
   loadRun,
+  markWorktreesForRemoval,
   recordIntegrationDiagnostic,
   recordTaskDisposition,
   recordTaskResult,
@@ -231,6 +232,34 @@ test("the CLI exposes --note and --fresh on run retry", () => {
   const fresh = runCli(root, ["run", "retry", "run-cli-retry", "work", "--fresh"]);
   assert.equal(fresh.code, 1);
   assert.match(fresh.stderr, /cannot be retried from status "pending"/);
+});
+
+test("a warm retry never reuses a worktree run cleanup has marked for removal", async () => {
+  const root = repo();
+  plan(root, "run-cleanup-race", { kind: "write" });
+  const command = [process.execPath, resumeFixture, `--log=${logFile()}`, "--write"];
+  launchTaskWorker(root, "run-cleanup-race", "work", lane, { codexCommand: command });
+  await settle(root, "run-cleanup-race");
+  // A running or reported task is not finished, so nothing is marked.
+  assert.deepEqual(markWorktreesForRemoval(root, "run-cleanup-race"), []);
+  recordTaskDisposition(root, "run-cleanup-race", "work", {
+    terminalOutcome: "policy_refused",
+    action: "refuse",
+    reasonCode: "policy_boundary",
+    evidence: ["redo it"]
+  });
+  // Cleanup marks the finished task's worktree, then a retry launches before it is removed.
+  const marked = markWorktreesForRemoval(root, "run-cleanup-race");
+  assert.equal(marked.length, 1);
+  retryTask(root, "run-cleanup-race", "work", { note: "Again." });
+  checkpointPlan(root, "run-cleanup-race");
+  assert.throws(
+    () => launchTaskWorker(root, "run-cleanup-race", "work", lane, { codexCommand: command }),
+    /is gone; retry with --fresh/
+  );
+  const task = loadRun(root, "run-cleanup-race").tasks.work;
+  assert.equal(task.attempts[1].status, "failed");
+  assert.equal(fs.existsSync(marked[0].attempt.worktree.path), true, "nothing was written into the worktree");
 });
 
 test("a warm retry resumes the thread with explicit model, effort, and sandbox in the same worktree", async () => {
@@ -455,20 +484,20 @@ test("a warm retry in a reused worktree integrates without redeclaring its prede
     resumedFromAttemptId: first.id
   };
   const task = { id: "work", scope: ["src/**"], attempts: [first, second], result: declared(["src/b.js"]) };
-  const inspection = inspectTaskWorktree(task, second);
+  const inspection = inspectTaskWorktree(task, second, { cwd: root });
   // a is carried (declared and changed before the reuse); c was only claimed
   // earlier and changed now, so this attempt had to declare it.
   assert.deepEqual(inspection.carried, ["src/a.js"]);
   assert.deepEqual(inspection.undeclared, ["src/c.js"]);
   assert.equal(inspection.ready, false);
 
-  const honest = inspectTaskWorktree({ ...task, result: declared(["src/b.js", "src/c.js"]) }, second);
+  const honest = inspectTaskWorktree({ ...task, result: declared(["src/b.js", "src/c.js"]) }, second, { cwd: root });
   assert.deepEqual(honest.undeclared, []);
   assert.equal(honest.ready, true);
 
   // A worktree saved without a reuse head carries nothing.
   const legacy = { ...second, worktree: { ...second.worktree, reusedHead: undefined } };
-  assert.deepEqual(inspectTaskWorktree({ ...task, attempts: [first, legacy] }, legacy).undeclared, ["src/a.js", "src/c.js"]);
+  assert.deepEqual(inspectTaskWorktree({ ...task, attempts: [first, legacy] }, legacy, { cwd: root }).undeclared, ["src/a.js", "src/c.js"]);
 });
 
 test("an older declaration does not cover a later attempt's undeclared change", () => {
@@ -506,7 +535,7 @@ test("an older declaration does not cover a later attempt's undeclared change", 
     worktree: { path: root, branch: "main", baseHead, reusedHead: thirdHead, reusedFromAttemptId: second.id }
   };
   const task = { id: "work", scope: ["src/**"], attempts: [first, second, third], result: declared(["src/y.js"]) };
-  const inspection = inspectTaskWorktree(task, third);
+  const inspection = inspectTaskWorktree(task, third, { cwd: root });
   // a is still attempt 1's declared change; x was last changed by attempt 2,
   // which did not declare it, so attempt 1's phantom claim does not carry it.
   assert.deepEqual(inspection.carried, ["src/a.js"]);
@@ -542,7 +571,7 @@ test("an older declaration does not cover a later attempt's undeclared change", 
       { id: "work-attempt-3", worktree: at({ reusedHead: reuse3 }) }
     ]
   };
-  const latest = inspectTaskWorktree(rewritten, rewritten.attempts[2]);
+  const latest = inspectTaskWorktree(rewritten, rewritten.attempts[2], { cwd: root2 });
   assert.deepEqual(latest.carried, []);
   assert.deepEqual(latest.undeclared, ["src/a.js"]);
 });
@@ -578,7 +607,7 @@ test("a file changed and restored by commits still counts as changed", () => {
       { id: "work-attempt-3", worktree: at({ reusedHead: reuse3 }) }
     ]
   };
-  const inspection = inspectTaskWorktree(task, task.attempts[2]);
+  const inspection = inspectTaskWorktree(task, task.attempts[2], { cwd: root });
   assert.deepEqual(inspection.carried, [], "attempt 2 changed a last, and did not declare it");
   assert.deepEqual(inspection.undeclared, ["src/a.js"]);
   assert.equal(inspection.ready, false);
@@ -602,9 +631,29 @@ test("a file changed and restored by commits still counts as changed", () => {
     result: declared(["src/b.js"]),
     attempts: [{ id: "work-attempt-1", worktree: { path: solo, branch: "main", baseHead: soloBase } }]
   };
-  const single = inspectTaskWorktree(one, one.attempts[0]);
+  const single = inspectTaskWorktree(one, one.attempts[0], { cwd: solo });
   assert.deepEqual(single.outOfScope, ["docs/x.md"]);
   assert.equal(single.ready, false);
+
+  // A filename is exactly what git stores: "src/ok.js " (trailing space) is not
+  // "src/ok.js", so it is out of an exact scope and undeclared.
+  const spaced = makeRepo();
+  repos.push(spaced);
+  const spacedBase = git(spaced, ["rev-parse", "HEAD"]).trim();
+  fs.mkdirSync(path.join(spaced, "src"), { recursive: true });
+  fs.writeFileSync(path.join(spaced, "src", "ok.js "), "x\n");
+  git(spaced, ["add", "-A"]);
+  git(spaced, ["commit", "--quiet", "-m", "spaced"]);
+  const exact = {
+    id: "work",
+    scope: ["src/ok.js"],
+    result: declared(["src/ok.js"]),
+    attempts: [{ id: "work-attempt-1", worktree: { path: spaced, branch: "main", baseHead: spacedBase } }]
+  };
+  const trailing = inspectTaskWorktree(exact, exact.attempts[0], { cwd: spaced });
+  assert.deepEqual(trailing.files, ["src/ok.js "]);
+  assert.deepEqual(trailing.outOfScope, ["src/ok.js "]);
+  assert.equal(trailing.ready, false);
 });
 
 test("a retry note reaches the worker when no earlier attempt reached one", () => {

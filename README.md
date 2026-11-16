@@ -50,7 +50,7 @@ what should happen, what is acceptable, what gets integrated, and when the whole
 
 - Claude Code with plugin support
 - Node.js 18.18 or newer
-- Git with at least one commit in the repository
+- Git 2.42 or newer, with at least one commit in the repository
 - [Codex CLI](https://developers.openai.com/codex/cli/) installed and authenticated
 
 Workers use the account already authenticated in Codex CLI. The plugin does not require its own

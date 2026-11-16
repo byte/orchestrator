@@ -32,8 +32,14 @@ let childPid = null;
 let resumeFallback = null;
 let sandboxFallback = null;
 
+// Every status write is numbered, so a poll that read an older snapshot cannot
+// save it over a newer one another poll already synchronized.
+let statusSeq = 0;
+
 function writeStatus(fields) {
+  statusSeq += 1;
   atomicWrite(spec.statusFile, {
+    seq: statusSeq,
     pid: process.pid,
     ...(childPid ? { childPid } : {}),
     startedAt,
@@ -314,13 +320,51 @@ process.on("SIGTERM", () => stopChild("SIGTERM"));
 process.on("SIGINT", () => stopChild("SIGINT"));
 
 function runCodex(resumeThreadId, input = prompt) {
-  return new Promise((resolve) => {
+  return new Promise((resolveRun) => {
+    // Its own process group, so a stop reaches every process Codex started (a
+    // command it ran that still holds the pipes, say), not only the launcher.
     const child = spawn(command, codexArgs(resumeThreadId), {
       cwd: spec.worktreePath,
       env: scratchDir ? { ...process.env, TMPDIR: scratchDir } : process.env,
-      stdio: ["pipe", "pipe", "pipe"]
+      stdio: ["pipe", "pipe", "pipe"],
+      detached: true
     });
-    current = child;
+    const timers = [];
+    let settled = false;
+    const resolve = (value) => {
+      if (!settled) {
+        settled = true;
+        timers.forEach(clearTimeout);
+        resolveRun(value);
+      }
+    };
+    const killGroup = (signal) => {
+      try {
+        process.kill(-child.pid, signal);
+      } catch {
+        try {
+          child.kill(signal);
+        } catch {
+          // Already gone.
+        }
+      }
+    };
+    // A stop signals the group, kills it 5 s later if it is still there, and
+    // stops waiting for the pipes 2 s after that, so a process that survives
+    // even SIGKILL (it left the group) cannot keep the wrapper running.
+    current = {
+      kill: (signal) => {
+        killGroup(signal);
+        timers.push(setTimeout(() => {
+          killGroup("SIGKILL");
+          timers.push(setTimeout(() => {
+            child.stdout.destroy();
+            child.stderr.destroy();
+            resolve({ code: null, signal: "SIGKILL", sawThread, stderrText, replacedWithoutBriefing });
+          }, 2000));
+        }, 5000));
+      }
+    };
     childPid = child.pid ?? childPid;
     let sawThread = false;
     let replacedWithoutBriefing = false;

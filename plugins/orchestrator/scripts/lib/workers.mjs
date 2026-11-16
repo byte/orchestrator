@@ -11,6 +11,7 @@ import {
   attachExecution,
   cancelRun,
   cancelTask,
+  ClaimSavedError,
   claimTask,
   failTaskAttempt,
   loadRun,
@@ -245,10 +246,17 @@ export function removeLeftoverScratch(cwd, runId, taskId, attemptId) {
       if (!path.isAbsolute(scratch) || !path.basename(scratch).startsWith("orch-worker-")) {
         return false;
       }
-      if (!fs.lstatSync(scratch).isDirectory() || fs.realpathSync(scratch) !== scratch) {
+      const stat = fs.lstatSync(scratch);
+      if (!stat.isDirectory() || fs.realpathSync(scratch) !== scratch) {
         return false;
       }
       const owner = path.join(scratch, SCRATCH_OWNER_FILE);
+      // A worker may have made its scratch root unreadable (`chmod 000`); a
+      // directory this user owns gets its permissions back before the owner
+      // file is read. removeTree restores the rest.
+      if (stat.uid === process.getuid?.() && (stat.mode & 0o500) !== 0o500) {
+        fs.chmodSync(scratch, 0o700);
+      }
       return fs.lstatSync(owner).isFile() &&
         fs.realpathSync(fs.readFileSync(owner, "utf8")) === fs.realpathSync(statusFile);
     } catch {
@@ -402,7 +410,23 @@ export function launchTaskWorker(
   lane,
   { codexCommand = ["codex"] } = {}
 ) {
-  const dispatch = claimTask(cwd, runId, taskId, lane);
+  let dispatch;
+  try {
+    dispatch = claimTask(cwd, runId, taskId, lane);
+  } catch (error) {
+    // The claim reached disk but its event did not: fail the attempt, or the
+    // task would sit dispatching with no worker and refuse launch and retry.
+    if (error instanceof ClaimSavedError) {
+      failTaskAttempt(cwd, runId, taskId, {
+        attemptId: error.attemptId,
+        error: error.message,
+        reasonCode: "worker_launch_failed",
+        signals: ["worker_launch_error"],
+        launchFailed: true
+      });
+    }
+    throw error;
+  }
   let runner = null;
   let worktree = null;
   try {
@@ -440,16 +464,23 @@ export function launchTaskWorker(
     try {
       if (!(error instanceof AttachRefusedError)) {
         const policyRefusal = error.kind === "refused";
-        failTaskAttempt(cwd, runId, taskId, {
+        const fail = (reasonCode, signals) => failTaskAttempt(cwd, runId, taskId, {
           attemptId: dispatch.attemptId,
           error: error.message,
           terminalOutcome: policyRefusal ? "policy_refused" : "execution_failed",
           action: policyRefusal ? "refuse" : "execute",
-          reasonCode: error.reasonCode ?? "worker_launch_failed",
-          signals: error.signals ?? ["worker_launch_error"],
+          reasonCode,
+          signals,
           launchFailed: true,
           worktree
         });
+        try {
+          fail(error.reasonCode ?? "worker_launch_failed", error.signals ?? ["worker_launch_error"]);
+        } catch {
+          // A reason code the outcome cannot take must not leave the task
+          // dispatching with no worker: record the generic launch failure.
+          fail(policyRefusal ? "policy_boundary" : "worker_launch_failed", ["worker_launch_error"]);
+        }
       }
     } finally {
       if (runner) {
@@ -791,6 +822,17 @@ export function answerTaskWorker(
   }
 }
 
+function stopGroup(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) {
+    return;
+  }
+  try {
+    process.kill(-pid, "SIGTERM");
+  } catch {
+    stopPid(pid);
+  }
+}
+
 function stopPid(pid) {
   if (!pid) {
     return;
@@ -815,13 +857,16 @@ export function cancelWorkers(cwd, runId, taskId, reason) {
   for (const task of pick(loadRun(cwd, runId))) {
     stopTaskWorker(task.attempts.at(-1));
   }
-  const result = taskId ? cancelTask(cwd, runId, taskId, reason) : cancelRun(cwd, runId, reason);
-  for (const task of pick(loadRun(cwd, runId))) {
-    if (task.status === "cancelled") {
-      stopLiveTaskWorker(task.attempts.at(-1));
+  try {
+    return taskId ? cancelTask(cwd, runId, taskId, reason) : cancelRun(cwd, runId, reason);
+  } finally {
+    // Also when the cancellation was saved but a later step (its event) failed.
+    for (const task of pick(loadRun(cwd, runId))) {
+      if (task.status === "cancelled") {
+        stopLiveTaskWorker(task.attempts.at(-1));
+      }
     }
   }
-  return result;
 }
 
 /**
@@ -849,7 +894,10 @@ export function stopTaskWorker(attempt) {
   if (fs.existsSync(runner.statusFile)) {
     status = readJson(runner.statusFile);
   }
-  stopPid(status?.childPid);
+  // The wrapper starts Codex in its own process group: signal the group, so
+  // processes Codex started stop too; a runner from before that falls back to
+  // its pid.
+  stopGroup(status?.childPid);
   stopPid(runner.pid);
   atomicWrite(
     runner.statusFile,

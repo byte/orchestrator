@@ -46,8 +46,18 @@ export function globToRegExp(pattern) {
   return new RegExp(`^${out}$`);
 }
 
-function normalize(filePath) {
-  return String(filePath).replace(/\\/g, "/").replace(/^\.\//, "");
+/** A pattern is supervisor input, so a Windows-style `src\\**` means `src/**`. */
+function normalize(pattern) {
+  return String(pattern).replace(/\\/g, "/").replace(/^\.\//, "");
+}
+
+/**
+ * A path is what git reports, always with `/` separators: on macOS and Linux a
+ * backslash is an ordinary filename character, so `src\\outside.txt` is a file at
+ * the root, not inside `src/`, and must not be matched as if it were.
+ */
+function normalizePath(filePath) {
+  return String(filePath).replace(/^\.\//, "");
 }
 
 /**
@@ -56,7 +66,7 @@ function normalize(filePath) {
  * An empty pattern list matches nothing — scope must be stated explicitly.
  */
 export function matchesScope(filePath, patterns = []) {
-  const candidate = normalize(filePath);
+  const candidate = normalizePath(filePath);
   let matched = false;
 
   for (const raw of patterns) {

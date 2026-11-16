@@ -373,7 +373,18 @@ real resume reports the same thread id it was given.
    repository's `worktrees/*/gitdir` records, never from the worktree's `.git` pointer file, which a
    worker could re-aim at a repository config it wrote), with hooks, fsmonitor, signing and
    submodule recursion off: a worker could otherwise plant a hook, or a nested repository whose
-   config git would run during `git status`.
+   config git would run during `git status`. Attributes are read from the empty tree
+   (`GIT_ATTR_SOURCE`, Git 2.42 or later; older Git is refused), so no clean, smudge or process
+   filter runs either: a repository whose config runs an in-tree script as a filter would
+   otherwise run whatever the worker wrote there. The cost is that a worker's changes are committed
+   without filters, so a Git LFS file is committed as content, not as a pointer. Integration's
+   cherry-pick into the supervisor checkout runs with hooks and fsmonitor off, so a hook the worker
+   changed in scope (`core.hooksPath=.husky`) does not run while it is being applied; checkout
+   filters still run there, so integrating a change to a script the repository's own filter
+   config runs is a decision the supervisor makes by integrating.
+
+   Scope matching treats a backslash in a path as part of the filename, as git does on macOS and
+   Linux: `src\outside.txt` is a root-level file, not inside `src/`. Patterns may still use `\`.
 
    Without `--sandbox`, the worker is read-only only if Codex applies the profile; a Codex that
    ignored it would run with the user's default permissions, which may be writable. So before

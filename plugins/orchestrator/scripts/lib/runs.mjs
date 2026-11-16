@@ -792,6 +792,14 @@ export class AttachRefusedError extends Error {}
  * appended. The answer is on disk with no runner attached, so the caller must
  * revert it, which needs the attempt id this carries.
  */
+/** A claim reached disk but its event did not; the caller fails the attempt. */
+export class ClaimSavedError extends Error {
+  constructor(message, { attemptId }) {
+    super(message);
+    this.attemptId = attemptId;
+  }
+}
+
 export class AnswerSavedError extends Error {
   constructor(message, { attemptId }) {
     super(message);
@@ -1928,27 +1936,34 @@ export function claimTask(cwd, runId, taskId, lane) {
     task.status = "dispatching";
     task.updatedAt = nowIso();
     refreshRunStatus(run);
+    // Render before saving: a failure here (an unreadable ledger, say) leaves the
+    // task as it was instead of dispatching with no worker.
+    const briefing = renderWorkerBriefing(cwd, run, task, lane, route);
     writeRun(cwd, run);
-    appendEvent(cwd, id, {
-      type: "task.claimed",
-      taskId: task.id,
-      attemptId: attempt.id,
-      model: route.model,
-      reasoningEffort: route.reasoningEffort,
-      guidancePolicyVersion: attempt.guidanceSnapshot.policyVersion,
-      guidancePolicyHash: attempt.guidanceSnapshot.policyHash,
-      guidanceItemIds: attempt.guidanceSnapshot.items.map((item) => item.guidanceId),
-      retryMode: retry?.mode ?? null,
-      resumedFromAttemptId: attempt.resumedFromAttemptId
-    });
-    if (attempt.substitution) {
+    try {
       appendEvent(cwd, id, {
-        type: "task.model_substituted",
+        type: "task.claimed",
         taskId: task.id,
         attemptId: attempt.id,
-        ...attempt.substitution,
-        notice: substitutionNotice(attempt.substitution)
+        model: route.model,
+        reasoningEffort: route.reasoningEffort,
+        guidancePolicyVersion: attempt.guidanceSnapshot.policyVersion,
+        guidancePolicyHash: attempt.guidanceSnapshot.policyHash,
+        guidanceItemIds: attempt.guidanceSnapshot.items.map((item) => item.guidanceId),
+        retryMode: retry?.mode ?? null,
+        resumedFromAttemptId: attempt.resumedFromAttemptId
       });
+      if (attempt.substitution) {
+        appendEvent(cwd, id, {
+          type: "task.model_substituted",
+          taskId: task.id,
+          attemptId: attempt.id,
+          ...attempt.substitution,
+          notice: substitutionNotice(attempt.substitution)
+        });
+      }
+    } catch (error) {
+      throw new ClaimSavedError(error.message, { attemptId: attempt.id });
     }
     return {
       runId: id,
@@ -1967,7 +1982,7 @@ export function claimTask(cwd, runId, taskId, lane) {
         "--effort",
         route.reasoningEffort
       ],
-      briefing: renderWorkerBriefing(cwd, run, task, lane, route)
+      briefing
     };
   });
 }
@@ -2517,19 +2532,31 @@ export function syncExecutionStatus(cwd, runId, taskId, { attemptId, status, run
     if (!attempt.runner) {
       throw new Error(`Attempt "${attempt.id}" has no runner to synchronize.`);
     }
+    // Two polls can read the same status file at different moments; the one
+    // holding the older snapshot must not overwrite what the other saved (an
+    // answer's discarded replacement thread over its fresh fallback, say).
+    if (Number.isInteger(status.seq) && Number.isInteger(attempt.runner.statusSeq) &&
+        status.seq < attempt.runner.statusSeq) {
+      throw new StaleRunnerError(
+        `Status snapshot ${status.seq} of attempt "${attempt.id}" is older than ${attempt.runner.statusSeq}, already synchronized.`
+      );
+    }
     const previous = {
+      statusSeq: attempt.runner.statusSeq ?? null,
       status: attempt.runner.status,
       childPid: attempt.runner.childPid ?? null,
       threadId: attempt.threadId ?? null,
       exitCode: attempt.runner.exitCode ?? null,
       signal: attempt.runner.signal ?? null
     };
+    attempt.runner.statusSeq = Number.isInteger(status.seq) ? status.seq : attempt.runner.statusSeq ?? null;
     attempt.runner.status = status.status ?? attempt.runner.status;
     attempt.runner.childPid = status.childPid ?? attempt.runner.childPid ?? null;
     attempt.runner.exitCode = status.exitCode ?? attempt.runner.exitCode ?? null;
     attempt.runner.signal = status.signal ?? attempt.runner.signal ?? null;
     attempt.threadId = status.threadId ?? attempt.threadId;
     const current = {
+      statusSeq: attempt.runner.statusSeq,
       status: attempt.runner.status,
       childPid: attempt.runner.childPid,
       threadId: attempt.threadId ?? null,
@@ -3202,6 +3229,42 @@ export function retryTask(cwd, runId, taskId, { note = null, fresh = false } = {
       ...task,
       retryPlan: { ...task.pendingRetry, warmFailures, escalationAdvised: warmFailures >= 2 }
     };
+  });
+}
+
+const CLEANABLE_TASK_STATUSES = new Set(["completed", "failed", "blocked", "cancelled"]);
+
+/**
+ * Mark the worktrees of finished tasks for removal, under the run lock, and
+ * return the attempts marked. Removal itself happens outside the lock; a warm
+ * retry launched after the mark refuses to reuse a marked worktree, and a task
+ * relaunched before it is no longer finished, so it is not marked.
+ */
+export function markWorktreesForRemoval(cwd, runId, taskId = null) {
+  const id = assertId(runId, "run");
+  const filePath = runFile(cwd, id);
+  return withFileLock(filePath, () => {
+    const run = loadRun(cwd, id);
+    if (taskId && !run.tasks[taskId]) {
+      throw new Error(`Unknown task "${taskId}" in run "${id}".`);
+    }
+    const tasks = taskId ? [run.tasks[taskId]] : Object.values(run.tasks);
+    const marked = [];
+    for (const task of tasks) {
+      if (!CLEANABLE_TASK_STATUSES.has(task.status)) {
+        continue;
+      }
+      for (const attempt of task.attempts) {
+        if (attempt.worktree?.path) {
+          attempt.worktree.removing = true;
+        }
+        marked.push({ taskId: task.id, attempt: structuredClone(attempt) });
+      }
+    }
+    if (marked.length) {
+      writeRun(cwd, run);
+    }
+    return marked;
   });
 }
 

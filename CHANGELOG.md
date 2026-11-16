@@ -34,6 +34,28 @@ Fixes:
   leave their changes in the worktree and the wrapper commits them, outside the
   sandbox, when Codex finishes (not when it pauses for input). A failed commit
   fails the worker.
+- Git in a worker's worktree also reads attributes from the empty tree, so no
+  filter a worker attributed to a script it wrote runs (this needs Git 2.42; a
+  worker's LFS files are committed as content). Integration's cherry-pick runs
+  no hooks. Scope matching no longer treats a backslash in a path as a
+  separator, so `src\outside.txt` is not inside `src/**`. File names keep
+  their exact bytes in inspection (a trailing space is part of the name), and
+  a worktree recorded before its git directory was recorded resolves it from
+  the supervisor repository instead of the worktree's `.git` file.
+- `run cleanup` marks a worktree under the run lock before removing it, so a
+  warm retry launched meanwhile refuses to reuse it instead of losing its work.
+  A worktree that is gone now fails the retry as `execution_failed /
+  worktree_unavailable`; before, recording that failure itself failed and left
+  the task dispatching.
+- A cancelled worker's whole process group is stopped (Codex runs in its own
+  group, killed 5 s after SIGTERM if still there), so a process it started no
+  longer survives `run cancel`. A worker attached while a cancellation failed
+  after saving is still stopped.
+- Status writes are numbered, so a poll holding an older snapshot cannot save
+  it over a newer one (a discarded thread over the answer's fresh fallback).
+- A launch whose briefing cannot be rendered leaves the task pending, and a
+  launch whose claim event fails fails its attempt, instead of leaving the task
+  dispatching with no worker.
 - Git run in a worker's worktree, by the wrapper or by `run inspect`,
   `integrate` and `cleanup`, uses the git directory recorded when the worktree
   was created, never the worktree's `.git` pointer file, with hooks, fsmonitor,

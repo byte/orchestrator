@@ -30,6 +30,7 @@ import {
   finalizeRun,
   listRuns,
   loadRun,
+  markWorktreesForRemoval,
   readyTasks,
   effectiveTaskRoute,
   grantedSurfaceConflicts,
@@ -866,7 +867,7 @@ function commandRun(argv, cwd) {
     if (!task) {
       throw new Error(`Unknown task "${taskId}" in run "${runId}".`);
     }
-    const inspection = inspectTaskWorktree(task, task.attempts.at(-1));
+    const inspection = inspectTaskWorktree(task, task.attempts.at(-1), { cwd });
     return options.json ? emitJson(inspection) : emitJson(inspection);
   }
 
@@ -914,23 +915,13 @@ function commandRun(argv, cwd) {
   }
 
   if (action === "cleanup") {
-    const run = loadRun(cwd, runId);
     const taskId = positionals[1];
-    const tasks = taskId ? [run.tasks[taskId]] : Object.values(run.tasks);
-    if (tasks.some((task) => !task)) {
-      throw new Error(`Unknown task "${taskId}" in run "${runId}".`);
-    }
     const removed = [];
-    for (const task of tasks) {
-      if (!["completed", "failed", "blocked", "cancelled"].includes(task.status)) {
-        continue;
+    for (const { taskId: owner, attempt } of markWorktreesForRemoval(cwd, runId, taskId)) {
+      if (cleanupTaskWorktree(cwd, attempt)) {
+        removed.push(attempt.worktree.path);
       }
-      for (const attempt of task.attempts) {
-        if (cleanupTaskWorktree(cwd, attempt)) {
-          removed.push(attempt.worktree.path);
-        }
-        removed.push(...removeLeftoverScratch(cwd, runId, task.id, attempt.id));
-      }
+      removed.push(...removeLeftoverScratch(cwd, runId, owner, attempt.id));
     }
     return options.json ? emitJson(removed) : emit(removed.length ? `Removed:\n${removed.map((entry) => `- ${entry}`).join("\n")}` : "No completed worktrees to remove.");
   }

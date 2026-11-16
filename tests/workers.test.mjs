@@ -378,6 +378,59 @@ test("a worker that re-aims its worktree's .git pointer cannot run code through 
   const task = run.tasks.build;
   inspectTaskWorktree(task, task.attempts.at(-1));
   assert.equal(fs.existsSync(marker) ? fs.readFileSync(marker, "utf8") : "", "", "inspection did not run the planted fsmonitor");
+  // A record from before the git directory was recorded resolves it from the
+  // supervisor repository, or refuses without one.
+  const legacy = { ...task.attempts.at(-1), worktree: { ...task.attempts.at(-1).worktree, gitDir: undefined } };
+  inspectTaskWorktree(task, legacy, { cwd: root });
+  assert.equal(fs.existsSync(marker) ? fs.readFileSync(marker, "utf8") : "", "", "a legacy record did not run it either");
+  assert.throws(() => inspectTaskWorktree(task, legacy), /no recorded git directory/);
+});
+
+test("no filter a worker attributed runs when its changes are committed or inspected", async () => {
+  const root = repo();
+  // A repository that runs an in-tree script as a filter, which a worker can edit.
+  git(root, ["config", "filter.local.clean", "sh filter.sh"]);
+  git(root, ["config", "filter.local.smudge", "sh filter.sh"]);
+  plan(root, "run-wrapper-filter");
+  checkpointPlan(root, "run-wrapper-filter");
+  const marker = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "orch-hook-")), "ran");
+  repos.push(path.dirname(marker));
+  const launched = launchTaskWorker(root, "run-wrapper-filter", "build", { constraints: [] }, {
+    codexCommand: [process.execPath, writeFixture, "--no-commit", `--filter=${marker}`]
+  });
+  const status = await runnerDone(launched.runner.statusFile);
+  assert.equal(status.status, "completed", status.error);
+  const task = loadRun(root, "run-wrapper-filter").tasks.build;
+  inspectTaskWorktree(task, task.attempts.at(-1));
+  assert.equal(fs.existsSync(marker) ? fs.readFileSync(marker, "utf8") : "", "", "no worker-attributed filter ran");
+});
+
+test("integrating a worker's commits runs no hook it changed", async () => {
+  const root = repo();
+  git(root, ["config", "core.hooksPath", "src/hooks"]);
+  plan(root, "run-integrate-hook");
+  checkpointPlan(root, "run-integrate-hook");
+  const marker = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "orch-hook-")), "ran");
+  repos.push(path.dirname(marker));
+  const launched = launchTaskWorker(root, "run-integrate-hook", "build", { constraints: [] }, {
+    codexCommand: [process.execPath, writeFixture, "--no-commit", `--hooks=${marker}`, "--hooks-dir=src/hooks", "--declare-hooks"]
+  });
+  await runnerDone(launched.runner.statusFile);
+  let update;
+  for (let index = 0; index < 100; index += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    update = pollRunWorkers(root, "run-integrate-hook")[0];
+    if (update && !["running", "dispatching"].includes(update.status)) {
+      break;
+    }
+  }
+  const run = loadRun(root, "run-integrate-hook");
+  const task = run.tasks.build;
+  const inspection = inspectTaskWorktree(task, task.attempts.at(-1));
+  assert.equal(inspection.ready, true, JSON.stringify(inspection));
+  integrateTaskWorktree(root, run, task, task.attempts.at(-1));
+  assert.ok(fs.existsSync(path.join(root, "src", "hooks", "post-commit")), "the hook was integrated");
+  assert.equal(fs.existsSync(marker) ? fs.readFileSync(marker, "utf8") : "", "", "no integrated hook ran during integration");
 });
 
 test("a write worker paused for input keeps its changes uncommitted, and a failed commit fails the worker", async () => {

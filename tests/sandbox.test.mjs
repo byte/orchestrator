@@ -277,6 +277,10 @@ test("run cleanup removes a scratch directory a hard-killed worker left, and not
   fs.writeFileSync(path.join(leftover, "locked", "deeper", "file"), "x");
   fs.chmodSync(path.join(leftover, "locked"), 0o000);
   runner(".", { pid: 999999999, status: "running", scratchDir: leftover });
+  // An owned scratch directory whose root itself was made unreadable.
+  const lockedRoot = scratch();
+  runner("locked-root", { pid: 999999999, status: "failed", scratchDir: lockedRoot });
+  fs.chmodSync(lockedRoot, 0o000);
   const live = scratch();
   runner("round-1", { pid: process.pid, status: "running", scratchDir: live });
   // Cancelled is written before the processes exit: a live Codex child keeps it.
@@ -299,8 +303,9 @@ test("run cleanup removes a scratch directory a hard-killed worker left, and not
   const linkStatus = runner("link", { pid: 999999999, status: "failed", scratchDir: link }, { owner: false });
   fs.writeFileSync(path.join(target, ".orch-worker-owner"), linkStatus);
   try {
-    assert.deepEqual(removeLeftoverScratch(root, "run-profile-leftover", "work", "work-attempt-1"), [leftover]);
+    assert.deepEqual(removeLeftoverScratch(root, "run-profile-leftover", "work", "work-attempt-1").sort(), [leftover, lockedRoot].sort());
     assert.equal(fs.existsSync(leftover), false, "an owned, dead runner's scratch is removed, unreadable parts too");
+    assert.equal(fs.existsSync(lockedRoot), false, "an owned scratch whose root was made unreadable is removed");
     assert.equal(fs.existsSync(live), true, "a live worker's scratch is kept");
     assert.equal(fs.existsSync(stopping), true, "a cancelled runner whose child is alive keeps its scratch");
     assert.equal(fs.existsSync(unrelated), true, "a directory not named like a worker scratch is kept");
@@ -309,6 +314,11 @@ test("run cleanup removes a scratch directory a hard-killed worker left, and not
     assert.equal(fs.existsSync(target), true, "a symlinked directory is not followed");
   } finally {
     for (const dir of made) {
+      try {
+        fs.chmodSync(dir, 0o700);
+      } catch {
+        // Gone or a symlink.
+      }
       fs.rmSync(dir, { recursive: true, force: true });
     }
   }

@@ -133,6 +133,7 @@ export const OUTCOME_REASON_CODES = Object.freeze({
     "worker_process_failed",
     "worker_launch_failed",
     "model_unavailable",
+    "worktree_unavailable",
     "branch_drift",
     "wrong_branch",
     "dirty_checkout"
