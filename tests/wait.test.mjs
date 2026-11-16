@@ -39,10 +39,11 @@ const NO_FALLBACK_MS = 60000;
 
 /**
  * Whether fs.watch delivers events for a directory under the temp root here.
- * Codex's macOS seatbelt blocks the file-event service, so a watch arms but
- * never fires and `run wait` falls back to its interval. The tests that prove a
- * *watch* woke the wait cannot pass there, so inside that sandbox they are
- * skipped with this reason instead of failing on the environment.
+ * Inside Codex's macOS seatbelt a watch can fail (EMFILE under `codex sandbox`)
+ * or deliver nothing, and `run wait` then wakes on its interval instead; in
+ * other sandboxed runs it works. The tests that prove a *watch* woke the wait
+ * cannot pass where it fails, so inside the sandbox they are skipped, with this
+ * reason, only when the probe shows the watch is not delivering.
  */
 async function watchDelivers() {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "orch-watch-probe-"));
@@ -78,7 +79,7 @@ async function watchDelivers() {
 // watch that delivers nothing is a real failure, not something to skip, and a
 // slow probe on a loaded host must not quietly drop these tests.
 const WATCH_SKIP = process.env.CODEX_SANDBOX && !(await watchDelivers())
-  ? `fs.watch delivers no file events inside the Codex sandbox (CODEX_SANDBOX=${process.env.CODEX_SANDBOX})`
+  ? `fs.watch is not delivering file events inside the Codex sandbox (CODEX_SANDBOX=${process.env.CODEX_SANDBOX})`
   : false;
 
 function repo() {

@@ -9,6 +9,7 @@
 //   --sandbox-probe=writable  run the probe as given, so the worktree is writable
 //   --sandbox-probe=fail      exit 2 the way a Codex without `sandbox` would
 //   --sandbox-probe=ok-exit17 print a passing probe result, then exit 17
+//   --sandbox-probe=network-on as ok, but without Codex's network-disabled marker
 //   --sandbox-probe=hang      write this process's pid to --sandbox-probe-pid=<file>
 //                             and hang, to test stopping a worker mid-probe
 // Imported first by every fixture; it exits the process for a sandbox call and
@@ -36,14 +37,25 @@ if (at !== -1 && !args.includes("exec")) {
   }
   const command = args.slice(args.indexOf("--", at) + 1);
   let denied = null;
-  if (mode === "ok" || mode === "ok-exit17") {
+  if ((mode === "ok" || mode === "ok-exit17" || mode === "network-on") && process.getuid?.() === 0) {
+    // Root ignores directory permissions, so the denial cannot be staged; report
+    // what the sandbox would have shown.
+    process.stdout.write(JSON.stringify({ scratch: true, checkout: false, network: mode === "network-on" ? "on" : "off" }));
+    process.exit(mode === "ok-exit17" ? 17 : 0);
+  }
+  if (mode === "ok" || mode === "ok-exit17" || mode === "network-on") {
     // [node, -e, script, scratch, worktree, marker]: point the worktree argument
     // at a directory without write permission, as the sandbox would deny it.
     denied = fs.mkdtempSync(path.join(os.tmpdir(), "orch-shim-denied-"));
     fs.chmodSync(denied, 0o500);
     command[4] = denied;
   }
-  const result = spawnSync(command[0], command.slice(1), { stdio: "inherit" });
+  // Codex marks a network-disabled sandbox in the environment; --sandbox-probe=network-on
+  // leaves the marker out, as a profile that enabled the network would.
+  const env = mode === "network-on"
+    ? { ...process.env, CODEX_SANDBOX_NETWORK_DISABLED: "" }
+    : { ...process.env, CODEX_SANDBOX_NETWORK_DISABLED: "1" };
+  const result = spawnSync(command[0], command.slice(1), { stdio: "inherit", env });
   if (denied) {
     fs.chmodSync(denied, 0o700);
     fs.rmSync(denied, { recursive: true, force: true });

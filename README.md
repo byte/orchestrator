@@ -276,7 +276,8 @@ supervisor, and exits `0` when a worker changed state, `2` on timeout (default 3
 when no worker is running or paused, and `4` when every remaining worker is paused awaiting an
 answer (`1` is an error). It returns at once when a change is already on disk. It watches worker
 status directories with `fs.watch` and also polls every 15 seconds (`--interval`), so a file event
-the platform drops only delays the wake; `--no-watch` relies on the interval alone. Each task has a
+the platform drops, or a watch it refuses (inside the Codex sandbox `fs.watch` can fail with
+EMFILE), only delays the wake; `--no-watch` relies on the interval alone. Each task has a
 wall-clock limit — the plan's `timeoutMinutes`, else 120 minutes on `astra`, 90 on `sol`, 60 on
 `terra`, and 30 on `luna` — and a worker past it is reported once, never stopped; stopping it is
 the supervisor's `run cancel`. `run poll` remains for a one-off, non-blocking look.

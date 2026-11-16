@@ -250,6 +250,14 @@ Codex thread id are stored in run state. Launch independent ready tasks without 
 them. A launch response whose `substitution` is not null ran on a different model than the plan
 named; read its notice.
 
+A `read` or `verify` worker cannot write the checkout, has no network, and may not ask to leave
+its sandbox (`approval_policy="never"`), but it can run commands and tests: it gets a private
+writable `TMPDIR`. So a read task's acceptance criteria can require test output. If the attempt
+shows `sandboxFallback` (a `task.sandbox_fallback` event), that profile could not be proven on
+this machine and the worker ran under plain `--sandbox read-only` with no writable temp
+directory; rerun any test it reports as failing yourself. A test skipped inside the sandbox is not
+a pass. `run cleanup` also removes a scratch directory a hard-killed worker left behind.
+
 ## 5. Monitor and collect
 
 Do not poll in a loop. After launching a wave, start one blocking wait as a **background** Bash

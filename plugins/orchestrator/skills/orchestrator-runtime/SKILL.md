@@ -20,7 +20,8 @@ All support `--json` where structured output is useful.
   `gpt-6.1-sol`, `gpt-6.1-terra`, or `gpt-5.6-luna` route (or a 0.5.x run's persisted
   `gpt-5.6-sol`/`gpt-5.6-terra` slug) with the saved effort, output schema, least sandbox, and
   isolated worktree. Never substitute a route yourself during recovery or retry.
-- Read and verify workers cannot write the checkout but can run commands and tests: each gets a
+- Read and verify workers cannot write the checkout, have no network, and may not request an
+  unsandboxed command (`approval_policy="never"`), but can run commands and tests: each gets a
   private writable `TMPDIR` that is removed when it exits. A read task's acceptance criteria can
   therefore ask for test output as evidence. Tests that need file-change events may skip inside
   the sandbox; a skipped test is not a pass, so run those yourself. If an attempt shows

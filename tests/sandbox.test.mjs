@@ -87,7 +87,12 @@ test("a read worker whose profile holds runs under it and records no fallback", 
   assert.equal(events(root, "run-profile-ok").some((event) => event.type === "task.sandbox_fallback"), false);
 });
 
-for (const [mode, reason] of [["writable", "checkout_writable"], ["fail", "probe_failed"], ["ok-exit17", "probe_failed"]]) {
+for (const [mode, reason] of [
+  ["writable", "checkout_writable"],
+  ["fail", "probe_failed"],
+  ["ok-exit17", "probe_failed"],
+  ["network-on", "network_enabled"]
+]) {
   test(`a read profile that does not hold (${mode}) falls back to --sandbox read-only and says so`, async () => {
     const runId = `run-profile-${mode}`;
     const root = setup(runId);
@@ -100,6 +105,7 @@ for (const [mode, reason] of [["writable", "checkout_writable"], ["fail", "probe
     const [launch] = readLog(calls);
     assert.equal(launch.argv[launch.argv.indexOf("--sandbox") + 1], "read-only");
     assert.equal(launch.argv.some((arg) => arg.startsWith("default_permissions=")), false);
+    assert.ok(launch.argv.includes('approval_policy="never"'), "the fallback may not request escalation either");
     const attempt = task.attempts[0];
     assert.equal(attempt.sandboxFallback.reason, reason);
     if (mode === "fail") {
@@ -123,6 +129,8 @@ test("a write worker is not probed and keeps --sandbox workspace-write", async (
   const task = await settle(root, "run-profile-write");
   const [launch] = readLog(calls);
   assert.equal(launch.argv[launch.argv.indexOf("--sandbox") + 1], "workspace-write");
+  // Write workers keep the user's approval policy; see docs/architecture.md.
+  assert.equal(launch.argv.includes('approval_policy="never"'), false);
   assert.equal(task.attempts[0].sandboxFallback, undefined);
 });
 

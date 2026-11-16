@@ -96,6 +96,7 @@ export function assertReadOnlyLaunch(entry) {
   assert.equal(filesystem.length, 1);
   assert.equal(filesystem[0], `permissions.${name}.filesystem={${JSON.stringify(entry.tmpdir)}="write"}`);
   assert.equal(values.filter((value) => value.startsWith("permissions.")).length, 2, "no other permission keys");
+  assert.ok(values.includes('approval_policy="never"'), "a read worker may not request escalation");
   assert.ok(entry.tmpdirExists, "the scratch TMPDIR exists while the worker runs");
   assert.equal(path.relative(entry.cwd, entry.tmpdir).startsWith(".."), true, "scratch is outside the worktree");
   const resumeAt = argv.indexOf("resume");

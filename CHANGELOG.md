@@ -15,9 +15,16 @@ Fixes:
   `task.sandbox_fallback` event. The profile name is random for each launch,
   so grants a user's config gives a profile of the same name cannot widen it,
   and a `TMPDIR` inside the checkout is refused. `run cleanup` removes a
-  scratch directory a hard-killed worker left. The wait tests that need
-  file-change events skip, with the reason, inside the Codex sandbox
-  (`CODEX_SANDBOX` set), where those events are blocked.
+  scratch directory a hard-killed worker left. The probe also requires Codex's
+  network-disabled marker, so the profile cannot have more network than plain
+  `--sandbox read-only`. The wait tests that need file-change events skip,
+  with the reason, inside the Codex sandbox (`CODEX_SANDBOX` set) when
+  `fs.watch` is not delivering there (it can fail with EMFILE).
+- Read and verify workers launch with `approval_policy="never"`. With a Codex
+  config such as `approval_policy = "on-request"` and an automatic approvals
+  reviewer, a worker could ask to run a command outside its sandbox and have
+  it approved, bypassing the read-only boundary. Write workers keep the user's
+  approval policy.
 - A task cancelled while its worker was being launched, or while an answered
   worker was being spawned, stays cancelled and its worker is stopped. Before,
   attaching the worker set the task back to running.

@@ -347,17 +347,28 @@ real resume reports the same thread id it was given.
    `exec ... resume`: a write to the scratch directory succeeded and a write to the worktree
    failed with EPERM.
 
+   Read workers, on the profile or the fallback, also get `-c approval_policy="never"`. With a
+   user config such as `approval_policy = "on-request"` and `approvals_reviewer = "auto_review"`,
+   the model may run a command with `sandbox_permissions: "require_escalated"` once the reviewer
+   approves it, which is a command outside the sandbox. A read worker never needs that, so it may
+   not ask. Write workers keep the user's approval policy: whether committing in a worktree under
+   `workspace-write` ever needs an escalation has not been established, and pinning `never` there
+   could turn such a commit into a failure.
+
    Without `--sandbox`, the worker is read-only only if Codex applies the profile; a Codex that
    ignored it would run with the user's default permissions, which may be writable. So before
    its first launch the wrapper proves the profile with `codex sandbox <profile arguments> --
    node -e <probe>`, in the worktree and with the same `TMPDIR`. The scratch directory must be
-   writable, the worktree must refuse a write with a permission error, and the probe must exit 0.
+   writable, the worktree must refuse a write with a permission error, Codex's
+   `CODEX_SANDBOX_NETWORK_DISABLED=1` marker must be set (plain `--sandbox read-only` has no network
+   either; an outbound connect under the profile failed with EPERM in testing), and the probe must
+   exit 0.
    The probe creates a randomly named file exclusively, so it never touches an existing one, and
    it runs after the wrapper's signal handlers are installed, so stopping the worker stops the
    probe. On any other outcome, including a probe that cannot run, the worker launches under
    plain `--sandbox read-only` instead. The attempt records `sandboxFallback`
-   (`checkout_writable`, `scratch_denied`, `scratch_inside_checkout`, or `probe_failed`), the run
-   gets a
+   (`checkout_writable`, `scratch_denied`, `scratch_inside_checkout`, `network_enabled`, or
+   `probe_failed`), the run gets a
    `task.sandbox_fallback` event, and the supervisor briefing marks the attempt, because its
    failing tests may be the missing temp directory. A config-level `sandbox_mode`, even
    `danger-full-access`, did not override the profile in testing on 0.169.0.

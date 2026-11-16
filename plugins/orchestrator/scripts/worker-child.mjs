@@ -63,6 +63,14 @@ const scratchDir = spec.sandbox === "read-only"
   ? fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "orch-worker-")))
   : null;
 
+// A read worker never needs to leave its sandbox, so it may not ask to: with a
+// user config such as `approval_policy = "on-request"` and an automatic approvals
+// reviewer, Codex lets the model run a command unsandboxed (`require_escalated`)
+// once the reviewer approves it, which would bypass the read-only boundary. Both
+// launch paths, the profile and the plain `--sandbox read-only` fallback, pin
+// `approval_policy="never"`, so an escalation request is refused outright.
+const READ_APPROVAL = ["-c", 'approval_policy="never"'];
+
 function readProfileArgs() {
   return [
     "-c",
@@ -94,7 +102,9 @@ function inside(parent, child) {
 // a probe that cannot run, falls back to plain `--sandbox read-only` and records
 // why; that is always safe and only costs the worker its temp directory. The
 // probe creates a randomly named file exclusively, so it never touches an
-// existing one, and counts only a permission error as "not writable".
+// existing one, and counts only a permission error as "not writable". It also
+// requires Codex's network-disabled marker, as plain `--sandbox read-only` has
+// no network either (checked by flag, so the probe itself sends nothing).
 const PROBE_SCRIPT = [
   'const fs = require("fs"), path = require("path");',
   "const [scratch, checkout, name] = process.argv.slice(1);",
@@ -102,7 +112,8 @@ const PROBE_SCRIPT = [
   '  try { fs.writeFileSync(file, "", { flag: "wx" }); } catch (error) {',
   '    return ["EPERM", "EACCES", "EROFS"].includes(error.code) ? false : `error:${error.code}`; }',
   "  fs.unlinkSync(file); return true; };",
-  "process.stdout.write(JSON.stringify({ scratch: writable(scratch), checkout: writable(checkout) }));"
+  "process.stdout.write(JSON.stringify({ scratch: writable(scratch), checkout: writable(checkout),",
+  '  network: process.env.CODEX_SANDBOX_NETWORK_DISABLED === "1" ? "off" : "on" }));'
 ].join("\n");
 
 async function probeReadProfile() {
@@ -142,8 +153,11 @@ async function probeReadProfile() {
     observed = null;
   }
   const clean = !result.error && result.code === 0 && !result.signal;
-  if (clean && observed?.scratch === true && observed?.checkout === false) {
+  if (clean && observed?.scratch === true && observed?.checkout === false && observed?.network === "off") {
     return null;
+  }
+  if (clean && observed?.scratch === true && observed?.checkout === false && observed?.network === "on") {
+    return { reason: "network_enabled", message: "" };
   }
   if (clean && observed && observed.checkout === true) {
     return { reason: "checkout_writable", message: "" };
@@ -160,10 +174,12 @@ async function probeReadProfile() {
 }
 
 function sandboxArgs() {
-  if (!scratchDir || sandboxFallback) {
+  if (!scratchDir) {
     return ["--sandbox", spec.sandbox];
   }
-  return readProfileArgs();
+  return sandboxFallback
+    ? ["--sandbox", spec.sandbox, ...READ_APPROVAL]
+    : [...readProfileArgs(), ...READ_APPROVAL];
 }
 
 writeStatus({ status: "running" });
