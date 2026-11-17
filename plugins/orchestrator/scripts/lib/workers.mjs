@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { resolveExecutable } from "./exec.mjs";
+import { resolveExecutable, signalProcessGroup } from "./exec.mjs";
 import { requireLane } from "./lanes.mjs";
 import {
   AnswerSavedError,
@@ -572,8 +572,9 @@ export function launchTaskWorker(
       if (runner) {
         try {
           stopTaskWorker({ runner });
-        } catch {
-          // A worker that cannot be stopped is reported by its own status file.
+        } catch (stopError) {
+          // Never silently: this worker may still be running, untracked.
+          error.message += ` The spawned worker could not be stopped (wrapper pid ${runner.pid}): ${stopError.message}`;
         }
       }
     }
@@ -645,6 +646,7 @@ function awaitingAnswer(task) {
 export function pollRunWorkers(cwd, runId, { now = Date.now() } = {}) {
   const run = loadRun(cwd, runId);
   const updates = [];
+  const failures = [];
   for (const listed of Object.values(run.tasks)) {
     // Only an active or paused task has anything to collect. Skipping the rest
     // without a reload keeps a poll at one run load plus one per active task.
@@ -654,12 +656,29 @@ export function pollRunWorkers(cwd, runId, { now = Date.now() } = {}) {
     // Re-read an active task: a concurrent `run poll` or `run wait` may have
     // collected it since the run was loaded, and collecting it twice would fail.
     const task = loadRun(cwd, runId).tasks[listed.id];
+    try {
+      pollTask(task);
+    } catch (error) {
+      if (error instanceof StaleRunnerError) {
+        continue;
+      }
+      // One task whose worker cannot be stopped (a refused group signal, say)
+      // must not keep the poll from collecting every other task.
+      failures.push(`${listed.id}: ${error.message}`);
+    }
+  }
+  if (failures.length) {
+    throw Object.assign(new Error(`Poll could not finish every task (${failures.join("; ")}).`), { updates });
+  }
+  return updates;
+
+  function pollTask(task) {
     if (task?.status === "needs_input") {
       updates.push(awaitingAnswer(task));
-      continue;
+      return;
     }
     if (!task || !["dispatching", "running"].includes(task.status)) {
-      continue;
+      return;
     }
     const attempt = task.attempts.at(-1);
     const statusFile = attempt.runner?.statusFile;
@@ -683,7 +702,7 @@ export function pollRunWorkers(cwd, runId, { now = Date.now() } = {}) {
         waiting: true,
         ...overLimitFields(cwd, runId, task, attempt, now)
       });
-      continue;
+      return;
     }
     // Every write below is checked against the runner this poll read: if a
     // concurrent poll collected it and `run answer` attached a resumed runner in
@@ -726,7 +745,7 @@ export function pollRunWorkers(cwd, runId, { now = Date.now() } = {}) {
           ...overLimit,
           ...(fellBack ? { changed: true } : {})
         });
-        continue;
+        return;
       }
       if (status.status === "cancelled") {
         const cancelled = cancelTask(
@@ -744,7 +763,7 @@ export function pollRunWorkers(cwd, runId, { now = Date.now() } = {}) {
           threadId: status.threadId,
           exitCode: status.exitCode
         });
-        continue;
+        return;
       }
       if (status.status === "completed" && fs.existsSync(attempt.runner.lastMessageFile)) {
         const recorded = recordTaskResult(cwd, runId, task.id, {
@@ -765,7 +784,7 @@ export function pollRunWorkers(cwd, runId, { now = Date.now() } = {}) {
           ...(recorded.task.result?.inputCapReached ? { inputCapReached: true } : {}),
           ...(status.resumeFallback ? { resumeFallback: status.resumeFallback } : {})
         });
-        continue;
+        return;
       }
       // A runner launched by `run answer` resumes an attempt that has already
       // worked, so its failure is never a launch rejection of the attempt.
@@ -774,7 +793,7 @@ export function pollRunWorkers(cwd, runId, { now = Date.now() } = {}) {
         : null;
       if (unavailable) {
         updates.push(substituteUnavailableModel(cwd, runId, task, attempt, status, unavailable));
-        continue;
+        return;
       }
       const error = status.error
         || tail(attempt.runner.errorFile)
@@ -802,12 +821,11 @@ export function pollRunWorkers(cwd, runId, { now = Date.now() } = {}) {
       });
     } catch (error) {
       if (error instanceof StaleRunnerError) {
-        continue;
+        return;
       }
       throw error;
     }
   }
-  return updates;
 }
 
 /**
@@ -934,8 +952,9 @@ export function answerTaskWorker(
       if (runner) {
         try {
           stopTaskWorker({ runner });
-        } catch {
-          // A worker that cannot be stopped is reported by its own status file.
+        } catch (stopError) {
+          // Never silently: this worker may still be running, untracked.
+          error.message += ` The spawned worker could not be stopped (wrapper pid ${runner.pid}): ${stopError.message}`;
         }
       }
     }
@@ -952,22 +971,10 @@ function stopGroup(pid, signal = "SIGTERM", startedAt = null) {
   if (processAlive(pid) && !sameProcess(pid, startedAt)) {
     return;
   }
-  try {
-    process.kill(-pid, signal);
-  } catch (error) {
-    // Darwin returns EPERM for a group containing only unreaped zombies.
-    // Those cannot mutate anything; do not confuse them with a denied signal
-    // to live descendants. A failed inspection must preserve the obligation.
-    if (error.code === "EPERM" && process.platform === "darwin") {
-      const members = execFileSync("/bin/ps", ["-axo", "pgid=,stat="], {
-        encoding: "utf8", timeout: 2000, killSignal: "SIGKILL",
-        stdio: ["ignore", "pipe", "ignore"]
-      }).trim().split("\n").map((line) => line.trim().split(/\s+/))
-        .filter(([group]) => Number(group) === pid);
-      if (members.every(([, state]) => state?.startsWith("Z"))) return;
-    }
-    // A denied group signal is not discharged by an already-absent leader.
-    if (error.code !== "ESRCH") throw error;
+  // A denied group signal, or a failed inspection of one, throws and so
+  // preserves the obligation; an already-absent group still gets its leader
+  // signalled on its own.
+  if (!signalProcessGroup(pid, signal)) {
     stopPid(pid);
   }
 }
@@ -993,20 +1000,37 @@ function stopPid(pid) {
  */
 export function cancelWorkers(cwd, runId, taskId, reason) {
   const pick = (run) => taskHistory(run).filter((task) => !taskId || task.id === taskId);
+  let result;
+  let failure = null;
   try {
-    return taskId ? cancelTask(cwd, runId, taskId, reason) : cancelRun(cwd, runId, reason);
-  } finally {
-    // Also when the cancellation was saved but a later step (its event) failed.
-    // Every cancelled attempt, not only the latest: a retry launched since the
-    // cancellation was saved hides a worker that attached to the one before.
-    for (const task of pick(loadRun(cwd, runId))) {
-      for (const attempt of task.attempts) {
-        if (attempt.status === "cancelled") {
+    result = taskId ? cancelTask(cwd, runId, taskId, reason) : cancelRun(cwd, runId, reason);
+  } catch (error) {
+    failure = error;
+  }
+  // Also when the cancellation was saved but a later step (its event) failed.
+  // Every cancelled attempt, not only the latest: a retry launched since the
+  // cancellation was saved hides a worker that attached to the one before.
+  // One worker that cannot be stopped must not leave the others running.
+  const unstopped = [];
+  for (const task of pick(loadRun(cwd, runId))) {
+    for (const attempt of task.attempts) {
+      if (attempt.status === "cancelled") {
+        try {
           stopLiveTaskWorker(attempt);
+        } catch (error) {
+          unstopped.push(`${task.id} ${attempt.id}: ${error.message}`);
         }
       }
     }
   }
+  if (failure) {
+    if (unstopped.length) failure.message += ` Workers not stopped: ${unstopped.join("; ")}.`;
+    throw failure;
+  }
+  if (unstopped.length) {
+    throw new Error(`Cancellation saved, but these workers could not be stopped: ${unstopped.join("; ")}.`);
+  }
+  return result;
 }
 
 /**

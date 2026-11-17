@@ -563,20 +563,19 @@ if (commitError) {
   errors.write(`\n[orchestrator] ${commitError}\n`);
 }
 
-if (result.error || commitError) {
-  writeStatus({
-    status: "failed",
-    finishedAt: new Date().toISOString(),
-    error: result.error?.message ?? commitError
-  });
-} else {
-  writeStatus({
-    status: stopping ? "cancelled" : result.code === 0 ? "completed" : "failed",
-    finishedAt: new Date().toISOString(),
-    exitCode: result.code,
-    signal: result.signal
-  });
-}
+// Finish this wrapper's own cleanup before publishing the final status. A
+// final status carrying the commit's group-cleanup obligation tells a poll to
+// SIGKILL this whole group; published first, it could kill the wrapper while
+// it was still removing its scratch directory or flushing its logs.
+// The outcome is fixed here: a stop arriving during cleanup must not turn a
+// finished worker into a cancelled one.
+const finalStatus = result.error || commitError
+  ? { status: "failed", error: result.error?.message ?? commitError }
+  : {
+      status: stopping ? "cancelled" : result.code === 0 ? "completed" : "failed",
+      exitCode: result.code,
+      signal: result.signal
+    };
 finishScratch();
-output.end();
-errors.end();
+await Promise.all([output, errors].map((stream) => new Promise((resolve) => stream.end(resolve))));
+writeStatus({ ...finalStatus, finishedAt: new Date().toISOString() });

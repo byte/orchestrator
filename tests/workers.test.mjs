@@ -1179,6 +1179,56 @@ test("the pool runs independent ready tasks in separate detached worktrees", asy
   }
 });
 
+test("one worker that cannot be stopped does not leave the run's other workers running", async () => {
+  const root = repo();
+  const id = "run-partial-stop";
+  createRun(root, { id, lane: "api", objective: "Inspect in parallel", maxWorkers: 2, workerModel: "sol", reasoningEffort: "high" });
+  replacePlan(root, id, [
+    { id: "held", title: "Held", objective: "Held", kind: "read" },
+    { id: "free", title: "Free", objective: "Free", kind: "read" }
+  ]);
+  checkpointPlan(root, id);
+  const held = launchTaskWorker(root, id, "held", { constraints: [] }, { codexCommand: [process.execPath, slowFixture] });
+  checkpointPlan(root, id);
+  const free = launchTaskWorker(root, id, "free", { constraints: [] }, { codexCommand: [process.execPath, slowFixture] });
+  const childOf = async (statusFile) => {
+    for (let index = 0; index < 200; index += 1) {
+      try {
+        const status = JSON.parse(fs.readFileSync(statusFile, "utf8"));
+        if (status.childPid) return status.childPid;
+      } catch { /* Not written yet. */ }
+      await new Promise((resolve) => setTimeout(resolve, 40));
+    }
+    throw new Error("worker never started Codex");
+  };
+  const heldChild = await childOf(held.runner.statusFile);
+  await childOf(free.runner.statusFile);
+  // Every signal to the held worker's wrapper or Codex group is refused.
+  const denied = new Set([held.runner.pid, -held.runner.pid, -heldChild]);
+  const kill = process.kill;
+  process.kill = function (pid, signal) {
+    if (signal !== 0 && denied.has(pid)) {
+      throw Object.assign(new Error("injected signal denial"), { code: "EPERM" });
+    }
+    return kill.call(this, pid, signal);
+  };
+  try {
+    assert.throws(() => cancelWorkers(root, id, null, "stop everything"),
+      /could not be stopped: held .*injected signal denial/);
+  } finally {
+    process.kill = kill;
+  }
+  try {
+    assert.equal(loadRun(root, id).status, "cancelled", "the cancellation itself was saved");
+    assert.ok(await exited(free.runner.pid, 5000), "the other worker was still stopped");
+    assert.equal(await exited(held.runner.pid, 100), false, "the denied worker is reported, not assumed gone");
+  } finally {
+    for (const pid of [-heldChild, -held.runner.pid]) {
+      try { process.kill(pid, "SIGKILL"); } catch { /* Already gone. */ }
+    }
+  }
+});
+
 /** Wait for a runner's status file to reach a terminal state. */
 async function runnerDone(statusFile) {
   for (let index = 0; index < 200; index += 1) {

@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -18,6 +18,43 @@ export function resolveExecutable(command, cwd = process.cwd()) {
     }
   }
   throw new Error(`Executable "${command}" was not found in absolute PATH entries.`);
+}
+
+/** Process-group states from `ps`, retried once: under load it can be slow. */
+function groupStates(pgid) {
+  let lastError;
+  for (const timeout of [5000, 15000]) {
+    try {
+      return execFileSync("/bin/ps", ["-axo", "pgid=,stat="], {
+        encoding: "utf8", timeout, killSignal: "SIGKILL",
+        stdio: ["ignore", "pipe", "ignore"]
+      }).trim().split("\n").map((line) => line.trim().split(/\s+/))
+        .filter(([group]) => Number(group) === pgid).map(([, state]) => state ?? "");
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw new Error(`could not inspect process group ${pgid}: ${lastError.message}`);
+}
+
+/**
+ * Signal a whole process group. Returns false when there is nothing left to
+ * signal: the group is gone, or (Darwin returns EPERM for this) it holds only
+ * unreaped zombies, which cannot mutate anything. A signal refused to any live
+ * member throws: the caller still owes that group's termination.
+ */
+export function signalProcessGroup(pgid, signal) {
+  try {
+    process.kill(-pgid, signal);
+    return true;
+  } catch (error) {
+    if (error.code === "ESRCH") return false;
+    if (error.code === "EPERM" && process.platform === "darwin" &&
+        groupStates(pgid).every((state) => state.startsWith("Z"))) {
+      return false;
+    }
+    throw error;
+  }
 }
 
 let gitExecutable;
@@ -49,9 +86,7 @@ export function execGit(args, { cwd, env = process.env, timeout = 30000, detache
           if (error.code !== "ESRCH") throw error;
         }
         if (reused) throw new Error("Git process-group identity may have been reused");
-        try { process.kill(-result.pid, "SIGKILL"); } catch (error) {
-          if (error.code !== "ESRCH") throw error;
-        }
+        signalProcessGroup(result.pid, "SIGKILL");
       } catch (error) {
         throw Object.assign(new Error(`Cannot establish Git termination; preserve the checkout for manual recovery: ${error.message}`), {
           gitMayBeRunning: true, cause: error
