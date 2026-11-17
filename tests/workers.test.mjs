@@ -1226,6 +1226,10 @@ test("one worker that cannot be stopped does not leave the run's other workers r
     for (const pid of [-heldChild, -held.runner.pid]) {
       try { process.kill(pid, "SIGKILL"); } catch { /* Already gone. */ }
     }
+    // The hard-killed read worker leaves its scratch for `run cleanup`; this test owns it.
+    await exited(held.runner.pid, 2000);
+    const scratch = JSON.parse(fs.readFileSync(held.runner.statusFile, "utf8")).scratchDir;
+    if (scratch) fs.rmSync(scratch, { recursive: true, force: true });
   }
 });
 

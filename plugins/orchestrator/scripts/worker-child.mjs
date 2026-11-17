@@ -27,7 +27,10 @@ const MISSING_THREAD = /no rollout found|thread\/resume failed|(?:thread|session
 
 const specPath = process.argv[2];
 const spec = JSON.parse(fs.readFileSync(specPath, "utf8"));
-const startedAt = new Date().toISOString();
+// When this process started, not when this line ran: identity checks compare
+// it with `ps`'s start time, and module loading on a loaded machine can take
+// long enough that a live wrapper would otherwise look like a reused pid.
+const startedAt = new Date(Date.now() - process.uptime() * 1000).toISOString();
 let threadId = null;
 let childPid = null;
 let childStartedAt = null;
@@ -581,11 +584,16 @@ const finalStatus = result.error || commitError
 finishScratch();
 // Bounded: a stream that already failed (a full disk, say) may never call
 // back, and the final status must still be written.
+let flushTimer;
 await Promise.race([
   Promise.all([output, errors].map((stream) => new Promise((resolve) => {
     stream.once("error", resolve);
     stream.end(resolve);
   }))),
-  new Promise((resolve) => setTimeout(resolve, 5000).unref())
+  // Not unref'd: with a stream that will never call back, this timer is all
+  // that keeps the process alive until the final status below is written.
+  // Cleared once the flush wins, so a finished wrapper exits at once.
+  new Promise((resolve) => { flushTimer = setTimeout(resolve, 5000); })
 ]);
+clearTimeout(flushTimer);
 writeStatus({ ...finalStatus, finishedAt: new Date().toISOString() });
