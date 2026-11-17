@@ -1034,6 +1034,11 @@ export function stopTaskWorker(attempt) {
     status = current();
     if (!TERMINAL_RUNNER_STATUSES.has(status?.status)) {
       stopGroup(status?.childPid, "SIGKILL", status?.childStartedAt);
+      // A wrapper that ignored SIGTERM this long is stuck (in a git command a
+      // worker's file blocks, say): kill it and what it runs, its own group.
+      if (Number.isInteger(runner.pid) && sameProcess(runner.pid, status?.startedAt ?? runner.launchedAt)) {
+        stopGroup(runner.pid, "SIGKILL", status?.startedAt ?? runner.launchedAt);
+      }
     }
   }
   atomicWrite(

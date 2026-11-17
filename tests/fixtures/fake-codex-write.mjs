@@ -29,6 +29,11 @@ process.stdin.on("end", () => {
       fs.writeFileSync(hook, `#!/bin/sh\necho ${name} >> ${JSON.stringify(hooks)}\n`, { mode: 0o755 });
     }
   }
+  // --fifo leaves a FIFO named src/.gitignore, which any git command that reads
+  // ignore rules there blocks on.
+  if (args.includes("--fifo")) {
+    execFileSync("mkfifo", [path.join(process.cwd(), "src", ".gitignore")]);
+  }
   if (!args.includes("--no-commit")) {
     execFileSync("git", ["add", "src/generated.js"], { cwd: process.cwd() });
     execFileSync("git", ["commit", "--quiet", "-m", "Add generated module"], {

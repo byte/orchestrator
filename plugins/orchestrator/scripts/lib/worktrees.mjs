@@ -293,6 +293,36 @@ export function inspectTaskWorktree(task, attempt, { cwd = null } = {}) {
 }
 
 /**
+ * Declared paths that land in `.orchestrator/local/` through an alias: the
+ * filesystem, not the spelling, decides where a path goes, and on a
+ * case-insensitive volume a case or Unicode variant (`.orcheſtrator`) is the
+ * same directory.
+ */
+function reachesLocalState(cwd, files) {
+  let local;
+  try {
+    local = fs.statSync(localDir(cwd));
+  } catch {
+    return [];
+  }
+  return files.filter((file) => {
+    const parts = file.split("/");
+    for (let depth = 1; depth < parts.length; depth += 1) {
+      let stat;
+      try {
+        stat = fs.statSync(path.join(cwd, ...parts.slice(0, depth)));
+      } catch {
+        return false;
+      }
+      if (stat.dev === local.dev && stat.ino === local.ino) {
+        return true;
+      }
+    }
+    return false;
+  }).sort();
+}
+
+/**
  * Paths in the main checkout the cherry-pick could replace without git
  * stopping it: git treats ignored files as expendable, so an ignored file at a
  * path a worker adds, or at one of its parent directories, would be lost. Every
@@ -362,6 +392,13 @@ export function integrateTaskWorktree(cwd, run, task, attempt, { operationId, be
     throw new WorktreeOperationError(
       `The main checkout must be clean before integration: ${dirt.join(", ")}.`,
       { reasonCode: "dirty_checkout", signals: ["dirty_checkout"] }
+    );
+  }
+  const aliased = reachesLocalState(cwd, inspection.files);
+  if (aliased.length) {
+    throw new WorktreeOperationError(
+      `Integration would write the orchestrator's local state through ${aliased.join(", ")}.`,
+      { reasonCode: "scope_violation", signals: ["scope_violation"] }
     );
   }
   const unprotected = untrackedInTheWay(cwd, inspection.files);

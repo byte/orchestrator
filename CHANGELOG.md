@@ -133,6 +133,11 @@ Fixes:
   process started then (`ps` start time), so a reused pid is neither taken
   for a live worker nor signalled. The wrapper kills its running child's
   group whenever it exits, including on an uncaught error.
+- Integration refuses a path that reaches `.orchestrator/local/` through a
+  case or Unicode alias (checked on the filesystem, not by spelling). The
+  filter override runs `/bin/cat`, not `cat` from PATH. A cancel kills a
+  wrapper still stuck after its grace period (in a git command a worker's
+  FIFO blocks, say) together with what it runs.
 - Status writes are numbered, so a poll holding an older snapshot cannot save
   it over a newer one (a discarded thread over the answer's fresh fallback).
 - A launch whose briefing cannot be rendered leaves the task pending, and a

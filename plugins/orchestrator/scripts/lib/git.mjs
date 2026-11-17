@@ -85,9 +85,11 @@ export function worktreeGitEnv(worktreePath, gitDir) {
     ["status.submoduleSummary", "false"],
     ["commit.gpgsign", "false"],
     ...definedFilterDrivers(gitDir).flatMap((name) => [
-      [`filter.${name}.clean`, "cat"],
-      [`filter.${name}.smudge`, "cat"],
-      [`filter.${name}.process`, "cat"],
+      // An absolute path: a bare `cat` would be looked up on PATH, which may
+      // hold a relative entry that finds one the worker wrote.
+      [`filter.${name}.clean`, "/bin/cat"],
+      [`filter.${name}.smudge`, "/bin/cat"],
+      [`filter.${name}.process`, "/bin/cat"],
       [`filter.${name}.required`, "false"]
     ])
   ];

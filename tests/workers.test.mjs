@@ -1058,7 +1058,16 @@ test("run cleanup leaves a cancelled task alone while its worker is still runnin
   assert.equal(fs.existsSync(launched.worktree.path), false);
 });
 
-test("a recorded pid that now belongs to another process is neither taken for the worker nor signalled", async () => {
+const psWorks = (() => {
+  try {
+    execFileSync("ps", ["-o", "lstart=", "-p", String(process.pid)], { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+})();
+
+test("a recorded pid that now belongs to another process is neither taken for the worker nor signalled", { skip: !psWorks && "ps is not available here" }, async () => {
   const root = repo();
   plan(root, "run-pid-reuse");
   checkpointPlan(root, "run-pid-reuse");
@@ -1125,6 +1134,72 @@ test("a wrapper that dies after starting Codex takes Codex's group with it", asy
     }
   }
 });
+
+test("cancelling a wrapper stuck in its commit kills it and the git it runs", async () => {
+  const root = repo();
+  plan(root, "run-stuck-commit");
+  checkpointPlan(root, "run-stuck-commit");
+  const launched = launchTaskWorker(root, "run-stuck-commit", "build", { constraints: [] }, {
+    codexCommand: [process.execPath, writeFixture, "--no-commit", "--fifo"]
+  });
+  // Codex finishes; the wrapper's `git add -A` then blocks reading the FIFO.
+  let status;
+  for (let index = 0; index < 200 && !status?.threadId; index += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    status = fs.existsSync(launched.runner.statusFile) && JSON.parse(fs.readFileSync(launched.runner.statusFile, "utf8"));
+  }
+  await new Promise((resolve) => setTimeout(resolve, 1000));
+  try {
+    cancelWorkers(root, "run-stuck-commit", "build", "user stopped it");
+    assert.ok(await exited(launched.runner.pid, 2000), "the stuck wrapper was killed");
+  } finally {
+    try {
+      process.kill(-launched.runner.pid, "SIGKILL");
+    } catch {
+      // Already gone.
+    }
+  }
+});
+
+for (const alias of [".ORCHESTRATOR/LOCAL", ".orche\u017Ftrator/local"]) {
+test(`integration refuses a path that reaches the orchestrator's local state through an alias (${alias})`, (t) => {
+  const root = repo();
+  fs.mkdirSync(path.join(root, ".orchestrator", "local"), { recursive: true });
+  let sameDirectory = false;
+  try {
+    sameDirectory = fs.statSync(path.join(root, alias)).ino === fs.statSync(path.join(root, ".orchestrator", "local")).ino;
+  } catch {
+    sameDirectory = false;
+  }
+  if (!sameDirectory) {
+    t.skip("this filesystem does not alias the name");
+    return;
+  }
+  plan(root, "run-alias");
+  checkpointPlan(root, "run-alias");
+  const dispatch = claimTask(root, "run-alias", "build", { constraints: [] });
+  let run = loadRun(root, "run-alias");
+  const worktree = createTaskWorktree(root, run, run.tasks.build, run.tasks.build.attempts.at(-1));
+  // Committed under the alias spelling, as the wrapper's git add would.
+  const file = `${alias}/injected.json`;
+  const blob = execFileSync("git", ["hash-object", "-w", "--stdin"], { cwd: worktree.path, input: "worker payload\n", encoding: "utf8" }).trim();
+  git(worktree.path, ["update-index", "--add", "--cacheinfo", `100644,${blob},${file}`]);
+  git(worktree.path, ["commit", "--quiet", "-m", "state"]);
+  git(worktree.path, ["checkout", "HEAD", "--", file]);
+  reportFiles(root, "run-alias", dispatch.attemptId, [file]);
+  run = loadRun(root, "run-alias");
+  const task = run.tasks.build;
+  task.scope = ["**"];
+  task.attempts.at(-1).worktree = worktree;
+  // The case alias is already out of scope at inspection; the Unicode alias
+  // passes inspection and is caught by the filesystem check.
+  assert.throws(
+    () => integrateTaskWorktree(root, run, task, task.attempts.at(-1)),
+    alias.startsWith(".ORCH") ? /did not pass integration inspection/ : /local state through/
+  );
+  assert.equal(fs.existsSync(path.join(root, ".orchestrator", "local", "injected.json")), false);
+});
+}
 
 async function exited(pid, ms = 3000) {
   const deadline = Date.now() + ms;
