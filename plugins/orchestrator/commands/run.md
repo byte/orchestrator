@@ -30,6 +30,12 @@ as user pins, not suggestions.
 Inspect the relevant repository guidance and implementation before planning. Keep this inspection
 in the main thread so the plan benefits from the user's conversation context.
 
+Once the lane is known, run its definition-of-done check (or the repository's nearest verification,
+such as its test command) on the current head before planning. Workers are told to meet it, so a
+check that already fails sends every worker to ask for files outside its scope or report a failure
+that is not theirs. If it fails, fix it first as its own task when the fix is inside the lane, or
+tell the user and agree how workers should verify instead; then say so in each task's acceptance.
+
 ### Resolving the lane
 
 A lane is a durable write boundary, not a form the user must fill in first. Resolve it in this
@@ -433,6 +439,24 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" run integrate <run-id> <task-id> \
   --json
 ```
 
+If review finds the work wrong (a failing check, a missed acceptance criterion, a defect you can
+reproduce), reject it instead of integrating:
+
+```bash
+node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" run verify <run-id> <task-id> \
+  --verdict fail \
+  --evidence "<the input, what it returned, and what was expected>" \
+  --json
+```
+
+The attempt ends as `verification_failed`, and `run retry --note` resumes the worker's thread in
+the same worktree with your evidence, as for a read task. `--verdict pass` is refused on a write
+task: integration is the only way one completes. Keep `run decide` for integration failures and
+explicit policy or authority dispositions, not for a failed review.
+
+Each `--evidence`, `--decision`, `--risk`, `--next`, `--scope`, `--constraint`, and
+`--grant-scope` value is one entry, commas included; repeat the flag for several entries.
+
 Integration cherry-picks the task commits onto the supervisor branch. Conflicts are aborted and
 reported; never resolve them by silently discarding another worker's change.
 
@@ -523,7 +547,9 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" run finalize <run-id> \
 
 Finalization refuses a dirty checkout, the wrong branch, branch drift outside the run, incomplete
 tasks, or missing evidence. Use `--verdict fail` when the combined checks fail, then replan or
-report the blocker. Only report success after the run status is `completed`.
+report the blocker. The runtime does not run the lane's definition of done for you: give `pass` only
+when it holds, and never when it fails for a reason you have not settled with the user. Only report
+success after the run status is `completed`.
 
 Report the objective, task outcomes, important decisions, exact verification evidence, commits if
 created, and any residual risk. Distinguish built, verified, and unverified work.

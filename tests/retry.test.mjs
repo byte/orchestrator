@@ -316,13 +316,18 @@ test("a warm retry resumes the thread with explicit model, effort, and sandbox i
   const threadId = task.attempts[0].threadId;
   assert.match(threadId, /^thread-fresh-/);
 
-  // A write task must pass integration, so the supervisor rejects it by disposition.
-  recordTaskDisposition(root, "run-resume", "work", {
-    terminalOutcome: "policy_refused",
-    action: "refuse",
-    reasonCode: "policy_boundary",
-    evidence: ["notes must not mention fresh starts"]
+  // A write task passes only through integration, but review can reject it.
+  assert.throws(
+    () => verifyTask(root, "run-resume", "work", { verdict: "pass", evidence: ["looks right"] }),
+    /must pass worktree integration, not direct verification\. To reject it on review, use `--verdict fail`/
+  );
+  const rejected = verifyTask(root, "run-resume", "work", {
+    verdict: "fail",
+    evidence: ["notes must not mention fresh starts, as the objective says"]
   });
+  assert.equal(rejected.task.status, "failed");
+  assert.equal(rejected.task.attempts[0].outcome.terminalOutcome, "verification_failed");
+  assert.equal(rejected.task.attempts[0].outcome.reasonCode, "supervisor_verification_failed");
   retryTask(root, "run-resume", "work", { note: "Record that you resumed." });
   checkpointPlan(root, "run-resume");
   const second = launchTaskWorker(root, "run-resume", "work", lane, { codexCommand: command });
@@ -351,7 +356,7 @@ test("a warm retry resumes the thread with explicit model, effort, and sandbox i
   assertLockedDown(argv);
   assert.deepEqual(argv.slice(-2), [threadId, "-"]);
   assert.match(resumed.prompt, /## Previous attempt/);
-  assert.match(resumed.prompt, /notes must not mention fresh starts/);
+  assert.match(resumed.prompt, /notes must not mention fresh starts, as the objective says/);
   assert.match(resumed.prompt, /Record that you resumed\./);
 
   // Both attempts' commits are in the reused worktree and visible to inspection.
@@ -495,6 +500,16 @@ test("runs saved before warm retries existed still retry, warm when they can", (
   assert.equal(second.retry.resumeThreadId, "thread-old");
   assert.match(second.briefing, /old evidence/);
   assert.equal(loadRun(root, "run-old-state").version, 6);
+});
+
+test("retrying a reported task points at review rejection and the conflict disposition", () => {
+  const root = repo();
+  plan(root, "run-retry-hint", { kind: "write" });
+  reportedAttempt(root, "run-retry-hint");
+  const refused = runCli(root, ["run", "retry", "run-retry-hint", "work"]);
+  assert.equal(refused.code, 1);
+  assert.match(refused.stderr, /run verify run-retry-hint work --verdict fail --evidence <what is wrong>/);
+  assert.match(refused.stderr, /--reason-code integration_conflict/);
 });
 
 test("a warm retry in a reused worktree integrates without redeclaring its predecessor's files", () => {

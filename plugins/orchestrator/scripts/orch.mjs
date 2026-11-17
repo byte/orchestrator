@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 
-import { parseArgs, splitList } from "./lib/args.mjs";
+import { parseArgs, repeatedValues, splitList } from "./lib/args.mjs";
 import {
   createProvisionalGuidancePolicy,
   deriveReviewedGuidanceSources
@@ -341,8 +341,8 @@ function commandLane(argv, cwd) {
   if (action === "add") {
     const lane = addLane(cwd, name, {
       description: options.description ?? "",
-      scope: splitList(options.scope),
-      constraints: splitList(options.constraint),
+      scope: repeatedValues(options.scope),
+      constraints: repeatedValues(options.constraint),
       done: options.done ?? ""
     });
     return options.json ? emitJson(lane) : emit(renderLanes([lane]));
@@ -710,9 +710,9 @@ function commandRun(argv, cwd) {
   if (action === "checkpoint") {
     const checkpoint = addCheckpoint(cwd, runId, {
       summary: options.summary,
-      decisions: splitList(options.decision),
-      risks: splitList(options.risk),
-      next: splitList(options.next)
+      decisions: repeatedValues(options.decision),
+      risks: repeatedValues(options.risk),
+      next: repeatedValues(options.next)
     });
     return options.json ? emitJson(checkpoint) : emit(`Checkpoint recorded for ${runId}: ${checkpoint.summary}`);
   }
@@ -760,7 +760,7 @@ function commandRun(argv, cwd) {
     }
     const result = verifyTask(cwd, runId, taskId, {
       verdict: options.verdict,
-      evidence: splitList(options.evidence)
+      evidence: repeatedValues(options.evidence)
     });
     return options.json
       ? emitJson(result)
@@ -779,7 +779,7 @@ function commandRun(argv, cwd) {
       action: options.action,
       reasonCode: options["reason-code"],
       provenance: options.provenance ?? "supervisor",
-      evidence: splitList(options.evidence)
+      evidence: repeatedValues(options.evidence)
     });
     return options.json
       ? emitJson(result)
@@ -814,7 +814,7 @@ function commandRun(argv, cwd) {
     }
     const run = loadRun(cwd, runId);
     const answered = answerTaskWorker(cwd, runId, taskId, requireLane(cwd, run.lane), {
-      grantScope: splitList(options["grant-scope"]),
+      grantScope: repeatedValues(options["grant-scope"]),
       deny: Boolean(options.deny),
       reply: options.reply ?? null,
       userApproved: Boolean(options["user-approved"])
@@ -887,7 +887,7 @@ function commandRun(argv, cwd) {
     const run = finalizeRun(cwd, runId, {
       verdict: options.verdict,
       summary: options.summary,
-      evidence: splitList(options.evidence)
+      evidence: repeatedValues(options.evidence)
     });
     return options.json
       ? emitJson(run)
@@ -923,7 +923,7 @@ function integrateCommand(cwd, runId, positionals, options) {
   const taskId = positionals[1];
   let result;
   try {
-    result = integrateRunTask(cwd, runId, taskId, { evidence: splitList(options.evidence) });
+    result = integrateRunTask(cwd, runId, taskId, { evidence: repeatedValues(options.evidence) });
   } catch (error) {
     if (error instanceof WorktreeOperationError && !loadRun(cwd, runId).pendingIntegration) {
       recordIntegrationDiagnostic(cwd, runId, taskId, {

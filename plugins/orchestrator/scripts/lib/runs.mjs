@@ -3094,8 +3094,14 @@ export function verifyTask(cwd, runId, taskId, { verdict, evidence = [] }) {
     if (task.status !== "reported") {
       throw new Error(`Task "${task.id}" cannot be verified from status "${task.status}".`);
     }
-    if (task.kind === "write" && currentAttempt(task).worktree) {
-      throw new Error(`Write task "${task.id}" must pass worktree integration, not direct verification.`);
+    // A write task passes only through worktree integration, but the supervisor
+    // may reject it on review: the attempt then ends as verification_failed and a
+    // retry resumes the worker in the same worktree with the evidence.
+    if (task.kind === "write" && normalizedVerdict === "pass" && currentAttempt(task).worktree) {
+      throw new Error(
+        `Write task "${task.id}" must pass worktree integration, not direct verification. ` +
+        "To reject it on review, use `--verdict fail` with the evidence."
+      );
     }
     const verification = {
       verdict: normalizedVerdict,
@@ -3377,9 +3383,10 @@ export function retryTask(cwd, runId, taskId, { note = null, fresh = false } = {
       throw new Error(
         `Task "${task.id}" cannot be retried from status "${task.status}".` +
         (task.status === "reported"
-          ? " A reported attempt stays integrable; to redo it instead (after an integration conflict, say), " +
-            `close it first: \`run decide ${run.id} ${task.id} --outcome integration_failed --action replan ` +
-            "--reason-code integration_conflict --evidence <why>`, then retry."
+          ? " A reported attempt stays integrable. To send it back after review, close it first with " +
+            `\`run verify ${run.id} ${task.id} --verdict fail --evidence <what is wrong>\`; after an ` +
+            `integration conflict, use \`run decide ${run.id} ${task.id} --outcome integration_failed ` +
+            "--action replan --reason-code integration_conflict --evidence <why>`. Then retry."
           : "")
       );
     }

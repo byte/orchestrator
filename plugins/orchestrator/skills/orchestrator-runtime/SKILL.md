@@ -108,6 +108,9 @@ All support `--json` where structured output is useful.
   does not remove the run objective, assignment, scope, constraints, acceptance criteria,
   dependency context, or other ordinary sections from the worker briefing.
 - A report is not completion. Verify read tasks directly; inspect and integrate write worktrees.
+  Reject a write task that fails review with `run verify --verdict fail --evidence ...`, then
+  `run retry --note`; it resumes in the same worktree. `--verdict pass` is refused on write tasks.
+- Every text or glob option value is one entry, commas included; repeat a flag for several.
 - Newly terminal attempts carry a versioned outcome separate from lifecycle state. Use `run decide`
   for explicit policy refusal, authority escalation, or a terminal integration failure; never infer
   policy or authority boundaries from worker prose.

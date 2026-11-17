@@ -61,6 +61,25 @@ export function parseArgs(
   return { options, positionals };
 }
 
+/**
+ * Values of a repeatable option, one entry per occurrence. Commas are kept:
+ * evidence, decisions, constraints, and globs such as `src/{a,b}.mjs` are
+ * free text, so only `--x a --x b` makes two entries.
+ */
+export function repeatedValues(value) {
+  if (value === undefined || value === null) {
+    return [];
+  }
+  const values = Array.isArray(value) ? value : [value];
+  return values
+    .map((entry) => String(entry).trim())
+    .filter(Boolean);
+}
+
+/**
+ * Identifier filters (run, task, sample, attempt ids and enum values) also
+ * accept a comma-separated list. Never use this for free text or globs.
+ */
 export function splitList(value) {
   if (value === undefined || value === null) {
     return [];

@@ -70,6 +70,53 @@ test("lanes round-trip through the CLI", () => {
   assert.equal(Object.hasOwn(shown, "threadId"), false);
 });
 
+test("free-text and glob options keep their commas", () => {
+  const root = repo();
+  runCli(root, [
+    "lane", "add", "api",
+    "--scope", "src/{a,b}.mjs",
+    "--scope", "test/**",
+    "--constraint", "No dependencies, no network"
+  ]);
+  const lane = JSON.parse(runCli(root, ["lane", "show", "api", "--json"]).stdout);
+  assert.deepEqual(lane.scope, ["src/{a,b}.mjs", "test/**"]);
+  assert.deepEqual(lane.constraints, ["No dependencies, no network"]);
+
+  runCli(root, [
+    "run", "create", "api", "--id", "run-commas", "--objective", "Keep commas",
+    "--model", "sol", "--effort", "high"
+  ]);
+  const planPath = writeResult(JSON.stringify({
+    tasks: [{ id: "review", title: "Review", objective: "Review request", kind: "read" }]
+  }));
+  runCli(root, ["run", "plan", "run-commas", "--plan-file", planPath]);
+  const checkpoint = JSON.parse(runCli(root, [
+    "run", "checkpoint", "run-commas", "--summary", "Ready, with commas",
+    "--decision", "Keep a, b, and c together",
+    "--decision", "Second decision",
+    "--risk", "f(x, y) may change",
+    "--next", "Launch, then wait",
+    "--json"
+  ]).stdout);
+  assert.deepEqual(checkpoint.decisions, ["Keep a, b, and c together", "Second decision"]);
+  assert.deepEqual(checkpoint.risks, ["f(x, y) may change"]);
+  assert.deepEqual(checkpoint.next, ["Launch, then wait"]);
+
+  const dispatch = JSON.parse(runCli(root, ["run", "claim", "run-commas", "review", "--json"]).stdout);
+  const resultPath = writeResult(
+    "Reviewed.\n\n## RESULT\nfiles_touched: none\ndecisions: none\nassumptions: none\nblockers: none\nconfidence: high\n"
+  );
+  runCli(root, [
+    "run", "report", "run-commas", "review", "--attempt", dispatch.attemptId, "--result-file", resultPath
+  ]);
+  const verified = JSON.parse(runCli(root, [
+    "run", "verify", "run-commas", "review", "--verdict", "fail",
+    "--evidence", "wordWrap('a b', 9) returned 'a\\nb', expected 'a b'",
+    "--json"
+  ]).stdout);
+  assert.deepEqual(verified.task.verification.evidence, ["wordWrap('a b', 9) returned 'a\\nb', expected 'a b'"]);
+});
+
 test("an unknown lane is an error that lists the known ones", () => {
   const root = repo();
   runCli(root, ["lane", "add", "api", "--scope", "src/**"]);
