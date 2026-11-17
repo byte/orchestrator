@@ -1,5 +1,5 @@
-export const REDACTION_VERSION = 2;
-export const SUPPORTED_REDACTION_VERSIONS = Object.freeze([1, REDACTION_VERSION]);
+export const REDACTION_VERSION = 3;
+export const SUPPORTED_REDACTION_VERSIONS = Object.freeze([1, 2, REDACTION_VERSION]);
 
 const RULES = Object.freeze([
   {
@@ -24,7 +24,7 @@ const RULES = Object.freeze([
   },
   {
     type: "aws_secret_key",
-    pattern: /\baws_secret_access_key\s*[:=]\s*["']?[A-Za-z0-9/+=]{32,}["']?/gi,
+    pattern: /\baws_secret_access_key\s*[:=]\s*(?:"(?:\\[\s\S]|[^"\\])*"|'(?:''|\\[\s\S]|[^'\\])*'|[A-Za-z0-9/+=]{32,})/gi,
     replacement: "aws_secret_access_key=<redacted:aws_secret_key>"
   },
   {
@@ -69,7 +69,7 @@ const RULES = Object.freeze([
   },
   {
     type: "credential",
-    pattern: /\b(api[_-]?key|access[_-]?token|auth[_-]?token|password|passwd|secret)\s*[:=]\s*["']?[A-Za-z0-9+/_=-]{8,}["']?/gi,
+    pattern: /\b(api[_-]?key|access[_-]?token|auth[_-]?token|password|passwd|secret|aws_secret_access_key)["']?\s*[:=]\s*(?:"(?:\\[\s\S]|[^"\\])*"|'(?:''|\\[\s\S]|[^'\\])*'|[A-Za-z0-9+/_=-]{8,})/gi,
     replacement: (match, key) => `${key}=<redacted:credential>`
   },
   {

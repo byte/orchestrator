@@ -15,8 +15,8 @@ test("redaction removes common secrets without retaining matched values", () => 
   const result = redactText(
     `OpenAI ${secret}; GitHub ${github}; password=hunterhunter; ${privateKey}`
   );
-  assert.equal(REDACTION_VERSION, 2);
-  assert.deepEqual(SUPPORTED_REDACTION_VERSIONS, [1, 2]);
+  assert.equal(REDACTION_VERSION, 3);
+  assert.deepEqual(SUPPORTED_REDACTION_VERSIONS, [1, 2, 3]);
   assert.doesNotMatch(result.text, /1234567890abcdefghijklmnop/);
   assert.doesNotMatch(result.text, /hunterhunter|secretmaterial/);
   assert.match(result.text, /<redacted:openai_key>/);
@@ -29,6 +29,20 @@ test("redaction removes common secrets without retaining matched values", () => 
     github_token: 1,
     credential: 1
   });
+});
+
+test("redaction consumes quoted credential keys and complete escaped values", () => {
+  const result = redactText([
+    '{"password":"canary_0123456789","api_key":"canary_9876543210"}',
+    '"secret": "punctuation ! and \\"escaped\\" tail"',
+    "'access_token': 'short'",
+    "password='it''s a YAML secret!'",
+    '"aws_secret_access_key": "canary with punctuation!"',
+    'ordinary_key="keep this"'
+  ].join("\n"));
+  assert.doesNotMatch(result.text, /canary|punctuation|escaped|tail|short|YAML/);
+  assert.match(result.text, /ordinary_key="keep this"/);
+  assert.equal(result.findings.credential, 6);
 });
 
 test("redaction removes PII and absolute home paths", () => {
