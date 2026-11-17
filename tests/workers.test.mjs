@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -460,29 +460,31 @@ test("a nested repository in a worker's worktree counts as changed, so cleanup k
   assert.equal(fs.readFileSync(path.join(nested, "value.txt"), "utf8"), "uncommitted work\n");
 });
 
-test("a worker's change to the orchestrator's local state is out of scope even under a scope that covers it", () => {
+for (const reserved of [".orchestrator/local/runs/victim/run.json", ".OrChEsTrAtOr/LOCAL/runs/victim/run.json"]) {
+test(`a worker's change to the orchestrator's local state is out of scope even under a scope that covers it (${reserved})`, () => {
   const root = repo();
   plan(root, "run-reserved");
   checkpointPlan(root, "run-reserved");
   const dispatch = claimTask(root, "run-reserved", "build", { constraints: [] });
   let run = loadRun(root, "run-reserved");
   const worktree = createTaskWorktree(root, run, run.tasks.build, run.tasks.build.attempts.at(-1));
-  write(worktree.path, ".orchestrator/local/runs/victim/run.json", "worker payload\n");
-  git(worktree.path, ["add", "-f", ".orchestrator/local/runs/victim/run.json"]);
+  write(worktree.path, reserved, "worker payload\n");
+  git(worktree.path, ["add", "-f", reserved]);
   git(worktree.path, ["commit", "--quiet", "-m", "state"]);
-  reportFiles(root, "run-reserved", dispatch.attemptId, [".orchestrator/local/runs/victim/run.json"]);
+  reportFiles(root, "run-reserved", dispatch.attemptId, inspectTaskWorktree(loadRun(root, "run-reserved").tasks.build, { ...loadRun(root, "run-reserved").tasks.build.attempts.at(-1), worktree }).files);
   run = loadRun(root, "run-reserved");
   const task = run.tasks.build;
   task.scope = ["**"];
   task.attempts.at(-1).worktree = worktree;
   const inspection = inspectTaskWorktree(task, task.attempts.at(-1));
-  assert.deepEqual(inspection.outOfScope, [".orchestrator/local/runs/victim/run.json"]);
+  assert.equal(inspection.outOfScope.length, 1);
   assert.equal(inspection.ready, false);
   assert.throws(
     () => integrateTaskWorktree(root, run, task, task.attempts.at(-1)),
     (error) => error.signals?.includes("scope_violation")
   );
 });
+}
 
 test("run integrate waits for another integration of the same checkout", () => {
   const root = repo();
@@ -943,6 +945,95 @@ test("cancelling stops a cancelled attempt's worker even after a retry launched 
       } catch {
         // Already gone.
       }
+    }
+  }
+});
+
+test("run cleanup leaves a cancelled task alone while its worker is still running", async () => {
+  const root = repo();
+  plan(root, "run-cleanup-live");
+  checkpointPlan(root, "run-cleanup-live");
+  const launched = launchTaskWorker(root, "run-cleanup-live", "build", { constraints: [] }, {
+    codexCommand: [process.execPath, slowFixture, "--delay=60000"]
+  });
+  // Cancelled as the worker attached: nothing has stopped it yet.
+  cancelTask(root, "run-cleanup-live", "build", "user stopped it");
+  try {
+    const result = runCli(root, ["run", "cleanup", "run-cleanup-live"]);
+    assert.notEqual(result.code, 0);
+    assert.match(result.stderr, /still running/);
+    assert.equal(fs.existsSync(launched.worktree.path), true);
+  } finally {
+    cancelWorkers(root, "run-cleanup-live", "build", "stop it");
+  }
+  assert.equal(runCli(root, ["run", "cleanup", "run-cleanup-live"]).code, 0);
+  assert.equal(fs.existsSync(launched.worktree.path), false);
+});
+
+test("a recorded pid that now belongs to another process is neither taken for the worker nor signalled", async () => {
+  const root = repo();
+  plan(root, "run-pid-reuse");
+  checkpointPlan(root, "run-pid-reuse");
+  const launched = launchTaskWorker(root, "run-pid-reuse", "build", { constraints: [] }, {
+    codexCommand: [process.execPath, slowFixture, "--delay=60000"]
+  });
+  let status;
+  while (!status?.childPid) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    status = fs.existsSync(launched.runner.statusFile) && JSON.parse(fs.readFileSync(launched.runner.statusFile, "utf8"));
+  }
+  process.kill(launched.runner.pid, "SIGKILL");
+  process.kill(-status.childPid, "SIGKILL");
+  // An unrelated process (its own group leader) now has the recorded pids.
+  const stranger = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { detached: true, stdio: "ignore" });
+  try {
+    const old = new Date(Date.now() - 3600 * 1000).toISOString();
+    fs.writeFileSync(launched.runner.statusFile, JSON.stringify({
+      ...status, pid: stranger.pid, startedAt: old, childPid: stranger.pid, childStartedAt: old
+    }));
+    pollRunWorkers(root, "run-pid-reuse");
+    assert.equal(loadRun(root, "run-pid-reuse").tasks.build.status, "failed", "the dead wrapper is noticed");
+    assert.ok(!(await exited(stranger.pid, 500)), "the unrelated process was not signalled");
+  } finally {
+    stranger.kill("SIGKILL");
+  }
+});
+
+test("a wrapper that dies after starting Codex takes Codex's group with it", async () => {
+  const root = repo();
+  plan(root, "run-wrapper-crash");
+  checkpointPlan(root, "run-wrapper-crash");
+  // Codex starts a process that ignores SIGTERM and holds no pipes, so only a
+  // group kill ends it; the wrapper's second status write fails (a full disk).
+  const pidFile = path.join(path.dirname(runFile(root, "run-wrapper-crash")), "descendant.pid");
+  const saved = process.env.NODE_OPTIONS;
+  process.env.NODE_OPTIONS = `--import=${path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "fail-status-write.mjs")}`;
+  let launched;
+  try {
+    launched = launchTaskWorker(root, "run-wrapper-crash", "build", { constraints: [] }, {
+      codexCommand: [process.execPath, slowFixture, "--delay=60000", `--descendant=${pidFile}`, "--quiet-descendant"]
+    });
+  } finally {
+    if (saved === undefined) {
+      delete process.env.NODE_OPTIONS;
+    } else {
+      process.env.NODE_OPTIONS = saved;
+    }
+  }
+  assert.ok(await exited(launched.runner.pid, 5000), "the wrapper died on the failed write");
+  assert.equal(JSON.parse(fs.readFileSync(launched.runner.statusFile, "utf8")).childPid, undefined, "Codex was never recorded");
+  // Codex is killed with the wrapper, before or after it started its process.
+  await new Promise((resolve) => setTimeout(resolve, 2000));
+  const descendant = fs.existsSync(pidFile) ? Number(fs.readFileSync(pidFile, "utf8")) : null;
+  try {
+    assert.ok(!descendant || await exited(descendant, 1000), `descendant ${descendant} outlived its wrapper`);
+  } finally {
+    try {
+      if (descendant) {
+        process.kill(descendant, "SIGKILL");
+      }
+    } catch {
+      // Already gone.
     }
   }
 });

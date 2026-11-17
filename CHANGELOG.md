@@ -121,6 +121,14 @@ Fixes:
   task's scope, so integration never writes the orchestrator's own state.
 - `run cancel` stops the live worker of every cancelled attempt of a task, not
   only the latest, so one that attached just before a retry is not missed.
+- The reserved `.orchestrator/local/` check ignores case, as a
+  case-insensitive filesystem does.
+- `run cleanup` leaves a task alone while any of its workers may still be
+  running (a cancelled task whose worker attached late).
+- A recorded wrapper or Codex pid is trusted only while it belongs to the
+  process started then (`ps` start time), so a reused pid is neither taken
+  for a live worker nor signalled. The wrapper kills its running child's
+  group whenever it exits, including on an uncaught error.
 - Status writes are numbered, so a poll holding an older snapshot cannot save
   it over a newer one (a discarded thread over the answer's fresh fallback).
 - A launch whose briefing cannot be rendered leaves the task pending, and a

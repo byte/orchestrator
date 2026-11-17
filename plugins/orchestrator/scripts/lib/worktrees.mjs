@@ -8,7 +8,9 @@ import { partitionByScope } from "./glob.mjs";
 import { effectiveTaskScope } from "./runs.mjs";
 import { localDir } from "./state.mjs";
 
-const RESERVED = /^\.orchestrator\/local(\/|$)/;
+// Case-insensitive: on a case-insensitive filesystem `.ORCHESTRATOR/LOCAL/`
+// is the same directory.
+const RESERVED = /^\.orchestrator\/local(\/|$)/i;
 
 function gitRaw(cwd, args, gitDir = null) {
   return execFileSync("git", gitDir ? args : [...SUPERVISOR_GIT_ARGS, ...args], {

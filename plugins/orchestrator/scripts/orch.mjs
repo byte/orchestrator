@@ -49,6 +49,7 @@ import {
 } from "./lib/runs.mjs";
 import {
   answerTaskWorker,
+  attemptLive,
   launchTaskWorker,
   pollRunWorkers,
   cancelWorkers,
@@ -895,7 +896,7 @@ function commandRun(argv, cwd) {
     const taskId = positionals[1];
     const removed = [];
     const { taken, refused } = takeWorktreesForRemoval(
-      cwd, runId, taskId, (attempt) => detachTaskWorktree(cwd, attempt)
+      cwd, runId, taskId, (attempt) => detachTaskWorktree(cwd, attempt), attemptLive
     );
     for (const { taskId: owner, attempt, trash } of taken) {
       if (trash) {

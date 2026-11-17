@@ -29,6 +29,20 @@ const spec = JSON.parse(fs.readFileSync(specPath, "utf8"));
 const startedAt = new Date().toISOString();
 let threadId = null;
 let childPid = null;
+let childStartedAt = null;
+// The detached group of the child running now (probe or Codex), until it exits.
+// However the wrapper itself exits (an uncaught error, a failed status write),
+// that group is killed, or nothing would ever stop it.
+let liveChildGroup = null;
+process.on("exit", () => {
+  if (liveChildGroup) {
+    try {
+      process.kill(-liveChildGroup, "SIGKILL");
+    } catch {
+      // Already gone.
+    }
+  }
+});
 let resumeFallback = null;
 let sandboxFallback = null;
 
@@ -44,7 +58,7 @@ function writeStatus(fields) {
   atomicWrite(spec.statusFile, {
     seq: statusSeq,
     pid: process.pid,
-    ...(childPid ? { childPid } : {}),
+    ...(childPid ? { childPid, childStartedAt } : {}),
     startedAt,
     threadId,
     ...(spec.resumeThreadId ? { resumeThreadId: spec.resumeThreadId } : {}),
@@ -162,6 +176,11 @@ async function probeReadProfile() {
     // whose wrapper died, and scratch cleanup waits for it.
     if (child.pid) {
       childPid = child.pid;
+      childStartedAt = new Date().toISOString();
+      liveChildGroup = child.pid;
+      child.on("exit", () => {
+        liveChildGroup = null;
+      });
       writeStatus({ status: currentStatus });
     }
     let settled = false;
@@ -392,6 +411,8 @@ function runCodex(resumeThreadId, input = prompt) {
     // Recorded at once: if the wrapper is killed before Codex reports its
     // thread, a poll or cancel still knows which group to stop.
     if (child.pid) {
+      childStartedAt = new Date().toISOString();
+      liveChildGroup = child.pid;
       writeStatus({ status: currentStatus });
     }
     let sawThread = false;
@@ -449,7 +470,10 @@ function runCodex(resumeThreadId, input = prompt) {
     // soon as it exits, not on `close`: a process still holding the pipes would
     // keep `close` from ever firing. With it gone, `close` follows with all of
     // stderr read.
-    child.on("exit", () => killGroup("SIGKILL"));
+    child.on("exit", () => {
+      killGroup("SIGKILL");
+      liveChildGroup = null;
+    });
     // `close` rather than `exit`: stderr must be fully read before deciding
     // whether a failed resume reported a missing thread.
     child.on("close", (code, signal) => resolve({ code, signal, sawThread, stderrText, replacedWithoutBriefing }));

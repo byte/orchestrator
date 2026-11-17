@@ -3258,9 +3258,10 @@ const CLEANABLE_TASK_STATUSES = new Set(["completed", "failed", "blocked", "canc
  * same lock before it looks for the worktree to reuse, and a claimed task is no
  * longer finished, so its worktree is never taken. Refusals (uncommitted work)
  * are returned rather than thrown, so one dirty worktree leaves no other
- * half-handled. The slow deletion of what was taken happens outside the lock.
+ * half-handled. A task with a live worker (`live`) is left alone. The slow
+ * deletion of what was taken happens outside the lock.
  */
-export function takeWorktreesForRemoval(cwd, runId, taskId, detach) {
+export function takeWorktreesForRemoval(cwd, runId, taskId, detach, live = () => false) {
   const id = assertId(runId, "run");
   const filePath = runFile(cwd, id);
   return withFileLock(filePath, () => {
@@ -3273,6 +3274,14 @@ export function takeWorktreesForRemoval(cwd, runId, taskId, detach) {
     const refused = [];
     for (const task of tasks) {
       if (!CLEANABLE_TASK_STATUSES.has(task.status)) {
+        continue;
+      }
+      // A cancelled task's worker can still be running (one attached as the
+      // cancellation was saved, until cancel's second pass stops it), and its
+      // worktree is shared by every warm attempt: leave the task alone.
+      const running = task.attempts.find((attempt) => live(attempt));
+      if (running) {
+        refused.push({ taskId: task.id, attemptId: running.id, error: "its worker is still running" });
         continue;
       }
       for (const attempt of task.attempts) {

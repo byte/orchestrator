@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -286,7 +286,7 @@ export function removeLeftoverScratch(cwd, runId, taskId, attemptId) {
         continue;
       }
       const scratch = typeof status.scratchDir === "string" ? status.scratchDir : null;
-      if (!scratch || processAlive(status.pid) || processAlive(status.childPid)) {
+      if (!scratch || sameProcess(status.pid, status.startedAt) || groupLive(status.childPid, status.childStartedAt)) {
         continue;
       }
       if (owned(scratch, entryPath)) {
@@ -309,6 +309,75 @@ function processAlive(pid) {
   } catch (error) {
     return error.code === "EPERM";
   }
+}
+
+/** When the process with this pid started, from `ps`, or null when that cannot be told. */
+function processStart(pid) {
+  try {
+    const out = execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], {
+      encoding: "utf8",
+      env: { ...process.env, LC_ALL: "C" },
+      stdio: ["ignore", "pipe", "ignore"]
+    }).trim();
+    const time = Date.parse(out);
+    return Number.isNaN(time) ? null : time;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Whether `pid` is still the process recorded as started at `startedAt`: a
+ * recorded pid can since belong to an unrelated process, and that one must
+ * not be taken for a live worker or signalled. Without a recorded time (an
+ * older status) or a readable start time, a live pid is taken as the same.
+ */
+function sameProcess(pid, startedAt) {
+  if (!processAlive(pid)) {
+    return false;
+  }
+  const started = processStart(pid);
+  return !startedAt || started === null || Math.abs(started - Date.parse(startedAt)) < 10000;
+}
+
+/**
+ * Whether the process group a recorded Codex leader started still exists. A
+ * pid is not reused while a group with that id has members, so with the
+ * leader dead any member left is one of ours; with a live leader it must be
+ * the same process.
+ */
+function groupLive(pid, startedAt) {
+  if (!Number.isInteger(pid) || pid <= 0) {
+    return false;
+  }
+  if (processAlive(pid)) {
+    return sameProcess(pid, startedAt);
+  }
+  try {
+    process.kill(-pid, 0);
+    return true;
+  } catch (error) {
+    return error.code === "EPERM";
+  }
+}
+
+/** Whether an attempt's worker (its wrapper, or what its Codex started) may still be running. */
+export function attemptLive(attempt) {
+  const runner = attempt?.runner;
+  if (!runner) {
+    return false;
+  }
+  let status = null;
+  try {
+    status = fs.existsSync(runner.statusFile) ? readJson(runner.statusFile) : null;
+  } catch {
+    status = null;
+  }
+  if (TERMINAL_RUNNER_STATUSES.has(status?.status)) {
+    return false;
+  }
+  return sameProcess(runner.pid, status?.startedAt ?? runner.launchedAt) ||
+    groupLive(status?.childPid, status?.childStartedAt);
 }
 
 function readJson(filePath) {
@@ -590,7 +659,8 @@ export function pollRunWorkers(cwd, runId, { now = Date.now() } = {}) {
     }
     const attempt = task.attempts.at(-1);
     const statusFile = attempt.runner?.statusFile;
-    const wrapperGone = () => Number.isInteger(attempt.runner?.pid) && !processAlive(attempt.runner.pid);
+    const wrapperGone = () => Number.isInteger(attempt.runner?.pid) &&
+      !sameProcess(attempt.runner.pid, attempt.runner.launchedAt);
     // A wrapper that died before writing any status (it could not start, say)
     // gets a failed one, or its task would wait forever.
     if (statusFile && !fs.existsSync(statusFile) && wrapperGone()) {
@@ -619,13 +689,13 @@ export function pollRunWorkers(cwd, runId, { now = Date.now() } = {}) {
       // kill) leaves "running" behind; read again in case it wrote one as it
       // exited, then treat it as failed instead of running forever.
       if (["starting", "running"].includes(status.status) && Number.isInteger(status.pid) &&
-          !processAlive(status.pid)) {
+          !sameProcess(status.pid, status.startedAt ?? attempt.runner?.launchedAt)) {
         status = readJson(statusFile);
         if (["starting", "running"].includes(status.status)) {
           status = { ...status, status: "failed", error: "The worker wrapper exited without a final status." };
           // Codex runs in its own group and outlives the wrapper; nothing else
           // would stop it once the task is failed and its slot is free.
-          stopGroup(status.childPid, "SIGKILL");
+          stopGroup(status.childPid, "SIGKILL", status.childStartedAt);
         }
       }
       const hadFallback = fallbackRecorded(attempt);
@@ -860,8 +930,13 @@ export function answerTaskWorker(
   }
 }
 
-function stopGroup(pid, signal = "SIGTERM") {
+function stopGroup(pid, signal = "SIGTERM", startedAt = null) {
   if (!Number.isInteger(pid) || pid <= 0) {
+    return;
+  }
+  // A live leader that is not the recorded one means the group is long gone
+  // (its id could not be reused otherwise): signal nothing.
+  if (processAlive(pid) && !sameProcess(pid, startedAt)) {
     return;
   }
   try {
@@ -946,7 +1021,7 @@ export function stopTaskWorker(attempt) {
   // unrelated processes.
   if (!TERMINAL_RUNNER_STATUSES.has(status?.status)) {
     const current = () => (fs.existsSync(runner.statusFile) ? readJson(runner.statusFile) : status);
-    if (Number.isInteger(runner.pid) && processAlive(runner.pid)) {
+    if (Number.isInteger(runner.pid) && sameProcess(runner.pid, status?.startedAt ?? runner.launchedAt)) {
       stopPid(runner.pid);
       // Until its final status (written once its child's group is killed) or
       // its exit; an unreaped wrapper still looks alive, the status does not.
@@ -958,7 +1033,7 @@ export function stopTaskWorker(attempt) {
     }
     status = current();
     if (!TERMINAL_RUNNER_STATUSES.has(status?.status)) {
-      stopGroup(status?.childPid, "SIGKILL");
+      stopGroup(status?.childPid, "SIGKILL", status?.childStartedAt);
     }
   }
   atomicWrite(
