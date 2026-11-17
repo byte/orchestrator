@@ -30,8 +30,7 @@ import {
   finalizeRun,
   listRuns,
   loadRun,
-  markWorktreesForRemoval,
-  unmarkWorktreeForRemoval,
+  takeWorktreesForRemoval,
   readyTasks,
   effectiveTaskRoute,
   grantedSurfaceConflicts,
@@ -65,7 +64,8 @@ import {
   waitForRunChange
 } from "./lib/wait.mjs";
 import {
-  cleanupTaskWorktree,
+  detachTaskWorktree,
+  finishWorktreeRemoval,
   inspectTaskWorktree,
   integrateTaskWorktree,
   WorktreeOperationError
@@ -918,21 +918,21 @@ function commandRun(argv, cwd) {
   if (action === "cleanup") {
     const taskId = positionals[1];
     const removed = [];
-    for (const { taskId: owner, attempt } of markWorktreesForRemoval(cwd, runId, taskId)) {
-      let cleaned;
-      try {
-        cleaned = cleanupTaskWorktree(cwd, attempt);
-      } catch (error) {
-        // Refused before anything was deleted: the worktree stays, usable again.
-        if (error.code === "WORKTREE_DIRTY") {
-          unmarkWorktreeForRemoval(cwd, runId, owner, attempt.id);
-        }
-        throw error;
-      }
-      if (cleaned) {
+    const { taken, refused } = takeWorktreesForRemoval(
+      cwd, runId, taskId, (attempt) => detachTaskWorktree(cwd, attempt)
+    );
+    for (const { taskId: owner, attempt, trash } of taken) {
+      if (trash) {
+        finishWorktreeRemoval(cwd, attempt, trash);
         removed.push(attempt.worktree.path);
       }
       removed.push(...removeLeftoverScratch(cwd, runId, owner, attempt.id));
+    }
+    if (refused.length) {
+      throw new Error(
+        `${removed.length ? `Removed:\n${removed.map((entry) => `- ${entry}`).join("\n")}\n` : ""}` +
+        `Kept:\n${refused.map((entry) => `- ${entry.taskId} (${entry.attemptId}): ${entry.error}`).join("\n")}`
+      );
     }
     return options.json ? emitJson(removed) : emit(removed.length ? `Removed:\n${removed.map((entry) => `- ${entry}`).join("\n")}` : "No completed worktrees to remove.");
   }

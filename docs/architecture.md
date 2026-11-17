@@ -298,6 +298,38 @@ rollout is gone. A thread id that is not a UUID (probed with `thread-bogus`) is 
 Codex silently starts a new thread, reports a different id in `thread.started`, and exits 0. A
 real resume reports the same thread id it was given.
 
+## Worker containment: threat model and non-goals
+
+A worker is treated as untrusted: it may write anything inside its worktree (or, for a read
+worker, its scratch directory), including files named to collide with the supervisor's, git
+configuration it cannot reach, and processes that ignore SIGTERM. Containment means:
+
+1. Every Codex launch passes `approval_policy="never"` and `--ignore-rules`, so no command a
+   worker issues runs outside the Codex sandbox.
+2. A read worker writes only its scratch `TMPDIR` and has no network.
+3. Git that the orchestrator runs (the wrapper's commit, inspection, cleanup, integration, worktree
+   creation) does not execute a program from a file the worker wrote through hooks, fsmonitor,
+   filters, merge drivers, textconv, or submodule recursion, and in a worktree always uses the git
+   directory recorded at creation.
+4. Cleanup deletes only directories the orchestrator created, and never a worktree whose tracked,
+   untracked, or submodule-path contents differ from its last commit.
+5. Integration changes only the inspected, in-scope, declared paths, and never replaces an
+   untracked or ignored file in the supervisor checkout.
+6. When a worker is stopped, cancelled, or finishes, nothing it started keeps running, and a dead
+   wrapper's processes are killed by the next poll or cancel.
+
+Non-goals (decisions the supervisor or the user's own configuration owns, not defects):
+
+- Programs the user configured globally or per repository that git runs during integration on the
+  supervisor's behalf: checkout filters (`filter.*.smudge`, Git LFS) and commit signing
+  (`gpg.program`, `gpg.ssh.program`). Integrating a change to a script such a program runs is the
+  supervisor's decision; the orchestrator does not turn off signing or LFS.
+- Ignored files inside a worker's worktree (build output, `node_modules`): they are not work and
+  are removed with the worktree.
+- What the user's own later git commands do with integrated files (their hooks, their fsmonitor).
+- Processes that leave their process group (`setsid`) or another user's processes.
+- Concurrent edits to `.orchestrator/local` by anything other than the orchestrator CLI.
+
 ## Task dispatch
 
 `run launch` performs these steps:

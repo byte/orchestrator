@@ -1386,3 +1386,26 @@ test("a worker that finishes leaves no process it started running", async () => 
     }
   }
 });
+
+test("a worker that finishes while a process it started holds its output still finishes", async () => {
+  const root = repo();
+  plan(root, "run-finish-holder");
+  const pidFile = path.join(path.dirname(runFile(root, "run-finish-holder")), "descendant.pid");
+  launchTaskWorker(root, "run-finish-holder", "work", lane(root), {
+    codexCommand: [process.execPath, path.join(fixtures, "fake-codex-slow.mjs"), "--delay=300", "--complete", `--descendant=${pidFile}`]
+  });
+  let descendant = null;
+  try {
+    const { task } = await settle(root, "run-finish-holder");
+    assert.equal(task.status, "reported");
+    descendant = Number(fs.readFileSync(pidFile, "utf8"));
+    assert.ok(await gone(descendant, 3000), `descendant ${descendant} outlived its finished worker`);
+  } finally {
+    try {
+      descendant ??= Number(fs.readFileSync(pidFile, "utf8"));
+      process.kill(descendant, "SIGKILL");
+    } catch {
+      // Already gone.
+    }
+  }
+});

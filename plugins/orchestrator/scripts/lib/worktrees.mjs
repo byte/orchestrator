@@ -132,8 +132,7 @@ export function createTaskWorktree(cwd, run, task, attempt) {
 export function reuseTaskWorktree(cwd, run, previousAttempt) {
   assertLaunchable(cwd, run);
   const source = previousAttempt?.worktree;
-  // `run cleanup` marks a worktree before removing it outside the run lock.
-  if (!source?.path || source.removing || !fs.existsSync(source.path)) {
+  if (!source?.path || !fs.existsSync(source.path)) {
     throw new WorktreeOperationError(
       `Worktree of attempt "${previousAttempt?.id}" is gone; retry with --fresh.`,
       { reasonCode: "worktree_unavailable", kind: "failed", signals: ["worktree_unavailable"] }
@@ -285,6 +284,43 @@ export function inspectTaskWorktree(task, attempt, { cwd = null } = {}) {
   };
 }
 
+/**
+ * Paths in the main checkout the cherry-pick could replace without git
+ * stopping it: git treats ignored files as expendable, so an ignored file at a
+ * path a worker adds, or at one of its parent directories, would be lost. Every
+ * declared path and each of its parents that exists on disk as anything but a
+ * directory must be tracked, and no declared path may be a directory.
+ */
+function untrackedInTheWay(cwd, files) {
+  const candidates = new Set();
+  const blocked = [];
+  for (const file of files) {
+    const parts = file.split("/");
+    for (let depth = 1; depth <= parts.length; depth += 1) {
+      const relative = parts.slice(0, depth).join("/");
+      let stat;
+      try {
+        stat = fs.lstatSync(path.join(cwd, relative));
+      } catch {
+        break;
+      }
+      if (!stat.isDirectory()) {
+        candidates.add(relative);
+        break;
+      }
+      if (depth === parts.length) {
+        blocked.push(relative);
+      }
+    }
+  }
+  if (candidates.size) {
+    const tracked = new Set(gitRaw(cwd, ["ls-files", "-z", "--", ...[...candidates].map((entry) => `:(literal)${entry}`)])
+      .split("\0").filter((entry) => entry.length));
+    blocked.push(...[...candidates].filter((entry) => !tracked.has(entry)));
+  }
+  return blocked.sort();
+}
+
 export function integrateTaskWorktree(cwd, run, task, attempt) {
   const inspection = inspectTaskWorktree(task, attempt, { cwd });
   if (!inspection.ready) {
@@ -320,15 +356,10 @@ export function integrateTaskWorktree(cwd, run, task, attempt) {
       { reasonCode: "dirty_checkout", signals: ["dirty_checkout"] }
     );
   }
-  // Git treats ignored files as expendable, so the cherry-pick would overwrite
-  // a local ignored file (a `.env`, say) at a path the worker added.
-  const ignored = inspection.files.length
-    ? git(cwd, ["ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--",
-      ...inspection.files.map((file) => `:(literal)${file}`)]).split("\0").filter(Boolean)
-    : [];
-  if (ignored.length) {
+  const unprotected = untrackedInTheWay(cwd, inspection.files);
+  if (unprotected.length) {
     throw new WorktreeOperationError(
-      `Integration would overwrite ignored files in the main checkout: ${ignored.join(", ")}.`,
+      `Integration would overwrite untracked or ignored files in the main checkout: ${unprotected.join(", ")}.`,
       { reasonCode: "dirty_checkout", signals: ["dirty_checkout"] }
     );
   }
@@ -370,18 +401,44 @@ export function integrateTaskWorktree(cwd, run, task, attempt) {
   };
 }
 
-export function cleanupTaskWorktree(cwd, attempt) {
+/**
+ * The first half of removing a worktree, run under the run lock (see
+ * takeWorktreesForRemoval): refuse one with uncommitted work, then move it
+ * aside in one rename. From then on it is gone for a warm retry, so the slow
+ * deletion (finishWorktreeRemoval) can run outside the lock. Ignored files
+ * (a worker's build output, `node_modules`) are not work and go with it.
+ */
+export function detachTaskWorktree(cwd, attempt) {
   const worktree = attempt.worktree;
   if (!worktree?.path || !fs.existsSync(worktree.path)) {
-    return false;
+    return null;
   }
   if (changedFiles(worktree.path, { gitDir: trustedGitDir(worktree, cwd) }).length) {
     const error = new Error(`Refusing to remove dirty worktree ${worktree.path}.`);
     error.code = "WORKTREE_DIRTY";
     throw error;
   }
-  fs.rmSync(worktree.path, { recursive: true, force: false });
+  const trash = `${worktree.path}.removing-${process.pid}-${Date.now()}`;
+  fs.renameSync(worktree.path, trash);
+  return trash;
+}
+
+export function finishWorktreeRemoval(cwd, attempt, trash) {
+  fs.rmSync(trash, { recursive: true, force: false });
   git(cwd, ["worktree", "prune"]);
-  git(cwd, ["branch", "-D", worktree.branch]);
+  try {
+    git(cwd, ["branch", "-D", attempt.worktree.branch]);
+  } catch {
+    // A branch shared by warm attempts is deleted once.
+  }
+}
+
+/** Both halves at once, for a caller that holds no run lock to release in between. */
+export function cleanupTaskWorktree(cwd, attempt) {
+  const trash = detachTaskWorktree(cwd, attempt);
+  if (!trash) {
+    return false;
+  }
+  finishWorktreeRemoval(cwd, attempt, trash);
   return true;
 }

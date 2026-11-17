@@ -59,9 +59,7 @@ Fixes:
   poll and an answer have already resumed. `run retry` refuses a task in a
   cancelled run, which would otherwise finish while the run still read
   cancelled.
-- `run cleanup` marks a worktree under the run lock before removing it, so a
-  warm retry launched meanwhile refuses to reuse it instead of losing its work.
-  A worktree that is gone now fails the retry as `execution_failed /
+- A warm retry whose worktree is gone fails as `execution_failed /
   worktree_unavailable`; before, recording that failure itself failed and left
   the task dispatching.
 - A cancelled worker's whole process group is stopped (Codex runs in its own
@@ -94,12 +92,28 @@ Fixes:
 - A populated nested repository in a worker's worktree counts as a change
   (its own status is never run), so inspection is not ready and cleanup does
   not delete its uncommitted work.
-- `run cleanup` clears its removal mark from a worktree it refused to remove
-  for uncommitted work, so a warm retry can still continue in it.
-- `run cancel` escalates to SIGKILL itself, 5 s after SIGTERM, before it
-  returns, so a worker whose wrapper dies during the grace period cannot keep
-  running. The read-profile probe's pid is recorded like Codex's, so a probe
-  whose wrapper died is stopped by the next poll or cancel.
+- `run cancel` finishes stopping a worker before it returns, so a worker whose
+  wrapper dies during the grace period cannot keep running. The read-profile
+  probe's pid is recorded like Codex's, so a probe whose wrapper died is
+  stopped by the next poll or cancel.
+- `run cleanup` no longer marks worktrees for removal. Under the run lock it
+  checks each finished task's worktree and moves a clean one aside in one
+  rename, then deletes it outside the lock; a dirty one is kept and reported
+  without stopping the others. Concurrent cleanups and warm retries can no
+  longer clear each other's marks or delete a running retry's worktree.
+- Integration checks the disk instead of git's ignored listing: it refuses
+  when a declared path, or any parent of one, exists in the main checkout as
+  an untracked or ignored file, or a declared path is a directory there.
+- Anything at a submodule's path in a worker's worktree counts as a change,
+  not only a nested repository.
+- The wrapper kills the rest of Codex's process group as soon as Codex exits,
+  so a process still holding its output cannot keep a finished worker
+  running. `run cancel` stops the wrapper and waits for its final status,
+  then kills whatever group that status records, so a probe that handed over
+  to Codex meanwhile is not mistaken for the worker.
+- docs/architecture.md states the worker containment properties and their
+  non-goals (configured checkout filters and commit signing during
+  integration, ignored files inside a worker's worktree).
 - Status writes are numbered, so a poll holding an older snapshot cannot save
   it over a newer one (a discarded thread over the answer's fresh fallback).
 - A launch whose briefing cannot be rendered leaves the task pending, and a

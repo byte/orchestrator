@@ -871,18 +871,6 @@ function stopGroup(pid, signal = "SIGTERM") {
   }
 }
 
-function groupAlive(pid) {
-  if (!Number.isInteger(pid) || pid <= 0) {
-    return false;
-  }
-  try {
-    process.kill(-pid, 0);
-    return true;
-  } catch (error) {
-    return error.code === "EPERM";
-  }
-}
-
 function stopPid(pid) {
   if (!pid) {
     return;
@@ -944,26 +932,29 @@ export function stopTaskWorker(attempt) {
   if (fs.existsSync(runner.statusFile)) {
     status = readJson(runner.statusFile);
   }
-  // The wrapper starts Codex in its own process group: signal the group, so
-  // processes Codex started stop too; a runner from before that falls back to
-  // its pid. A live wrapper escalates to SIGKILL itself; with the wrapper gone,
-  // nothing would, so the group is killed outright.
-  // A finished runner is not signalled: its wrapper already killed the group,
-  // and its pids may since belong to unrelated processes.
-  // The group gets SIGTERM, then SIGKILL if it is still there 5 s later. This
-  // waits here rather than leaving the escalation to the wrapper: the status
-  // below says cancelled, so if the wrapper died meanwhile, nothing would.
-  // With the wrapper already gone there is nothing to wait for: SIGKILL at once.
+  // Codex runs in its own process group, recorded as childPid. A live wrapper
+  // is stopped and waited for: it stops its own child, whichever one is
+  // current (the probe may have handed over to Codex since the status was
+  // read), and escalates to SIGKILL itself. Whatever group the status records
+  // once the wrapper is gone, or after the wait, is then killed outright, so
+  // nothing is left running when this returns even if the wrapper died
+  // midway. A finished runner is not signalled: its pids may since belong to
+  // unrelated processes.
   if (!TERMINAL_RUNNER_STATUSES.has(status?.status)) {
-    const wrapperAlive = Number.isInteger(runner.pid) && processAlive(runner.pid);
-    stopGroup(status?.childPid, wrapperAlive ? "SIGTERM" : "SIGKILL");
-    stopPid(runner.pid);
-    const deadline = Date.now() + 5000;
-    while (groupAlive(status?.childPid) && Date.now() < deadline) {
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+    const current = () => (fs.existsSync(runner.statusFile) ? readJson(runner.statusFile) : status);
+    if (Number.isInteger(runner.pid) && processAlive(runner.pid)) {
+      stopPid(runner.pid);
+      // Until its final status (written once its child's group is killed) or
+      // its exit; an unreaped wrapper still looks alive, the status does not.
+      const deadline = Date.now() + 8000;
+      while (!TERMINAL_RUNNER_STATUSES.has(current()?.status) && processAlive(runner.pid) &&
+        Date.now() < deadline) {
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+      }
     }
-    if (groupAlive(status?.childPid)) {
-      stopGroup(status.childPid, "SIGKILL");
+    status = current();
+    if (!TERMINAL_RUNNER_STATUSES.has(status?.status)) {
+      stopGroup(status?.childPid, "SIGKILL");
     }
   }
   atomicWrite(

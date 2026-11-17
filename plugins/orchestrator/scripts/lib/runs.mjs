@@ -3252,12 +3252,15 @@ export function retryTask(cwd, runId, taskId, { note = null, fresh = false } = {
 const CLEANABLE_TASK_STATUSES = new Set(["completed", "failed", "blocked", "cancelled"]);
 
 /**
- * Mark the worktrees of finished tasks for removal, under the run lock, and
- * return the attempts marked. Removal itself happens outside the lock; a warm
- * retry launched after the mark refuses to reuse a marked worktree, and a task
- * relaunched before it is no longer finished, so it is not marked.
+ * Take the worktrees of finished tasks for removal: under the run lock, each
+ * is checked and moved aside by `detach` (worktrees.mjs detachTaskWorktree),
+ * so no warm retry can claim it in between. A launch claims its task under the
+ * same lock before it looks for the worktree to reuse, and a claimed task is no
+ * longer finished, so its worktree is never taken. Refusals (uncommitted work)
+ * are returned rather than thrown, so one dirty worktree leaves no other
+ * half-handled. The slow deletion of what was taken happens outside the lock.
  */
-export function markWorktreesForRemoval(cwd, runId, taskId = null) {
+export function takeWorktreesForRemoval(cwd, runId, taskId, detach) {
   const id = assertId(runId, "run");
   const filePath = runFile(cwd, id);
   return withFileLock(filePath, () => {
@@ -3266,36 +3269,21 @@ export function markWorktreesForRemoval(cwd, runId, taskId = null) {
       throw new Error(`Unknown task "${taskId}" in run "${id}".`);
     }
     const tasks = taskId ? [run.tasks[taskId]] : Object.values(run.tasks);
-    const marked = [];
+    const taken = [];
+    const refused = [];
     for (const task of tasks) {
       if (!CLEANABLE_TASK_STATUSES.has(task.status)) {
         continue;
       }
       for (const attempt of task.attempts) {
-        if (attempt.worktree?.path) {
-          attempt.worktree.removing = true;
+        try {
+          taken.push({ taskId: task.id, attempt: structuredClone(attempt), trash: detach(attempt) });
+        } catch (error) {
+          refused.push({ taskId: task.id, attemptId: attempt.id, error: error.message });
         }
-        marked.push({ taskId: task.id, attempt: structuredClone(attempt) });
       }
     }
-    if (marked.length) {
-      writeRun(cwd, run);
-    }
-    return marked;
-  });
-}
-
-/** Clear the removal mark of a worktree `run cleanup` refused to remove, so a warm retry can reuse it. */
-export function unmarkWorktreeForRemoval(cwd, runId, taskId, attemptId) {
-  const id = assertId(runId, "run");
-  const filePath = runFile(cwd, id);
-  return withFileLock(filePath, () => {
-    const run = loadRun(cwd, id);
-    const attempt = run.tasks[taskId]?.attempts.find((entry) => entry.id === attemptId);
-    if (attempt?.worktree?.removing) {
-      delete attempt.worktree.removing;
-      writeRun(cwd, run);
-    }
+    return { taken, refused };
   });
 }
 

@@ -169,15 +169,23 @@ export function changedFiles(cwd, { gitDir = null } = {}) {
 
   if (gitDir) {
     // Submodules are ignored above (git would run a nested repository's own
-    // config), so any populated one counts as changed: its uncommitted work is
-    // invisible from here, and cleanup must not delete it unseen. A worker's
-    // worktree is created without submodules, so a populated one is the worker's.
+    // config), so anything at a submodule's path counts as changed: what is
+    // there is invisible from here (`git add -A` skips it too), and cleanup
+    // must not delete it unseen. A worker's worktree is created with every
+    // submodule directory empty, so whatever is in one is the worker's.
     const index = git(root, ["ls-files", "--stage", "-z"], gitDir).split("\0");
     for (const entry of index) {
       const tab = entry.indexOf("\t");
       if (entry.startsWith("160000 ") && tab > 0) {
         const gitlink = entry.slice(tab + 1);
-        if (fs.existsSync(path.join(root, gitlink, ".git"))) {
+        let occupied = false;
+        try {
+          const target = path.join(root, gitlink);
+          occupied = !fs.lstatSync(target).isDirectory() || fs.readdirSync(target).length > 0;
+        } catch {
+          // Nothing there.
+        }
+        if (occupied) {
           files.add(gitlink);
         }
       }

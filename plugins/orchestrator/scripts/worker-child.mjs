@@ -355,10 +355,8 @@ function runCodex(resumeThreadId, input = prompt) {
       if (!settled) {
         settled = true;
         timers.forEach(clearTimeout);
-        // Codex exiting does not end what it started (a command that ignores
-        // SIGTERM and does not hold the pipes, say): kill whatever is left of
-        // its group, however Codex ended. Once the wrapper exits, nothing else
-        // would escalate a stop.
+        // Also here, for a resolve that did not come from Codex exiting (the
+        // stop's timeout): once the wrapper exits, nothing else would.
         killGroup("SIGKILL");
         resolveRun(value);
       }
@@ -447,6 +445,11 @@ function runCodex(resumeThreadId, input = prompt) {
     });
     child.stdin.end(input);
     child.on("error", (error) => resolve({ error }));
+    // Codex exiting does not end what it started. Kill the rest of its group as
+    // soon as it exits, not on `close`: a process still holding the pipes would
+    // keep `close` from ever firing. With it gone, `close` follows with all of
+    // stderr read.
+    child.on("exit", () => killGroup("SIGKILL"));
     // `close` rather than `exit`: stderr must be fully read before deciding
     // whether a failed resume reported a missing thread.
     child.on("close", (code, signal) => resolve({ code, signal, sawThread, stderrText, replacedWithoutBriefing }));

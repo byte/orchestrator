@@ -13,7 +13,7 @@ import {
   eventsFile,
   failTaskAttempt,
   loadRun,
-  markWorktreesForRemoval,
+  takeWorktreesForRemoval,
   recordIntegrationDiagnostic,
   recordTaskDisposition,
   recordTaskResult,
@@ -25,7 +25,7 @@ import {
   verifyTask
 } from "../plugins/orchestrator/scripts/lib/runs.mjs";
 import { launchTaskWorker, pollRunWorkers } from "../plugins/orchestrator/scripts/lib/workers.mjs";
-import { inspectTaskWorktree } from "../plugins/orchestrator/scripts/lib/worktrees.mjs";
+import { detachTaskWorktree, finishWorktreeRemoval, inspectTaskWorktree } from "../plugins/orchestrator/scripts/lib/worktrees.mjs";
 import { assertReadOnlyLaunch, checkpointPlan, cleanup, git, makeRepo, runCli, assertLockedDown, configValue } from "./helpers.mjs";
 
 const fixtures = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures");
@@ -234,32 +234,34 @@ test("the CLI exposes --note and --fresh on run retry", () => {
   assert.match(fresh.stderr, /cannot be retried from status "pending"/);
 });
 
-test("a warm retry never reuses a worktree run cleanup has marked for removal", async () => {
+test("a warm retry never reuses a worktree run cleanup has taken for removal", async () => {
   const root = repo();
   plan(root, "run-cleanup-race", { kind: "write" });
   const command = [process.execPath, resumeFixture, `--log=${logFile()}`, "--write"];
-  launchTaskWorker(root, "run-cleanup-race", "work", lane, { codexCommand: command });
+  const first = launchTaskWorker(root, "run-cleanup-race", "work", lane, { codexCommand: command });
   await settle(root, "run-cleanup-race");
-  // A running or reported task is not finished, so nothing is marked.
-  assert.deepEqual(markWorktreesForRemoval(root, "run-cleanup-race"), []);
+  // A running or reported task is not finished, so nothing is taken.
+  assert.deepEqual(takeWorktreesForRemoval(root, "run-cleanup-race", null, () => assert.fail("not finished")).taken, []);
   recordTaskDisposition(root, "run-cleanup-race", "work", {
     terminalOutcome: "policy_refused",
     action: "refuse",
     reasonCode: "policy_boundary",
     evidence: ["redo it"]
   });
-  // Cleanup marks the finished task's worktree, then a retry launches before it is removed.
-  const marked = markWorktreesForRemoval(root, "run-cleanup-race");
-  assert.equal(marked.length, 1);
+  // Cleanup takes the finished task's worktree; a retry launches before its deletion finishes.
+  const { taken } = takeWorktreesForRemoval(root, "run-cleanup-race", null, (attempt) => detachTaskWorktree(root, attempt));
+  assert.equal(taken.length, 1);
+  assert.equal(fs.existsSync(first.worktree.path), false, "moved aside at once");
   retryTask(root, "run-cleanup-race", "work", { note: "Again." });
   checkpointPlan(root, "run-cleanup-race");
-  assert.throws(
-    () => launchTaskWorker(root, "run-cleanup-race", "work", lane, { codexCommand: command }),
-    /is gone; retry with --fresh/
-  );
-  const task = loadRun(root, "run-cleanup-race").tasks.work;
-  assert.equal(task.attempts[1].status, "failed");
-  assert.equal(fs.existsSync(marked[0].attempt.worktree.path), true, "nothing was written into the worktree");
+  // The retry cannot continue in a worktree that is gone: it starts afresh.
+  const second = launchTaskWorker(root, "run-cleanup-race", "work", lane, { codexCommand: command });
+  assert.notEqual(second.worktree.path, taken[0].trash);
+  assert.equal(second.worktree.reusedFromAttemptId, undefined);
+  finishWorktreeRemoval(root, taken[0].attempt, taken[0].trash);
+  assert.equal(fs.existsSync(taken[0].trash), false);
+  await settle(root, "run-cleanup-race");
+  assert.equal(loadRun(root, "run-cleanup-race").tasks.work.status, "reported");
 });
 
 test("a worktree run cleanup refused to remove stays usable for a warm retry", async () => {
@@ -279,11 +281,27 @@ test("a worktree run cleanup refused to remove stays usable for a warm retry", a
   const refused = runCli(root, ["run", "cleanup", "run-cleanup-refused"]);
   assert.notEqual(refused.code, 0);
   assert.match(refused.stderr, /dirty worktree/);
-  assert.equal(loadRun(root, "run-cleanup-refused").tasks.work.attempts[0].worktree.removing, undefined);
   retryTask(root, "run-cleanup-refused", "work", { note: "Again." });
   checkpointPlan(root, "run-cleanup-refused");
   const second = launchTaskWorker(root, "run-cleanup-refused", "work", lane, { codexCommand: command });
   assert.equal(second.worktree.path, first.worktree.path);
+  await settle(root, "run-cleanup-refused");
+  // Two finished attempts now share the worktree (the wrapper committed the
+  // draft); with new uncommitted work cleanup refuses it for both, and a
+  // further warm retry still continues in it.
+  fs.writeFileSync(path.join(first.worktree.path, "src", "draft.txt"), "keep me too\n");
+  recordTaskDisposition(root, "run-cleanup-refused", "work", {
+    terminalOutcome: "policy_refused",
+    action: "refuse",
+    reasonCode: "policy_boundary",
+    evidence: ["once more"]
+  });
+  assert.notEqual(runCli(root, ["run", "cleanup", "run-cleanup-refused"]).code, 0);
+  assert.equal(fs.readFileSync(path.join(first.worktree.path, "src", "draft.txt"), "utf8"), "keep me too\n");
+  retryTask(root, "run-cleanup-refused", "work", { note: "Again." });
+  checkpointPlan(root, "run-cleanup-refused");
+  const third = launchTaskWorker(root, "run-cleanup-refused", "work", lane, { codexCommand: command });
+  assert.equal(third.worktree.path, first.worktree.path);
   await settle(root, "run-cleanup-refused");
 });
 

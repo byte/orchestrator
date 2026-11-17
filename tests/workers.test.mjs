@@ -383,8 +383,58 @@ test("integration refuses to overwrite an ignored file in the main checkout", ()
   run = loadRun(root, "run-ignored");
   const task = run.tasks.build;
   task.attempts.at(-1).worktree = worktree;
-  assert.throws(() => integrateTaskWorktree(root, run, task, task.attempts.at(-1)), /overwrite ignored files.*src\/private\.txt/);
+  assert.throws(() => integrateTaskWorktree(root, run, task, task.attempts.at(-1)), /overwrite untracked or ignored files.*src\/private\.txt/);
   assert.equal(fs.readFileSync(path.join(root, "src/private.txt"), "utf8"), "local secret\n");
+});
+
+for (const [label, ignored, pattern, added] of [
+  ["a parent directory of a path the worker adds", "cache", "cache", "src/cache/item.txt"],
+  // .gitignore strips an unescaped trailing space.
+  ["a file whose name is a single space", " ", "\\ ", "src/ "]
+]) {
+test(`integration refuses to overwrite an ignored file at ${label}`, () => {
+  const root = repo();
+  write(root, "src/.gitignore", `${pattern}\n`);
+  git(root, ["add", "-A"]);
+  git(root, ["commit", "--quiet", "-m", "ignore"]);
+  write(root, `src/${ignored}`, "local data\n");
+  plan(root, "run-ignored-parent");
+  checkpointPlan(root, "run-ignored-parent");
+  const dispatch = claimTask(root, "run-ignored-parent", "build", { constraints: [] });
+  let run = loadRun(root, "run-ignored-parent");
+  const worktree = createTaskWorktree(root, run, run.tasks.build, run.tasks.build.attempts.at(-1));
+  write(worktree.path, "src/.gitignore", "");
+  write(worktree.path, added, "worker content\n");
+  git(worktree.path, ["add", "-A"]);
+  git(worktree.path, ["commit", "--quiet", "-m", "take it"]);
+  reportFiles(root, "run-ignored-parent", dispatch.attemptId, ["src/.gitignore", added]);
+  run = loadRun(root, "run-ignored-parent");
+  const task = run.tasks.build;
+  task.attempts.at(-1).worktree = worktree;
+  assert.equal(inspectTaskWorktree(task, task.attempts.at(-1)).ready, true);
+  assert.throws(() => integrateTaskWorktree(root, run, task, task.attempts.at(-1)), /overwrite untracked or ignored files/);
+  assert.equal(fs.readFileSync(path.join(root, "src", ignored), "utf8"), "local data\n");
+});
+}
+
+test("files at an uninitialized submodule's path in a worker's worktree count as changed", () => {
+  const root = repo();
+  // A submodule the worker's worktree is created without (an empty directory).
+  const sub = makeRepo();
+  repos.push(sub);
+  git(root, ["-c", "protocol.file.allow=always", "submodule", "add", "--quiet", sub, "src/vendor"]);
+  git(root, ["commit", "--quiet", "-m", "submodule"]);
+  plan(root, "run-gitlink-files");
+  checkpointPlan(root, "run-gitlink-files");
+  claimTask(root, "run-gitlink-files", "build", { constraints: [] });
+  const run = loadRun(root, "run-gitlink-files");
+  const attempt = run.tasks.build.attempts.at(-1);
+  const worktree = createTaskWorktree(root, run, run.tasks.build, attempt);
+  assert.deepEqual(changedFiles(worktree.path, { gitDir: worktree.gitDir }), [], "an empty submodule directory is no change");
+  write(worktree.path, "src/vendor/notes.txt", "only copy\n");
+  assert.deepEqual(changedFiles(worktree.path, { gitDir: worktree.gitDir }), ["src/vendor"]);
+  assert.throws(() => cleanupTaskWorktree(root, { ...attempt, worktree }), /dirty worktree/);
+  assert.equal(fs.readFileSync(path.join(worktree.path, "src/vendor/notes.txt"), "utf8"), "only copy\n");
 });
 
 test("a nested repository in a worker's worktree counts as changed, so cleanup keeps it", () => {
