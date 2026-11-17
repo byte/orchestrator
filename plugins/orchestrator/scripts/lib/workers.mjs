@@ -972,9 +972,9 @@ function stopGroup(pid, signal = "SIGTERM", startedAt = null) {
     return;
   }
   // A denied group signal, or a failed inspection of one, throws and so
-  // preserves the obligation; an already-absent group still gets its leader
-  // signalled on its own.
-  if (!signalProcessGroup(pid, signal)) {
+  // preserves the obligation. Only an absent group gets its leader signalled
+  // on its own; a zombie-only group has nothing left to stop.
+  if (signalProcessGroup(pid, signal) === "gone") {
     stopPid(pid);
   }
 }

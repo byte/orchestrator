@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { parseFileList } from "./briefing.mjs";
-import { execGit } from "./exec.mjs";
+import { GIT_MUTATION_TIMEOUT_MS, execGit } from "./exec.mjs";
 import { SUPERVISOR_GIT_ARGS, changedFiles, configuredDrivers, currentBranch, headSha, worktreeGitEnv } from "./git.mjs";
 import { partitionByScope } from "./glob.mjs";
 import { effectiveTaskScope } from "./runs.mjs";
@@ -12,15 +12,16 @@ import { localDir } from "./state.mjs";
 // is the same directory.
 const RESERVED = /^\.orchestrator\/local(\/|$)/i;
 
-function gitRaw(cwd, args, gitDir = null, env = process.env) {
+function gitRaw(cwd, args, gitDir = null, env = process.env, timeout = undefined) {
   return execGit(gitDir ? args : [...SUPERVISOR_GIT_ARGS, ...args], {
     cwd,
-    env: gitDir ? worktreeGitEnv(cwd, gitDir) : env
+    env: gitDir ? worktreeGitEnv(cwd, gitDir) : env,
+    timeout
   });
 }
 
-function git(cwd, args, gitDir = null, env = process.env) {
-  return gitRaw(cwd, args, gitDir, env).trim();
+function git(cwd, args, gitDir = null, env = process.env, timeout = undefined) {
+  return gitRaw(cwd, args, gitDir, env, timeout).trim();
 }
 
 /**
@@ -120,7 +121,7 @@ export function createTaskWorktree(cwd, run, task, attempt) {
   const target = worktreePath(cwd, run, task, attempt);
   const branch = branchName(run, task, attempt);
   fs.mkdirSync(path.dirname(target), { recursive: true });
-  git(cwd, ["worktree", "add", "-b", branch, target, baseHead]);
+  git(cwd, ["worktree", "add", "-b", branch, target, baseHead], null, process.env, GIT_MUTATION_TIMEOUT_MS);
   return { path: target, gitDir: worktreeGitDir(cwd, target), branch, baseHead, createdAt: new Date().toISOString() };
 }
 
@@ -438,7 +439,8 @@ export function integrateTaskWorktree(cwd, run, task, attempt, {
     // merge conflicts instead of running a driver script the worker may have
     // changed in an earlier commit.
     git(cwd, ["-c", "core.logAllRefUpdates=true", ...noDrivers, "cherry-pick", "--strategy-option=no-renames", ...inspection.commits], null,
-      operationId ? { ...process.env, GIT_REFLOG_ACTION: `orchestrator-integrate-${operationId}` } : process.env);
+      operationId ? { ...process.env, GIT_REFLOG_ACTION: `orchestrator-integrate-${operationId}` } : process.env,
+      GIT_MUTATION_TIMEOUT_MS);
     stopped = true;
   } catch (error) {
     // Do not abort or release ownership while the original Git group could
@@ -446,7 +448,7 @@ export function integrateTaskWorktree(cwd, run, task, attempt, {
     if (error.gitMayBeRunning) throw error;
     stopped = true;
     try {
-      git(cwd, ["cherry-pick", "--abort"]);
+      git(cwd, ["cherry-pick", "--abort"], null, process.env, GIT_MUTATION_TIMEOUT_MS);
     } catch (abortError) {
       if (abortError.gitMayBeRunning) stopped = false;
       // Preserve the original cherry-pick error; the caller reports manual recovery.

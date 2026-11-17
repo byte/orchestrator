@@ -30,7 +30,7 @@ test("signalling a process group reports whether anything was left to signal", a
   const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { detached: true, stdio: "ignore" });
   await new Promise((resolve) => child.once("spawn", resolve));
   const exited = new Promise((resolve) => child.once("exit", resolve));
-  assert.equal(signalProcessGroup(child.pid, "SIGKILL"), true);
+  assert.equal(signalProcessGroup(child.pid, "SIGKILL"), "signalled");
   await exited;
-  assert.equal(signalProcessGroup(child.pid, "SIGKILL"), false, "a gone group is not an error");
+  assert.equal(signalProcessGroup(child.pid, "SIGKILL"), "gone", "a gone group is not an error");
 });

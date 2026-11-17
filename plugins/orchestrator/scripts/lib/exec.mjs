@@ -41,20 +41,20 @@ function groupStates(pgid) {
 }
 
 /**
- * Signal a whole process group. Returns false when there is nothing left to
- * signal: the group is gone, or (Darwin returns EPERM for this) it holds only
- * unreaped zombies, which cannot mutate anything. A signal refused to any live
- * member throws: the caller still owes that group's termination.
+ * Signal a whole process group: "signalled", "gone" (no such group), or
+ * "zombies" (Darwin returns EPERM for a group holding only unreaped zombies,
+ * which cannot mutate anything). A signal refused to any live member throws:
+ * the caller still owes that group's termination.
  */
 export function signalProcessGroup(pgid, signal) {
   try {
     process.kill(-pgid, signal);
-    return true;
+    return "signalled";
   } catch (error) {
-    if (error.code === "ESRCH") return false;
+    if (error.code === "ESRCH") return "gone";
     if (error.code === "EPERM" && process.platform === "darwin" &&
         groupStates(pgid).every((state) => state.startsWith("Z"))) {
-      return false;
+      return "zombies";
     }
     throw error;
   }
@@ -63,12 +63,15 @@ export function signalProcessGroup(pgid, signal) {
 let gitExecutable;
 
 /** Bounded Git with file-backed output: descendants cannot keep a capture pipe open. */
-// A backstop for a Git that hangs, not a performance limit: it also bounds
-// mutating commands (worktree add, add -A, commit, cherry-pick), and killing
-// one of those mid-way leaves a checkout for manual repair.
-const GIT_TIMEOUT_MS = 10 * 60 * 1000;
+// Read-only Git gets a short deadline: a worker can leave a FIFO that blocks
+// any Git that reads it, and an inspection must then fail, not stall the
+// supervisor. Commands that change a checkout (worktree add, add -A, commit,
+// cherry-pick) pass the long backstop instead: killing one of those mid-way
+// on a large repository leaves the checkout for manual repair.
+export const GIT_READ_TIMEOUT_MS = 60 * 1000;
+export const GIT_MUTATION_TIMEOUT_MS = 10 * 60 * 1000;
 
-export function execGit(args, { cwd, env = process.env, timeout = GIT_TIMEOUT_MS, detached = true } = {}) {
+export function execGit(args, { cwd, env = process.env, timeout = GIT_READ_TIMEOUT_MS, detached = true } = {}) {
   gitExecutable ??= resolveExecutable("git");
   // TMPDIR may point inside the inspected checkout. Capture files must never
   // become part of Git's own dirt report (macOS/Linux both provide /tmp).

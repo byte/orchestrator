@@ -5,7 +5,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { execGit } from "./lib/exec.mjs";
+import { GIT_MUTATION_TIMEOUT_MS, execGit } from "./lib/exec.mjs";
 import { worktreeGitEnv } from "./lib/git.mjs";
 import { removeTree, SCRATCH_OWNER_FILE } from "./lib/remove-tree.mjs";
 
@@ -281,6 +281,8 @@ function commitWorkerChanges() {
   const git = (args) => execGit(args, {
     cwd: spec.worktreePath,
     env: worktreeGitEnv(spec.worktreePath, spec.gitDir),
+    // add -A and commit change the worktree; only a hung Git should hit this.
+    timeout: GIT_MUTATION_TIMEOUT_MS,
     // Keep Git in the wrapper's group so cancellation and orphan polling can
     // stop it even if this wrapper dies during the synchronous operation.
     detached: false
@@ -577,5 +579,13 @@ const finalStatus = result.error || commitError
       signal: result.signal
     };
 finishScratch();
-await Promise.all([output, errors].map((stream) => new Promise((resolve) => stream.end(resolve))));
+// Bounded: a stream that already failed (a full disk, say) may never call
+// back, and the final status must still be written.
+await Promise.race([
+  Promise.all([output, errors].map((stream) => new Promise((resolve) => {
+    stream.once("error", resolve);
+    stream.end(resolve);
+  }))),
+  new Promise((resolve) => setTimeout(resolve, 5000).unref())
+]);
 writeStatus({ ...finalStatus, finishedAt: new Date().toISOString() });

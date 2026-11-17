@@ -968,6 +968,11 @@ async function main() {
         return fail(`Unknown command "${command}".\n\n${USAGE}`);
     }
   } catch (error) {
+    // A poll that could not finish every task still collected the others; their
+    // state is saved, so show it rather than only the failure.
+    if (Array.isArray(error.updates) && error.updates.length) {
+      process.stdout.write(`${error.updates.map(renderPollUpdate).join("\n")}\n`);
+    }
     return fail(`error: ${error.message}`);
   }
 }
