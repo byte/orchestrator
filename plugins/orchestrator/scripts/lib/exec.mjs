@@ -12,7 +12,10 @@ export function resolveExecutable(command, cwd = process.cwd()) {
     const candidate = path.join(directory, command);
     try {
       fs.accessSync(candidate, fs.constants.X_OK);
-      if (fs.statSync(candidate).isFile()) return fs.realpathSync(candidate);
+      // The absolute PATH entry is what is trusted; keep the name it was found
+      // under. Multi-call shims (Volta, say) pick the tool from argv[0], so
+      // following the symlink to the shim itself would break them.
+      if (fs.statSync(candidate).isFile()) return candidate;
     } catch {
       // Continue to the next absolute PATH entry.
     }
@@ -60,7 +63,12 @@ export function signalProcessGroup(pgid, signal) {
 let gitExecutable;
 
 /** Bounded Git with file-backed output: descendants cannot keep a capture pipe open. */
-export function execGit(args, { cwd, env = process.env, timeout = 30000, detached = true } = {}) {
+// A backstop for a Git that hangs, not a performance limit: it also bounds
+// mutating commands (worktree add, add -A, commit, cherry-pick), and killing
+// one of those mid-way leaves a checkout for manual repair.
+const GIT_TIMEOUT_MS = 10 * 60 * 1000;
+
+export function execGit(args, { cwd, env = process.env, timeout = GIT_TIMEOUT_MS, detached = true } = {}) {
   gitExecutable ??= resolveExecutable("git");
   // TMPDIR may point inside the inspected checkout. Capture files must never
   // become part of Git's own dirt report (macOS/Linux both provide /tmp).
