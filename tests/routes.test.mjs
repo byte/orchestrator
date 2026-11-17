@@ -250,7 +250,7 @@ test("legacy-slug attempts are excluded by default and counted with --include-le
   assert.equal(included.attempts, 9);
   assert.equal(included.excluded.legacy, 0);
   assert.deepEqual(
-    { attempts: row(included, "gpt-5.6-sol", "high").attempts, first: row(included, "gpt-5.6-sol", "high").firstAccepted },
+    { attempts: row(included, "gpt-5.6-sol", "unknown").attempts, first: row(included, "gpt-5.6-sol", "unknown").firstAccepted },
     { attempts: 1, first: 1 }
   );
   const excluded = routeEvidence(root, { lane: "api" });
@@ -285,6 +285,21 @@ test("run routes is read-only and survives a run it cannot load", () => {
   assert.equal(evidence.attempts, 9);
   assert.deepEqual(snapshot(), before);
   assert.match(runCli(root, ["run", "routes"]).stdout, /run run-broken could not be read/);
+});
+
+test("legacy route gaps stay unknown across replans while saved assignment facts retain attribution", () => {
+  const old = attempt("work-attempt-1", "gpt-6.1-sol", undefined, VERIFY_FAILED, 2);
+  const snapshotted = attempt("work-attempt-2", "gpt-6.1-terra", undefined, ACCEPTED, 3, {
+    assignmentSnapshot: { version: 1, model: "gpt-6.1-sol", reasoningEffort: "high" }
+  });
+  const run = { lane: "api", workerPolicy: { model: "gpt-6.1-sol", reasoningEffort: "high" },
+    tasks: { work: task("work", [old, snapshotted], { model: "gpt-6.1-sol", reasoningEffort: "high" }) } };
+  const before = aggregateRoutes([run]);
+  assert.equal(row(before, "gpt-6.1-sol", "unknown").attempts, 1);
+  assert.equal(row(before, "gpt-6.1-terra", "high").attempts, 1);
+  run.tasks.work.reasoningEffort = "low";
+  run.workerPolicy.reasoningEffort = "low";
+  assert.deepEqual(aggregateRoutes([run]), before);
 });
 
 test("an empty history renders without rates", () => {

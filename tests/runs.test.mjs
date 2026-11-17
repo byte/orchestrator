@@ -9,6 +9,7 @@ import {
 import {
   DEFAULT_WORKER_MODEL,
   addCheckpoint,
+  attachExecution,
   bindAttempt,
   cancelRun,
   cancelTask,
@@ -31,6 +32,7 @@ import {
   renderWorkerBriefing,
   replacePlan,
   retryTask,
+  takeWorktreesForRemoval,
   verifyTask
 } from "../plugins/orchestrator/scripts/lib/runs.mjs";
 import { checkpointPlan, cleanup, git, makeRepo, runCli, write } from "./helpers.mjs";
@@ -1485,6 +1487,57 @@ test("replanning preserves verified work while replacing unfinished tasks", () =
       ]),
     /cannot be redefined/
   );
+});
+
+test("retired cancelled tasks keep attempt identity and remain reachable for cleanup", () => {
+  const root = repo();
+  const runId = "run-retired-cleanup";
+  createRun(root, { id: runId, lane: "api", objective: "Keep cancelled evidence" });
+  const definition = { id: "work", title: "Work", objective: "Original", kind: "read" };
+  replacePlan(root, runId, [definition]);
+  checkpointPlan(root, runId);
+  const first = claimTask(root, runId, "work", { constraints: [] });
+  cancelTask(root, runId, "work", "No longer needed");
+  // A retry can be pending when the task is retired; its worktree is still audit state.
+  retryTask(root, runId, "work");
+  replacePlan(root, runId, [{ ...definition, id: "other" }]);
+  const removed = loadRun(root, runId);
+  assert.equal(removed.tasks.work, undefined);
+  assert.equal(removed.retiredTasks[0].attempts[0].id, first.attemptId);
+  assert.equal(removed.retiredTasks[0].attempts[0].assignmentSnapshot.text.taskObjective, "Original");
+  assert.deepEqual(readyTasks(removed).map((task) => task.id), ["other"]);
+  const detach = (attempt) => ({ id: attempt.id });
+  const live = takeWorktreesForRemoval(root, runId, "work", detach, () => true);
+  assert.equal(live.taken.length, 0);
+  assert.equal(live.refused[0].attemptId, first.attemptId);
+  assert.deepEqual(takeWorktreesForRemoval(root, runId, "work", detach).taken.map((item) => item.attempt.id),
+    [first.attemptId]);
+  replacePlan(root, runId, [{ ...definition, objective: "Replacement" }]);
+  checkpointPlan(root, runId);
+  const second = claimTask(root, runId, "work", { constraints: [] });
+  assert.equal(second.attemptId, "work-attempt-2");
+  assert.throws(() => attachExecution(root, runId, "work", {
+    attemptId: first.attemptId, worktree: { path: "/late-original-worktree" }, runner: {}
+  }), /cancelled, not dispatching/);
+  assert.equal(loadRun(root, runId).retiredTasks[0].attempts[0].worktree.path, "/late-original-worktree");
+  assert.equal(loadRun(root, runId).tasks.work.attempts[0].worktree, undefined);
+  // Targeting an ID shared by an active and retired assignment still cleans only the retired one.
+  assert.deepEqual(takeWorktreesForRemoval(root, runId, "work", detach).taken.map((item) => item.attempt.id),
+    [first.attemptId]);
+  cancelTask(root, runId, "work");
+  replacePlan(root, runId, [{ ...definition, id: "other" }]);
+  replacePlan(root, runId, [definition]);
+  checkpointPlan(root, runId);
+  assert.equal(claimTask(root, runId, "work", { constraints: [] }).attemptId, "work-attempt-3");
+  assert.equal(loadRun(root, runId).retiredTasks.filter((task) => task.id === "work").length, 2);
+  failTaskAttempt(root, runId, "work", {
+    attemptId: second.attemptId, worktree: { path: "/late-second-worktree" },
+    error: "Launch stopped", launchFailed: true
+  });
+  const retiredSecond = loadRun(root, runId).retiredTasks.find((task) =>
+    task.attempts.some((attempt) => attempt.id === second.attemptId));
+  assert.equal(retiredSecond.attempts[0].worktree.path, "/late-second-worktree");
+  assert.equal(retiredSecond.attempts[0].outcome.terminalOutcome, "cancelled");
 });
 
 test("a completed task graph still requires a clean combined final verification gate", () => {

@@ -18,9 +18,10 @@ import {
   LEGACY_WORKER_MODELS,
   WORKER_MODELS,
   eventsFile,
+  historicalTaskAssignment,
   listRuns,
   loadRun,
-  snapshotTaskAssignment
+  taskHistory
 } from "./runs.mjs";
 import { atomicWrite, localDir, nowIso } from "./state.mjs";
 import { resolveWorkspaceRoot } from "./workspace.mjs";
@@ -431,19 +432,14 @@ function safeDiagnostics(attempt) {
 }
 
 function assignmentForAttempt(run, task, attempt, eventSummary) {
-  let snapshot = attempt.assignmentSnapshot;
-  if (!Object.hasOwn(attempt, "assignmentSnapshot")) {
-    // Older attempts have no snapshot. Their current definition is historical
-    // only when the event history establishes that no replan followed the claim.
-    // Do not silently relabel older attempts, or export another assignment's text.
-    if (eventSummary?.assignmentPlanRevision !== run.planRevision ||
-        !Number.isInteger(run.planRevision) || run.planRevision < 1) {
-      throw new Error(
-        `Historical assignment for attempt "${attempt.id}" is unavailable; ` +
-          "no snapshot or unchanged claimed plan is established."
-      );
-    }
-    snapshot = snapshotTaskAssignment(run, task);
+  const snapshot = historicalTaskAssignment(
+    run, task, attempt, eventSummary?.assignmentPlanRevision
+  );
+  if (!snapshot && !Object.hasOwn(attempt, "assignmentSnapshot")) {
+    throw new Error(
+      `Historical assignment for attempt "${attempt.id}" is unavailable; ` +
+        "no snapshot or unchanged claimed plan is established."
+    );
   }
   assertExactKeys(snapshot, [
     "version", "planRevision", "taskKind", "dependencyCount", "constraintCount",
@@ -692,7 +688,7 @@ export function collectLearningExamples(
     let skippedWithoutOutcome = 0;
     for (const run of runs) {
       const events = readAttemptEvents(cwd, run.id);
-      for (const task of Object.values(run.tasks ?? {})) {
+      for (const task of taskHistory(run)) {
         for (const [attemptIndex, attempt] of (task.attempts ?? []).entries()) {
           scannedAttempts += 1;
           if (!attempt.outcome) {
@@ -823,7 +819,7 @@ function exportName(value, exportedAt) {
 
 function sourceTextForExample(cwd, identity, example) {
   for (const run of listRuns(cwd)) {
-    for (const task of Object.values(run.tasks ?? {})) {
+    for (const task of taskHistory(run)) {
       for (const attempt of task.attempts ?? []) {
         const refs = sourceRefs(identity, run.id, task.id, attempt.id);
         if (refs.attemptRef === example.source.attemptRef) {

@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import { LEGACY_WORKER_MODELS, loadRun, resolveTaskWorker } from "./runs.mjs";
+import { LEGACY_WORKER_MODELS, historicalTaskAssignment, loadRun, taskHistory } from "./runs.mjs";
 import { localDir } from "./state.mjs";
 
 /**
@@ -58,18 +58,13 @@ function attemptResult(attempt) {
 }
 
 function attemptRoute(run, task, attempt) {
-  if (attempt.model && attempt.reasoningEffort) {
-    return { model: attempt.model, reasoningEffort: attempt.reasoningEffort };
-  }
-  try {
-    const saved = resolveTaskWorker(run, task);
-    return {
-      model: attempt.model ?? saved.model,
-      reasoningEffort: attempt.reasoningEffort ?? saved.reasoningEffort
-    };
-  } catch {
-    return { model: attempt.model ?? "unknown", reasoningEffort: attempt.reasoningEffort ?? "unknown" };
-  }
+  // A current plan is not execution evidence: replanning must not move old
+  // results to a different effort. Legacy gaps without a snapshot stay unknown.
+  const saved = historicalTaskAssignment(run, task, attempt);
+  return {
+    model: attempt.model ?? saved?.model ?? "unknown",
+    reasoningEffort: attempt.reasoningEffort ?? saved?.reasoningEffort ?? "unknown"
+  };
 }
 
 /** Time the attempt spent paused on needs_input requests, which is not model runtime. */
@@ -134,7 +129,7 @@ export function aggregateRoutes(runs, { lane = null, includeLegacy = false } = {
       continue;
     }
     runCount += 1;
-    for (const task of Object.values(run.tasks ?? {})) {
+    for (const task of taskHistory(run)) {
       let firstSeen = false;
       for (const attempt of task.attempts ?? []) {
         if (!reachedWorker(attempt)) {

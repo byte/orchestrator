@@ -142,6 +142,11 @@ export function eventsFile(cwd, runId) {
   return path.join(runDir(cwd, runId), "events.jsonl");
 }
 
+/** Audit/cleanup consumers include retired assignments; scheduling uses tasks only. */
+export function taskHistory(run) {
+  return [...(run.retiredTasks ?? []), ...Object.values(run.tasks ?? {})];
+}
+
 function assertId(value, kind) {
   const id = String(value ?? "").trim();
   const pattern = kind === "task" ? TASK_ID_PATTERN : RUN_ID_PATTERN;
@@ -265,7 +270,7 @@ function validateRunGuidance(run, filePath) {
     }
     assertUniqueGuidancePolicyVersions(versionedPolicies, filePath);
   }
-  for (const task of Object.values(run.tasks ?? {})) {
+  for (const task of taskHistory(run)) {
     if (task.guidanceSelection !== undefined && task.guidanceSelection !== null) {
       validateGuidanceSelection(task.guidanceSelection);
       validateSelectionMembership(task.guidanceSelection, policies, "Task guidance selection");
@@ -346,7 +351,7 @@ function validGuidanceRecoveryParts(config) {
 }
 
 function requireRetainedSelectionPolicies(run, policies) {
-  for (const task of Object.values(run.tasks ?? {})) {
+  for (const task of taskHistory(run)) {
     if (task.guidanceSelection) {
       validateSelectionMembership(
         task.guidanceSelection,
@@ -381,7 +386,13 @@ function readRunFile(filePath, { recoverGuidance = false } = {}) {
       `${filePath} was written by a newer orchestrator (state version ${parsed.version}, this build supports ${RUN_STATE_VERSION}).`
     );
   }
-  for (const task of Object.values(parsed?.tasks ?? {})) {
+  if (parsed.retiredTasks !== undefined && (!Array.isArray(parsed.retiredTasks) ||
+      parsed.retiredTasks.some((task) => !task || typeof task !== "object" ||
+        !Array.isArray(task.attempts) || !Number.isInteger(task.retiredPlanRevision) ||
+        task.retiredPlanRevision < 1))) {
+    throw new Error(`${filePath} contains invalid retired task history.`);
+  }
+  for (const task of taskHistory(parsed)) {
     for (const attempt of task?.attempts ?? []) {
       if (attempt?.outcome) {
         try {
@@ -398,7 +409,7 @@ function readRunFile(filePath, { recoverGuidance = false } = {}) {
           Array.isArray(parsed.guidance))) {
       throw new Error(`${filePath} is missing required version-5 guidance state.`);
     }
-    for (const task of Object.values(parsed?.tasks ?? {})) {
+    for (const task of taskHistory(parsed)) {
       if (task.guidanceSelection !== undefined && task.guidanceSelection !== null) {
         validateGuidanceSelection(task.guidanceSelection);
       }
@@ -1092,6 +1103,17 @@ export function snapshotTaskAssignment(run, task) {
   };
 }
 
+/** Never reconstruct a legacy assignment from an uncorroborated current plan. */
+export function historicalTaskAssignment(run, task, attempt, claimedPlanRevision = null) {
+  if (Object.hasOwn(attempt, "assignmentSnapshot")) {
+    return attempt.assignmentSnapshot;
+  }
+  const revision = task.retiredPlanRevision ?? run.planRevision;
+  return Number.isInteger(revision) && revision > 0 && claimedPlanRevision === revision
+    ? snapshotTaskAssignment({ ...run, planRevision: revision }, task)
+    : null;
+}
+
 export function replacePlan(cwd, runId, rawTasks, { defaultScope = [] } = {}) {
   if (!Array.isArray(rawTasks) || !rawTasks.length) {
     throw new Error("A run plan requires a non-empty tasks array.");
@@ -1151,6 +1173,13 @@ export function replacePlan(cwd, runId, rawTasks, { defaultScope = [] } = {}) {
     }
     validateGraph(tasks);
     validateLunaLeaves(run, tasks);
+    const retired = Object.values(run.tasks).filter((task) => !tasks[task.id]);
+    if (retired.length) {
+      run.retiredTasks = [
+        ...(run.retiredTasks ?? []),
+        ...retired.map((task) => ({ ...task, retiredPlanRevision: run.planRevision }))
+      ];
+    }
     run.tasks = tasks;
     refreshPendingGuidance(run);
     run.planRevision += 1;
@@ -1371,6 +1400,14 @@ function currentAttempt(task, attemptId = null) {
     throw new Error(`Task "${task.id}" has no matching attempt.`);
   }
   return attempt;
+}
+
+// A launch cancelled and then retired can finish creating its worktree late.
+// Locate that exact assignment, never the replacement that reused its task ID.
+function taskForExecution(run, taskId, attemptId) {
+  assertNoPendingIntegration(run);
+  return taskHistory(run).find((task) => task.id === taskId &&
+    task.attempts.some((attempt) => attempt.id === attemptId)) ?? requireTask(run, taskId);
 }
 
 function outcomeInput(
@@ -1943,8 +1980,15 @@ export function claimTask(cwd, runId, taskId, lane) {
       );
     }
     const retry = claimRetry(task);
+    const priorIds = new Set(taskHistory(run).flatMap((entry) =>
+      (entry.attempts ?? []).map((attempt) => attempt.id)
+    ));
+    let attemptNumber = 1;
+    while (priorIds.has(`${task.id}-attempt-${attemptNumber}`)) {
+      attemptNumber += 1;
+    }
     const attempt = {
-      id: `${task.id}-attempt-${task.attempts.length + 1}`,
+      id: `${task.id}-attempt-${attemptNumber}`,
       status: "dispatching",
       agentId: null,
       jobId: null,
@@ -2526,7 +2570,7 @@ export function attachExecution(cwd, runId, taskId, { attemptId, worktree, runne
   const filePath = runFile(cwd, id);
   return withFileLock(filePath, () => {
     const run = loadRun(cwd, id);
-    const task = requireTask(run, taskId);
+    const task = taskForExecution(run, taskId, attemptId);
     const attempt = currentAttempt(task, attemptId);
     // Only a dispatching attempt takes its worker. One cancelled while the worker
     // was spawned must stay cancelled; the caller stops the worker instead.
@@ -2731,9 +2775,16 @@ export function failTaskAttempt(
   const filePath = runFile(cwd, id);
   return withFileLock(filePath, () => {
     const run = loadRun(cwd, id);
-    const task = requireTask(run, taskId);
+    const task = taskForExecution(run, taskId, attemptId);
     const attempt = currentAttempt(task, attemptId);
     assertCurrentRunner(attempt, runnerStatusFile);
+    if (task.retiredPlanRevision) {
+      if (!attempt.worktree && worktree) {
+        attempt.worktree = worktree;
+        writeRun(cwd, run);
+      }
+      return task;
+    }
     const outcomeCandidate = outcomeInput(terminalOutcome, action, reasonCode, {
       provenance,
       signals
@@ -3365,14 +3416,14 @@ export function takeWorktreesForRemoval(cwd, runId, taskId, detach, live = () =>
   const filePath = runFile(cwd, id);
   return withFileLock(filePath, () => {
     const run = loadRun(cwd, id);
-    if (taskId && !run.tasks[taskId]) {
+    const tasks = taskHistory(run).filter((task) => !taskId || task.id === taskId);
+    if (taskId && !tasks.length) {
       throw new Error(`Unknown task "${taskId}" in run "${id}".`);
     }
-    const tasks = taskId ? [run.tasks[taskId]] : Object.values(run.tasks);
     const taken = [];
     const refused = [];
     for (const task of tasks) {
-      if (!CLEANABLE_TASK_STATUSES.has(task.status)) {
+      if (!CLEANABLE_TASK_STATUSES.has(task.status) && !task.retiredPlanRevision) {
         continue;
       }
       // A cancelled task's worker can still be running (one attached as the
@@ -3620,7 +3671,7 @@ export function modelSubstitutionSummary(run) {
   const unavailable = (run.unavailableModels ?? []).map(
     (entry) => `unavailable: ${entry.model} (first rejected on ${entry.attemptId}: ${entry.message})`
   );
-  const attempts = Object.values(run.tasks)
+  const attempts = taskHistory(run)
     .flatMap((task) => task.attempts.filter((attempt) => attempt.substitution))
     .sort((left, right) => Number(right.substitution.pinned) - Number(left.substitution.pinned));
   return {

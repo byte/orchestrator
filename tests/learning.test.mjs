@@ -25,12 +25,14 @@ import {
   eventsFile,
   loadRun,
   recordIntegrationDiagnostic,
+  recordTaskDisposition,
   recordTaskResult,
   replacePlan,
   retryTask,
   runFile,
   verifyTask
 } from "../plugins/orchestrator/scripts/lib/runs.mjs";
+import { routeEvidence } from "../plugins/orchestrator/scripts/lib/routes.mjs";
 import { CLI, cleanup, makeRepo, runCli } from "./helpers.mjs";
 
 const repos = [];
@@ -350,6 +352,70 @@ test("replanning preserves historical assignment metadata and consented text", (
   assert.equal(after.features.acceptanceCriterionCount, 1);
   const metadata = fs.readFileSync(learningExamplesFile(root), "utf8");
   assert.doesNotMatch(metadata, /ORIGINAL_|REPLACEMENT_|NEW_CRITERION/);
+});
+
+test("retired assignments retain reviewed labels, original text, and route evidence after ID reuse", () => {
+  const root = repo();
+  const runId = "run-retired-learning";
+  createRun(root, { id: runId, lane: "api", objective: "Keep evidence" });
+  const original = {
+    id: "work", title: "ORIGINAL_TITLE", objective: "ORIGINAL_OBJECTIVE",
+    kind: "read", model: "sol", reasoningEffort: "high",
+    routingReason: "ORIGINAL_ROUTE"
+  };
+  const report = () => {
+    addCheckpoint(root, runId, { summary: "Ready" });
+    const dispatch = claimTask(root, runId, "work", { constraints: [] });
+    recordTaskResult(root, runId, "work", {
+      attemptId: dispatch.attemptId,
+      resultText: JSON.stringify({ summary: "Done", files_touched: [], tests: [],
+        decisions: [], assumptions: [], blockers: [], confidence: "high" })
+    });
+    return dispatch;
+  };
+  replacePlan(root, runId, [original]);
+  const first = report();
+  recordTaskDisposition(root, runId, "work", {
+    terminalOutcome: "policy_refused", action: "refuse", reasonCode: "policy_boundary",
+    evidence: ["Outside policy"]
+  });
+  collectLearningExamples(root);
+  const before = listLearningExamples(root)[0];
+  labelLearningExample(root, before.sampleId, {
+    terminalOutcome: "policy_refused", action: "refuse", reasonCode: "policy_boundary",
+    provenance: "user"
+  });
+  replacePlan(root, runId, [{ ...original, id: "placeholder" }]);
+  assert.equal(collectLearningExamples(root).scannedAttempts, 1);
+  assert.equal(routeEvidence(root).rows[0].reasoningEffort, "high");
+  replacePlan(root, runId, [{ ...original, title: "NEW_TITLE", objective: "NEW_OBJECTIVE",
+    reasoningEffort: "low", routingReason: "NEW_ROUTE" }]);
+  const second = report();
+  assert.notEqual(second.attemptId, first.attemptId);
+  verifyTask(root, runId, "work", { verdict: "pass", evidence: ["Accepted new assignment"] });
+  assert.equal(collectLearningExamples(root).created, 1);
+  const examples = listLearningExamples(root);
+  assert.equal(examples.length, 2);
+  const oldSample = examples.find((sample) => sample.sampleId === before.sampleId);
+  const newSample = examples.find((sample) => sample.sampleId !== before.sampleId);
+  assert.equal(oldSample.outcome.terminalOutcome, "policy_refused");
+  assert.equal(oldSample.labels.length, 1);
+  assert.equal(newSample.outcome.terminalOutcome, "accepted");
+  assert.deepEqual(newSample.labels, []);
+  assert.equal(newSample.features.reasoningEffort, "low");
+  const exported = exportLearningExamples(root, {
+    name: "retired-text", includeTextFields: ["taskTitle", "taskObjective", "routingReason"],
+    consentProvenance: "user", acknowledgeSensitiveExport: true
+  });
+  const records = fs.readFileSync(exported.examplesFile, "utf8").trim().split("\n").map(JSON.parse);
+  assert.deepEqual(records.find((record) => record.example.sampleId === before.sampleId).text, {
+    taskTitle: "ORIGINAL_TITLE", taskObjective: "ORIGINAL_OBJECTIVE", routingReason: "ORIGINAL_ROUTE"
+  });
+  assert.equal(records.find((record) => record.example.sampleId === newSample.sampleId).text.taskTitle, "NEW_TITLE");
+  const routes = routeEvidence(root);
+  assert.equal(routes.attempts, 2);
+  assert.deepEqual(routes.rows.map((row) => [row.reasoningEffort, row.attempts, row.accepted]).sort(),
+    [["high", 1, 0], ["low", 1, 1]]);
 });
 
 test("legacy assignment history is usable only while the claimed plan is established", () => {
