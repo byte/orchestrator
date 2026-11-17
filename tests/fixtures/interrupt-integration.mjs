@@ -28,8 +28,17 @@ process.on("exit", () => {
 });
 const rename = fs.renameSync;
 fs.renameSync = function (source, target) {
+  if (String(target).endsWith("/events.jsonl")) {
+    if (phase === "audit-publish") throw new Error("audit disk full");
+    const result = rename.call(this, source, target);
+    if (phase === "audit-crash") process.exit(86);
+    return result;
+  }
   if (String(target).endsWith("/run.json")) {
     const run = JSON.parse(fs.readFileSync(source, "utf8"));
+    if (phase === "audit-clear" && run.tasks.build?.status === "completed" && !run.pendingIntegrationEvent) {
+      throw new Error("audit clear disk full");
+    }
     if (phase === "after-git" && run.tasks.build?.status === "completed") {
       process.exit(86);
     }

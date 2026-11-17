@@ -681,6 +681,9 @@ function commandRun(argv, cwd) {
 
   if (action === "resume") {
     const integrationRecovery = recoverRunIntegration(cwd, runId);
+    if (integrationRecovery?.auditWarning && !options.json) {
+      process.stderr.write(`${integrationRecovery.auditWarning}\n`);
+    }
     const updates = pollRunWorkers(cwd, runId);
     const run = loadRun(cwd, runId);
     const recovery = recoveryReport(run);
@@ -933,7 +936,7 @@ function integrateCommand(cwd, runId, positionals, options) {
     }
     throw error;
   }
-  return options.json ? emitJson(result) : emit(`Integrated ${taskId}; run: ${result.runStatus}.`);
+  return options.json ? emitJson(result) : emit(`Integrated ${taskId}; run: ${result.runStatus}.${result.auditWarning ? `\n${result.auditWarning}` : ""}`);
 }
 
 async function main() {

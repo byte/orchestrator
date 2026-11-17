@@ -476,6 +476,45 @@ test("a wrapper's final Git result retains group ownership until poll or cancel 
   }
 });
 
+test("accepted integration repairs its audit event exactly once after publication or state-write failure", () => {
+  const preload = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "interrupt-integration.mjs");
+  for (const phase of ["audit-publish", "audit-clear", "audit-crash"]) {
+    const root = repo();
+    const id = `run-${phase}`;
+    plan(root, id);
+    checkpointPlan(root, id);
+    const dispatch = claimTask(root, id, "build", { constraints: [] });
+    let run = loadRun(root, id);
+    const worktree = createTaskWorktree(root, run, run.tasks.build, run.tasks.build.attempts.at(-1));
+    attachExecution(root, id, "build", { attemptId: dispatch.attemptId, worktree });
+    write(worktree.path, "src/module.js", "export const value = 53;\n");
+    git(worktree.path, ["add", "src/module.js"]);
+    git(worktree.path, ["commit", "--quiet", "-m", "Add module"]);
+    reportFiles(root, id, dispatch.attemptId, ["src/module.js"]);
+    const result = spawnSync(process.execPath, [CLI, "run", "integrate", id, "build"], {
+      cwd: root, encoding: "utf8",
+      env: { ...process.env, NODE_OPTIONS: `--import=${preload}`, ORCH_TEST_INTEGRATION_INTERRUPT: phase }
+    });
+    assert.equal(result.status, phase === "audit-crash" ? 86 : 0, result.stderr);
+    if (phase !== "audit-crash") assert.match(result.stdout, /Integration accepted; audit event is pending/);
+    run = loadRun(root, id);
+    assert.equal(run.tasks.build.status, "completed");
+    assert.ok(run.pendingIntegrationEvent);
+    const head = git(root, ["rev-parse", "HEAD"]).trim();
+    const prior = fs.readFileSync(eventsFile(root, id), "utf8");
+    for (const action of [["integrate", id, "build"], ["resume", id], ["resume", id]]) {
+      const repaired = runCli(root, ["run", ...action, "--json"]);
+      assert.equal(repaired.code, 0, repaired.stderr);
+      assert.equal(loadRun(root, id).pendingIntegrationEvent, undefined);
+      assert.equal(git(root, ["rev-parse", "HEAD"]).trim(), head, "audit repair never repeats Git integration");
+    }
+    const text = fs.readFileSync(eventsFile(root, id), "utf8");
+    assert.ok(text.startsWith(prior), "existing event bytes are preserved");
+    const events = text.trim().split("\n").map((line) => JSON.parse(line));
+    assert.equal(events.filter((event) => event.type === "task.integrated").length, 1);
+  }
+});
+
 test("a refused run cancellation leaves its still-running worker untouched", async () => {
   const root = repo();
   const id = "run-refused-cancel";

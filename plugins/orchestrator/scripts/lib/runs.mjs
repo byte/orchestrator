@@ -2927,9 +2927,33 @@ export function recordIntegration(
   const filePath = runFile(cwd, id);
   return withFileLock(filePath, () => {
     const run = loadRun(cwd, id);
+    if (run.pendingIntegrationEvent) {
+      throw new Error("An accepted integration has a pending audit event; resume the run before another integration.");
+    }
     const task = requireTask(run, taskId);
     return finishIntegration(cwd, run, task, integration);
   });
+}
+
+// The run lock serializes event writers. Publish the whole appended log atomically
+// so interruption cannot leave half of this acceptance event in the JSONL stream.
+function flushIntegrationEvent(cwd, run) {
+  const event = run.pendingIntegrationEvent;
+  if (!event) return null;
+  try {
+    const file = eventsFile(cwd, run.id);
+    const text = fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "";
+    const events = text.split("\n").filter(Boolean).map((line) => JSON.parse(line));
+    if (!events.some((entry) => entry.eventId === event.eventId)) {
+      atomicWrite(file, `${text}${text && !text.endsWith("\n") ? "\n" : ""}${JSON.stringify(event)}\n`);
+    }
+    delete run.pendingIntegrationEvent;
+    writeRun(cwd, run);
+    return null;
+  } catch (error) {
+    run.pendingIntegrationEvent = event;
+    return `Integration accepted; audit event is pending. Run \`orch run resume ${run.id}\` to retry: ${error.message}`;
+  }
 }
 
 function finishIntegration(cwd, run, task, { evidence = [], inspection, commits, integrationHead }) {
@@ -2951,16 +2975,23 @@ function finishIntegration(cwd, run, task, { evidence = [], inspection, commits,
     }));
   run.repository.integrationHead = integrationHead;
   delete run.pendingIntegration;
-  refreshRunStatus(run);
-  writeRun(cwd, run);
-  appendEvent(cwd, run.id, {
+  run.pendingIntegrationEvent = {
+    at: nowIso(), eventId: randomUUID(),
     type: "task.integrated", taskId: task.id, attemptId: attempt.id,
     commits, integrationHead, evidence: task.verification.evidence, outcome
-  });
-  return { task, ready: readyTasks(run), runStatus: run.status };
+  };
+  refreshRunStatus(run);
+  writeRun(cwd, run);
+  const auditWarning = flushIntegrationEvent(cwd, run);
+  return { task, ready: readyTasks(run), runStatus: run.status, ...(auditWarning ? { auditWarning } : {}) };
 }
 
 function recoverIntegration(cwd, run) {
+  if (run.pendingIntegrationEvent) {
+    const task = run.tasks[run.pendingIntegrationEvent.taskId];
+    const auditWarning = flushIntegrationEvent(cwd, run);
+    return { task, ready: readyTasks(run), runStatus: run.status, ...(auditWarning ? { auditWarning } : {}) };
+  }
   const pending = run.pendingIntegration;
   if (!pending) {
     return null;
@@ -2993,6 +3024,9 @@ export function integrateRunTask(cwd, runId, taskId, { evidence = [] } = {}) {
       const recovered = recoverIntegration(cwd, run);
       if (recovered?.task.id === taskId) {
         return recovered;
+      }
+      if (run.pendingIntegrationEvent) {
+        throw new Error(recovered.auditWarning);
       }
       const task = requireTask(run, taskId);
       if (task.status !== "reported") {
