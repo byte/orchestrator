@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import fs from "node:fs";
+import path from "node:path";
 import process from "node:process";
 
 import { parseArgs, splitList } from "./lib/args.mjs";
@@ -70,7 +71,7 @@ import {
   integrateTaskWorktree,
   WorktreeOperationError
 } from "./lib/worktrees.mjs";
-import { initWorkspace, isInitialized, orchDir } from "./lib/state.mjs";
+import { initWorkspace, isInitialized, localDir, orchDir, withFileLock } from "./lib/state.mjs";
 import { resolveWorkspaceRoot } from "./lib/workspace.mjs";
 
 const USAGE = `orchestrator — a Claude-supervised Codex worker pool
@@ -873,35 +874,10 @@ function commandRun(argv, cwd) {
   }
 
   if (action === "integrate") {
-    const run = loadRun(cwd, runId);
-    const taskId = positionals[1];
-    const task = run.tasks[taskId];
-    if (!task) {
-      throw new Error(`Unknown task "${taskId}" in run "${runId}".`);
-    }
-    if (task.status !== "reported") {
-      throw new Error(`Task "${task.id}" cannot be integrated from status "${task.status}".`);
-    }
-    let integrated;
-    try {
-      integrated = integrateTaskWorktree(cwd, run, task, task.attempts.at(-1));
-    } catch (error) {
-      if (error instanceof WorktreeOperationError) {
-        recordIntegrationDiagnostic(cwd, runId, taskId, {
-          kind: error.kind,
-          reasonCode: error.reasonCode,
-          signals: error.signals,
-          error: error.message,
-          details: error.details
-        });
-      }
-      throw error;
-    }
-    const result = recordIntegration(cwd, runId, taskId, {
-      evidence: splitList(options.evidence),
-      ...integrated
-    });
-    return options.json ? emitJson(result) : emit(`Integrated ${taskId}; run: ${result.runStatus}.`);
+    // One integration at a time per checkout: its head check, cherry-pick and
+    // recorded head must not interleave with another's, or a stale head is
+    // recorded and every later launch refuses branch drift.
+    return withFileLock(path.join(localDir(cwd), "integration"), () => integrateCommand(cwd, runId, positionals, options));
   }
 
   if (action === "finalize") {
@@ -938,6 +914,38 @@ function commandRun(argv, cwd) {
   }
 
   throw new Error(`Unknown run action "${action}".`);
+}
+
+function integrateCommand(cwd, runId, positionals, options) {
+  const run = loadRun(cwd, runId);
+  const taskId = positionals[1];
+  const task = run.tasks[taskId];
+  if (!task) {
+    throw new Error(`Unknown task "${taskId}" in run "${runId}".`);
+  }
+  if (task.status !== "reported") {
+    throw new Error(`Task "${task.id}" cannot be integrated from status "${task.status}".`);
+  }
+  let integrated;
+  try {
+    integrated = integrateTaskWorktree(cwd, run, task, task.attempts.at(-1));
+  } catch (error) {
+    if (error instanceof WorktreeOperationError) {
+      recordIntegrationDiagnostic(cwd, runId, taskId, {
+        kind: error.kind,
+        reasonCode: error.reasonCode,
+        signals: error.signals,
+        error: error.message,
+        details: error.details
+      });
+    }
+    throw error;
+  }
+  const result = recordIntegration(cwd, runId, taskId, {
+    evidence: splitList(options.evidence),
+    ...integrated
+  });
+  return options.json ? emitJson(result) : emit(`Integrated ${taskId}; run: ${result.runStatus}.`);
 }
 
 async function main() {

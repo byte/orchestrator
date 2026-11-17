@@ -7,6 +7,7 @@ import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import {
+  cancelTask,
   claimTask,
   createRun,
   eventsFile,
@@ -459,6 +460,46 @@ test("a nested repository in a worker's worktree counts as changed, so cleanup k
   assert.equal(fs.readFileSync(path.join(nested, "value.txt"), "utf8"), "uncommitted work\n");
 });
 
+test("a worker's change to the orchestrator's local state is out of scope even under a scope that covers it", () => {
+  const root = repo();
+  plan(root, "run-reserved");
+  checkpointPlan(root, "run-reserved");
+  const dispatch = claimTask(root, "run-reserved", "build", { constraints: [] });
+  let run = loadRun(root, "run-reserved");
+  const worktree = createTaskWorktree(root, run, run.tasks.build, run.tasks.build.attempts.at(-1));
+  write(worktree.path, ".orchestrator/local/runs/victim/run.json", "worker payload\n");
+  git(worktree.path, ["add", "-f", ".orchestrator/local/runs/victim/run.json"]);
+  git(worktree.path, ["commit", "--quiet", "-m", "state"]);
+  reportFiles(root, "run-reserved", dispatch.attemptId, [".orchestrator/local/runs/victim/run.json"]);
+  run = loadRun(root, "run-reserved");
+  const task = run.tasks.build;
+  task.scope = ["**"];
+  task.attempts.at(-1).worktree = worktree;
+  const inspection = inspectTaskWorktree(task, task.attempts.at(-1));
+  assert.deepEqual(inspection.outOfScope, [".orchestrator/local/runs/victim/run.json"]);
+  assert.equal(inspection.ready, false);
+  assert.throws(
+    () => integrateTaskWorktree(root, run, task, task.attempts.at(-1)),
+    (error) => error.signals?.includes("scope_violation")
+  );
+});
+
+test("run integrate waits for another integration of the same checkout", () => {
+  const root = repo();
+  plan(root, "run-integrate-lock");
+  checkpointPlan(root, "run-integrate-lock");
+  const lock = path.join(root, ".orchestrator", "local", "integration.lock");
+  fs.mkdirSync(path.dirname(lock), { recursive: true });
+  fs.writeFileSync(lock, "");
+  try {
+    const result = runCli(root, ["run", "integrate", "run-integrate-lock", "build", "--evidence", "x"]);
+    assert.notEqual(result.code, 0);
+    assert.match(result.stderr, /Timed out waiting for state lock .*integration\.lock/);
+  } finally {
+    fs.rmSync(lock, { force: true });
+  }
+});
+
 test("cleanup refuses a worker worktree with an uncommitted edit to a tracked .orchestrator file", () => {
   const root = repo();
   write(root, ".orchestrator/notes.md", "tracked\n");
@@ -872,6 +913,36 @@ test("a cancel leaves nothing of the worker running once it returns", async () =
       process.kill(childPid, "SIGKILL");
     } catch {
       // Already gone.
+    }
+  }
+});
+
+test("cancelling stops a cancelled attempt's worker even after a retry launched another", async () => {
+  const root = repo();
+  plan(root, "run-cancel-hidden");
+  checkpointPlan(root, "run-cancel-hidden");
+  const first = launchTaskWorker(root, "run-cancel-hidden", "build", { constraints: [] }, {
+    codexCommand: [process.execPath, slowFixture, "--delay=60000"]
+  });
+  // Attempt 1's cancellation is saved while its worker is still attaching, so
+  // nothing stops it; then a retry launches attempt 2.
+  cancelTask(root, "run-cancel-hidden", "build", "user stopped it");
+  retryTask(root, "run-cancel-hidden", "build", { note: "Again.", fresh: true });
+  checkpointPlan(root, "run-cancel-hidden");
+  const second = launchTaskWorker(root, "run-cancel-hidden", "build", { constraints: [] }, {
+    codexCommand: [process.execPath, slowFixture, "--delay=60000"]
+  });
+  try {
+    cancelWorkers(root, "run-cancel-hidden", "build", "user stopped it again");
+    assert.ok(await exited(second.runner.pid, 10000), "attempt 2's wrapper stopped");
+    assert.ok(await exited(first.runner.pid, 10000), "attempt 1's wrapper stopped too");
+  } finally {
+    for (const pid of [first.runner.pid, second.runner.pid]) {
+      try {
+        process.kill(pid, "SIGKILL");
+      } catch {
+        // Already gone.
+      }
     }
   }
 });

@@ -8,6 +8,8 @@ import { partitionByScope } from "./glob.mjs";
 import { effectiveTaskScope } from "./runs.mjs";
 import { localDir } from "./state.mjs";
 
+const RESERVED = /^\.orchestrator\/local(\/|$)/;
+
 function gitRaw(cwd, args, gitDir = null) {
   return execFileSync("git", gitDir ? args : [...SUPERVISOR_GIT_ARGS, ...args], {
     cwd,
@@ -246,9 +248,13 @@ export function inspectTaskWorktree(task, attempt, { cwd = null } = {}) {
   // The planned scope plus what the supervisor granted this task through
   // `run answer`; anything else outside it is still refused.
   const scope = effectiveTaskScope(task);
-  const { outOfScope } = scope.length
-    ? partitionByScope([...new Set([...files, ...dirty])], scope)
+  const changed = [...new Set([...files, ...dirty])];
+  const { outOfScope: outsideScope } = scope.length
+    ? partitionByScope(changed, scope)
     : { outOfScope: [] };
+  // The orchestrator's own local state is never a worker's to change, whatever
+  // the scope says: integration would write it under a running CLI.
+  const outOfScope = [...new Set([...outsideScope, ...changed.filter((file) => RESERVED.test(file))])].sort();
   const grantedScope = scope.filter((pattern) => !task.scope.includes(pattern));
   const declared = task.result?.structured?.files_touched ??
     parseFileList(task.result?.fields?.files_touched);

@@ -114,6 +114,13 @@ Fixes:
 - docs/architecture.md states the worker containment properties and their
   non-goals (configured checkout filters and commit signing during
   integration, ignored files inside a worker's worktree).
+- `run integrate` runs one integration of a checkout at a time, so two at once
+  can no longer record a stale integration head that blocks every later
+  launch with branch drift.
+- A worker's change under `.orchestrator/local/` is out of scope whatever the
+  task's scope, so integration never writes the orchestrator's own state.
+- `run cancel` stops the live worker of every cancelled attempt of a task, not
+  only the latest, so one that attached just before a retry is not missed.
 - Status writes are numbered, so a poll holding an older snapshot cannot save
   it over a newer one (a discarded thread over the answer's fresh fallback).
 - A launch whose briefing cannot be rendered leaves the task pending, and a

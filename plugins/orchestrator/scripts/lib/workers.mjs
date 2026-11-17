@@ -899,9 +899,13 @@ export function cancelWorkers(cwd, runId, taskId, reason) {
     return taskId ? cancelTask(cwd, runId, taskId, reason) : cancelRun(cwd, runId, reason);
   } finally {
     // Also when the cancellation was saved but a later step (its event) failed.
+    // Every cancelled attempt, not only the latest: a retry launched since the
+    // cancellation was saved hides a worker that attached to the one before.
     for (const task of pick(loadRun(cwd, runId))) {
-      if (task.status === "cancelled") {
-        stopLiveTaskWorker(task.attempts.at(-1));
+      for (const attempt of task.attempts) {
+        if (attempt.status === "cancelled") {
+          stopLiveTaskWorker(attempt);
+        }
       }
     }
   }

@@ -313,8 +313,9 @@ configuration it cannot reach, and processes that ignore SIGTERM. Containment me
    directory recorded at creation.
 4. Cleanup deletes only directories the orchestrator created, and never a worktree whose tracked,
    untracked, or submodule-path contents differ from its last commit.
-5. Integration changes only the inspected, in-scope, declared paths, and never replaces an
-   untracked or ignored file in the supervisor checkout.
+5. Integration changes only the inspected, in-scope, declared paths, never the orchestrator's own
+   `.orchestrator/local/` state whatever the scope, and never replaces an untracked or ignored file
+   in the supervisor checkout. Integrations of one checkout run one at a time.
 6. When a worker is stopped, cancelled, or finishes, nothing it started keeps running, and a dead
    wrapper's processes are killed by the next poll or cancel.
 
