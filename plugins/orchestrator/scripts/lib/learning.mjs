@@ -19,7 +19,8 @@ import {
   WORKER_MODELS,
   eventsFile,
   listRuns,
-  loadRun
+  loadRun,
+  snapshotTaskAssignment
 } from "./runs.mjs";
 import { atomicWrite, localDir, nowIso } from "./state.mjs";
 import { resolveWorkspaceRoot } from "./workspace.mjs";
@@ -352,6 +353,7 @@ function readAttemptEvents(cwd, runId) {
   if (!fs.existsSync(filePath)) {
     return byAttempt;
   }
+  let planRevision = null;
   const lines = fs.readFileSync(filePath, "utf8").split("\n").filter(Boolean);
   for (const [index, line] of lines.entries()) {
     let event;
@@ -360,15 +362,28 @@ function readAttemptEvents(cwd, runId) {
     } catch (error) {
       throw new Error(`${filePath}:${index + 1} is not valid JSON: ${error.message}`);
     }
-    if (!SAFE_EVENT_TYPES.has(event.type) || typeof event.attemptId !== "string") {
+    if (event.type === "run.plan_replaced") {
+      planRevision = Number.isInteger(event.revision) && event.revision > 0
+        ? event.revision
+        : null;
+      continue;
+    }
+    if ((!SAFE_EVENT_TYPES.has(event.type) && event.type !== "task.claimed") ||
+        typeof event.attemptId !== "string") {
       continue;
     }
     const summary = byAttempt.get(event.attemptId) ?? {
       types: [],
+      assignmentPlanRevision: null,
       resultContractFound: null,
       missingContractFieldCount: null,
       verificationEvidenceCount: 0
     };
+    if (event.type === "task.claimed") {
+      summary.assignmentPlanRevision = planRevision;
+      byAttempt.set(event.attemptId, summary);
+      continue;
+    }
     if (!summary.types.includes(event.type)) {
       summary.types.push(event.type);
     }
@@ -415,13 +430,35 @@ function safeDiagnostics(attempt) {
   })).sort((left, right) => canonicalJson(left).localeCompare(canonicalJson(right)));
 }
 
-function textSource(run, task) {
-  return {
-    runObjective: run.objective ?? "",
-    taskTitle: task.title ?? "",
-    taskObjective: task.objective ?? "",
-    routingReason: task.routingReason ?? ""
-  };
+function assignmentForAttempt(run, task, attempt, eventSummary) {
+  let snapshot = attempt.assignmentSnapshot;
+  if (!Object.hasOwn(attempt, "assignmentSnapshot")) {
+    // Older attempts have no snapshot. Their current definition is historical
+    // only when the event history establishes that no replan followed the claim.
+    // Do not silently relabel older attempts, or export another assignment's text.
+    if (eventSummary?.assignmentPlanRevision !== run.planRevision ||
+        !Number.isInteger(run.planRevision) || run.planRevision < 1) {
+      throw new Error(
+        `Historical assignment for attempt "${attempt.id}" is unavailable; ` +
+          "no snapshot or unchanged claimed plan is established."
+      );
+    }
+    snapshot = snapshotTaskAssignment(run, task);
+  }
+  assertExactKeys(snapshot, [
+    "version", "planRevision", "taskKind", "dependencyCount", "constraintCount",
+    "scopeEntryCount", "acceptanceCriterionCount", "model", "reasoningEffort",
+    "routeSource", "routingReasonPresent", "text"
+  ], "Historical assignment snapshot");
+  if (snapshot.version !== 1 || !Number.isInteger(snapshot.planRevision) ||
+      snapshot.planRevision < 1) {
+    throw new Error("Historical assignment snapshot version or plan revision is invalid.");
+  }
+  assertExactKeys(snapshot.text, LEARNING_TEXT_FIELDS, "Historical assignment text");
+  if (LEARNING_TEXT_FIELDS.some((field) => typeof snapshot.text[field] !== "string")) {
+    throw new Error("Historical assignment text fields must be strings.");
+  }
+  return snapshot;
 }
 
 function validateTextOptions(
@@ -461,9 +498,7 @@ function deriveExample(
 ) {
   const refs = sourceRefs(identity, run.id, task.id, attempt.id);
   const eventTypes = eventSummary.types;
-  const routeSource = run.workerPolicy?.routingMode === "pinned"
-    ? "run_pin"
-    : "planned_task";
+  const assignment = assignmentForAttempt(run, task, attempt, eventSummary);
   const record = {
     schemaVersion: LEARNING_SCHEMA_VERSION,
     sampleId: sampleId(identity, refs, attempt.outcome.version),
@@ -477,21 +512,20 @@ function deriveExample(
     },
     features: {
       laneRef: `lane-${hmac(identity, "lane:v1", run.lane).slice(0, 32)}`,
-      taskKind: task.kind,
-      planRevision: Number(run.planRevision ?? 0),
-      dependencyCount: task.dependsOn?.length ?? 0,
-      constraintCount: task.constraints?.length ?? 0,
-      scopeEntryCount: task.scope?.length ?? 0,
-      acceptanceCriterionCount: task.acceptance?.length ?? 0,
+      taskKind: assignment.taskKind,
+      planRevision: assignment.planRevision,
+      dependencyCount: assignment.dependencyCount,
+      constraintCount: assignment.constraintCount,
+      scopeEntryCount: assignment.scopeEntryCount,
+      acceptanceCriterionCount: assignment.acceptanceCriterionCount,
       retryCount: attemptIndex,
       terminalStatus: attempt.status,
       resultContractFound: eventSummary.resultContractFound,
       missingContractFieldCount: eventSummary.missingContractFieldCount,
-      model: attempt.model ?? task.model ?? run.workerPolicy?.model ?? null,
-      reasoningEffort: attempt.reasoningEffort ?? task.reasoningEffort ??
-        run.workerPolicy?.reasoningEffort ?? null,
-      routeSource,
-      routingReasonPresent: Boolean(task.routingReason),
+      model: attempt.model ?? assignment.model,
+      reasoningEffort: attempt.reasoningEffort ?? assignment.reasoningEffort,
+      routeSource: assignment.routeSource,
+      routingReasonPresent: assignment.routingReasonPresent,
       // True only when the attempt really continued an earlier attempt's Codex
       // thread; a warm retry that fell back to a fresh thread counts as cold.
       warmStart: Boolean(attempt.resumedFromAttemptId) && !attempt.resumeFallback
@@ -793,7 +827,10 @@ function sourceTextForExample(cwd, identity, example) {
       for (const attempt of task.attempts ?? []) {
         const refs = sourceRefs(identity, run.id, task.id, attempt.id);
         if (refs.attemptRef === example.source.attemptRef) {
-          return textSource(run, task);
+          const summary = Object.hasOwn(attempt, "assignmentSnapshot")
+            ? null
+            : readAttemptEvents(cwd, run.id).get(attempt.id);
+          return assignmentForAttempt(run, task, attempt, summary).text;
         }
       }
     }

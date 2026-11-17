@@ -278,6 +278,154 @@ test("collection skips outcome-less legacy attempts instead of guessing", () => 
   assert.deepEqual(listLearningExamples(root), []);
 });
 
+test("replanning preserves historical assignment metadata and consented text", () => {
+  const root = repo();
+  const runId = "run-assignment-history";
+  createRun(root, {
+    id: runId,
+    lane: "api",
+    objective: "ORIGINAL_RUN_OBJECTIVE",
+    workerModel: "sol",
+    reasoningEffort: "high"
+  });
+  replacePlan(root, runId, [{
+    id: "work",
+    title: "ORIGINAL_TITLE",
+    objective: "ORIGINAL_OBJECTIVE",
+    kind: "read",
+    scope: ["src/**"],
+    constraints: ["ORIGINAL_CONSTRAINT"],
+    acceptance: ["ORIGINAL_CRITERION"],
+    routingReason: "ORIGINAL_ROUTING_REASON"
+  }]);
+  addCheckpoint(root, runId, { summary: "Ready" });
+  const dispatch = claimTask(root, runId, "work", { constraints: [] });
+  recordTaskResult(root, runId, "work", {
+    attemptId: dispatch.attemptId,
+    resultText: JSON.stringify({
+      summary: "Review complete",
+      files_touched: [],
+      tests: [],
+      decisions: [],
+      assumptions: [],
+      blockers: [],
+      confidence: "high"
+    })
+  });
+  verifyTask(root, runId, "work", { verdict: "fail", evidence: ["Review missed a case"] });
+  collectLearningExamples(root);
+  const before = listLearningExamples(root)[0];
+  replacePlan(root, runId, [{
+    id: "work",
+    title: "REPLACEMENT_TITLE",
+    objective: "REPLACEMENT_OBJECTIVE",
+    kind: "write",
+    scope: ["src/**", "tests/**"],
+    constraints: ["NEW_CONSTRAINT_1", "NEW_CONSTRAINT_2"],
+    acceptance: ["NEW_CRITERION_1", "NEW_CRITERION_2"],
+    routingReason: "REPLACEMENT_ROUTING_REASON"
+  }]);
+  collectLearningExamples(root);
+  const after = listLearningExamples(root)[0];
+  const exported = exportLearningExamples(root, {
+    name: "historical-assignment",
+    includeTextFields: ["runObjective", "taskTitle", "taskObjective", "routingReason"],
+    consentProvenance: "user",
+    acknowledgeSensitiveExport: true
+  });
+  const record = JSON.parse(fs.readFileSync(exported.examplesFile, "utf8").trim());
+  assert.deepEqual({ features: after.features, text: record.text }, {
+    features: before.features,
+    text: {
+      runObjective: "ORIGINAL_RUN_OBJECTIVE",
+      taskTitle: "ORIGINAL_TITLE",
+      taskObjective: "ORIGINAL_OBJECTIVE",
+      routingReason: "ORIGINAL_ROUTING_REASON"
+    }
+  });
+  assert.equal(after.sampleId, before.sampleId);
+  assert.equal(after.fingerprint, before.fingerprint);
+  assert.equal(after.features.taskKind, "read");
+  assert.equal(after.features.planRevision, 1);
+  assert.equal(after.features.acceptanceCriterionCount, 1);
+  const metadata = fs.readFileSync(learningExamplesFile(root), "utf8");
+  assert.doesNotMatch(metadata, /ORIGINAL_|REPLACEMENT_|NEW_CRITERION/);
+});
+
+test("legacy assignment history is usable only while the claimed plan is established", () => {
+  const root = repo();
+  const runId = "run-legacy-assignment";
+  terminalTask(root, runId, "review");
+  const sourcePath = runFile(root, runId);
+  const source = JSON.parse(fs.readFileSync(sourcePath, "utf8"));
+  source.version = 5;
+  delete source.tasks.review.attempts[0].assignmentSnapshot;
+  fs.writeFileSync(sourcePath, `${JSON.stringify(source, null, 2)}\n`);
+  assert.equal(collectLearningExamples(root).created, 1);
+  const sample = listLearningExamples(root)[0];
+  assert.equal(sample.features.taskKind, "read");
+  assert.equal(sample.features.planRevision, 1);
+  const textOptions = {
+    includeTextFields: ["taskObjective"],
+    consentProvenance: "user",
+    acknowledgeSensitiveExport: true
+  };
+  const exported = exportLearningExamples(root, { name: "legacy-established", ...textOptions });
+  assert.equal(JSON.parse(fs.readFileSync(exported.examplesFile, "utf8")).text.taskObjective,
+    "CANARY_TASK_OBJECTIVE <redacted:home_path>");
+
+  const before = fs.readFileSync(learningExamplesFile(root), "utf8");
+  replacePlan(root, runId, [
+    source.tasks.review,
+    { id: "later", title: "Later", objective: "Later", kind: "read" }
+  ]);
+  assert.throws(() => collectLearningExamples(root), /Historical assignment.*unavailable/);
+  assert.equal(fs.readFileSync(learningExamplesFile(root), "utf8"), before);
+  assert.throws(() => exportLearningExamples(root, {
+    name: "legacy-ambiguous", ...textOptions
+  }), /Historical assignment.*unavailable/);
+  assert.equal(fs.existsSync(path.join(learningExportsDir(root), "legacy-ambiguous")), false);
+  // Old canonical metadata remains readable/exportable, but is not rewritten
+  // from an assignment the collector can no longer establish.
+  assert.equal(exportLearningExamples(root, { name: "legacy-metadata" }).manifest.sampleCount, 1);
+});
+
+test("missing legacy history and malformed snapshots never fall back to current text", () => {
+  const root = repo();
+  const runId = "run-missing-assignment";
+  terminalTask(root, runId, "review");
+  collectLearningExamples(root);
+  const sourcePath = runFile(root, runId);
+  const source = JSON.parse(fs.readFileSync(sourcePath, "utf8"));
+  const attempt = source.tasks.review.attempts[0];
+  const original = attempt.assignmentSnapshot;
+  const before = fs.readFileSync(learningExamplesFile(root), "utf8");
+  for (const invalid of [null, { ...original, version: 999 }, {
+    ...original, text: { ...original.text, workerOutput: "CANARY_RAW_WORKER_OUTPUT" }
+  }]) {
+    attempt.assignmentSnapshot = invalid;
+    fs.writeFileSync(sourcePath, `${JSON.stringify(source, null, 2)}\n`);
+    assert.throws(() => collectLearningExamples(root), /Historical assignment/);
+    assert.throws(() => exportLearningExamples(root, {
+      name: "malformed-assignment",
+      includeTextFields: ["taskObjective"],
+      consentProvenance: "user",
+      acknowledgeSensitiveExport: true
+    }), /Historical assignment/);
+    assert.equal(fs.readFileSync(learningExamplesFile(root), "utf8"), before);
+  }
+  delete attempt.assignmentSnapshot;
+  fs.writeFileSync(sourcePath, `${JSON.stringify(source, null, 2)}\n`);
+  fs.unlinkSync(eventsFile(root, runId));
+  assert.throws(() => collectLearningExamples(root), /Historical assignment.*unavailable/);
+  assert.throws(() => exportLearningExamples(root, {
+    name: "missing-history",
+    includeTextFields: ["taskObjective"],
+    consentProvenance: "user",
+    acknowledgeSensitiveExport: true
+  }), /Historical assignment.*unavailable/);
+});
+
 test("concurrent collection uses one store lock without duplicates or lost samples", async () => {
   const root = repo();
   terminalTask(root, "run-concurrent-a", "first");
@@ -361,7 +509,8 @@ test("managed exports have manifests and redact explicitly consented text", () =
   assert.match(exported, /<redacted:openai_key>|<redacted:email>/);
   const sourcePath = runFile(root, "run-export");
   const source = JSON.parse(fs.readFileSync(sourcePath, "utf8"));
-  source.tasks.review.title = `${"x".repeat(7990)} sk-1234567890abcdefghijklmnop`;
+  source.tasks.review.attempts[0].assignmentSnapshot.text.taskTitle =
+    `${"x".repeat(7990)} sk-1234567890abcdefghijklmnop`;
   fs.writeFileSync(sourcePath, `${JSON.stringify(source, null, 2)}\n`);
   const boundary = exportLearningExamples(root, {
     name: "boundary-redaction",

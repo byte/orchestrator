@@ -1067,6 +1067,30 @@ function taskDefinition(run, task) {
   };
 }
 
+/** Historical learning inputs stay in raw audit state, never the metadata store. */
+export function snapshotTaskAssignment(run, task) {
+  const route = resolveTaskWorker(run, task);
+  return {
+    version: 1,
+    planRevision: run.planRevision,
+    taskKind: task.kind,
+    dependencyCount: task.dependsOn?.length ?? 0,
+    constraintCount: task.constraints?.length ?? 0,
+    scopeEntryCount: task.scope?.length ?? 0,
+    acceptanceCriterionCount: task.acceptance?.length ?? 0,
+    model: route.model,
+    reasoningEffort: route.reasoningEffort,
+    routeSource: run.workerPolicy?.routingMode === "pinned" ? "run_pin" : "planned_task",
+    routingReasonPresent: Boolean(task.routingReason),
+    text: {
+      runObjective: run.objective ?? "",
+      taskTitle: task.title ?? "",
+      taskObjective: task.objective ?? "",
+      routingReason: task.routingReason ?? ""
+    }
+  };
+}
+
 export function replacePlan(cwd, runId, rawTasks, { defaultScope = [] } = {}) {
   if (!Array.isArray(rawTasks) || !rawTasks.length) {
     throw new Error("A run plan requires a non-empty tasks array.");
@@ -1929,6 +1953,7 @@ export function claimTask(cwd, runId, taskId, lane) {
       startedAt: null,
       finishedAt: null,
       outcome: null,
+      assignmentSnapshot: snapshotTaskAssignment(run, task),
       guidanceSnapshot: structuredClone(task.guidanceSelection),
       diagnostics: []
     };
