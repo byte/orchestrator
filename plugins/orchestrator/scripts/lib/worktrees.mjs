@@ -480,7 +480,14 @@ export function recoverTaskIntegration(cwd, run, pending) {
   };
   // Receipts prove what was applied, not that the original mutator has exited.
   // A process that died during Git cannot attest to that child's termination.
-  if (!["prepared", "stopped"].includes(pending.phase)) refuse();
+  // A record without a phase predates phases: its writer recorded nothing about
+  // the Git child, so accept it on the receipts alone, as that build did, but
+  // only once no Git process still holds this checkout's index.
+  if (pending.phase === undefined) {
+    if (fs.existsSync(path.resolve(cwd, git(cwd, ["rev-parse", "--git-path", "index.lock"])))) refuse();
+  } else if (!["prepared", "stopped"].includes(pending.phase)) {
+    refuse();
+  }
   if (currentBranch(cwd) !== run.repository.branch || changedFiles(cwd).length) {
     refuse();
   }

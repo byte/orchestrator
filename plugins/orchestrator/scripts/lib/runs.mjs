@@ -1122,6 +1122,7 @@ export function replacePlan(cwd, runId, rawTasks, { defaultScope = [] } = {}) {
   const filePath = runFile(cwd, id);
   return withFileLock(filePath, () => {
     const run = loadRun(cwd, id);
+    assertNoPendingIntegration(run);
     const active = Object.values(run.tasks).filter(
       (task) => SLOT_HOLDING_TASK_STATUSES.has(task.status) || task.status === "reported"
     );
@@ -1334,6 +1335,11 @@ export function answeredInputRounds(task) {
 function assertNoPendingIntegration(run) {
   if (run.pendingIntegration) {
     throw new Error(`Run "${run.id}" has an interrupted integration; use \`orch run resume ${run.id}\` before changing its tasks.`);
+  }
+  // An accepted integration whose audit event is unpublished holds the run: no
+  // later event may be recorded ahead of it, or the log would misorder history.
+  if (run.pendingIntegrationEvent) {
+    throw new Error(`Run "${run.id}" has an accepted integration whose audit event is pending; use \`orch run resume ${run.id}\` before changing its tasks.`);
   }
 }
 
@@ -2943,8 +2949,10 @@ function flushIntegrationEvent(cwd, run) {
   try {
     const file = eventsFile(cwd, run.id);
     const text = fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "";
-    const events = text.split("\n").filter(Boolean).map((line) => JSON.parse(line));
-    if (!events.some((entry) => entry.eventId === event.eventId)) {
+    // Match the serialized event ID rather than parsing every line: a line
+    // torn by an earlier crash must not block publication forever. The ID is
+    // a random UUID, so it cannot occur in any other event.
+    if (!text.includes(`"eventId":${JSON.stringify(event.eventId)}`)) {
       atomicWrite(file, `${text}${text && !text.endsWith("\n") ? "\n" : ""}${JSON.stringify(event)}\n`);
     }
     delete run.pendingIntegrationEvent;
@@ -3633,6 +3641,7 @@ export function finalizeRun(
   const filePath = runFile(cwd, id);
   return withFileLock(filePath, () => {
     const run = loadRun(cwd, id);
+    assertNoPendingIntegration(run);
     const tasks = Object.values(run.tasks);
     if (!tasks.length || !tasks.every((task) => task.status === "completed")) {
       const open = tasks.filter((task) => task.status !== "completed").map((task) => `${task.id} (${task.status})`);

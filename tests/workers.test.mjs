@@ -515,6 +515,77 @@ test("accepted integration repairs its audit event exactly once after publicatio
   }
 });
 
+function reportedBuild(root, id, extraTasks = []) {
+  plan(root, id);
+  if (extraTasks.length) replacePlan(root, id, [loadRun(root, id).tasks.build, ...extraTasks]);
+  checkpointPlan(root, id);
+  const dispatch = claimTask(root, id, "build", { constraints: [] });
+  const run = loadRun(root, id);
+  const worktree = createTaskWorktree(root, run, run.tasks.build, run.tasks.build.attempts.at(-1));
+  attachExecution(root, id, "build", { attemptId: dispatch.attemptId, worktree });
+  write(worktree.path, "src/module.js", "export const value = 53;\n");
+  git(worktree.path, ["add", "src/module.js"]);
+  git(worktree.path, ["commit", "--quiet", "-m", "Add module"]);
+  reportFiles(root, id, dispatch.attemptId, ["src/module.js"]);
+}
+
+test("a pending audit event holds the run, and a torn log line does not block its publication", () => {
+  const preload = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "interrupt-integration.mjs");
+  const root = repo();
+  const id = "run-audit-held";
+  reportedBuild(root, id, [{
+    id: "after", title: "After", objective: "After", kind: "read", scope: ["src/**"], dependsOn: ["build"]
+  }]);
+  const result = spawnSync(process.execPath, [CLI, "run", "integrate", id, "build"], {
+    cwd: root, encoding: "utf8",
+    env: { ...process.env, NODE_OPTIONS: `--import=${preload}`, ORCH_TEST_INTEGRATION_INTERRUPT: "audit-publish" }
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.ok(loadRun(root, id).pendingIntegrationEvent);
+  // Nothing may be recorded ahead of the unpublished acceptance.
+  assert.throws(() => claimTask(root, id, "after", { constraints: [] }), /audit event is pending/);
+  assert.throws(() => finalizeRun(root, id, { verdict: "pass", summary: "done", evidence: ["checked"] }),
+    /audit event is pending/);
+  // A crash in some earlier append left a torn last line.
+  fs.appendFileSync(eventsFile(root, id), '{"at":"2026-');
+  const resumed = runCli(root, ["run", "resume", id, "--json"]);
+  assert.equal(resumed.code, 0, resumed.stderr);
+  assert.equal(loadRun(root, id).pendingIntegrationEvent, undefined);
+  const lines = fs.readFileSync(eventsFile(root, id), "utf8").split("\n");
+  assert.equal(lines.filter((line) => line.includes('"type":"task.integrated"')).length, 1);
+  assert.doesNotThrow(() => JSON.parse(lines.find((line) => line.includes('"type":"task.integrated"'))));
+  claimTask(root, id, "after", { constraints: [] });
+});
+
+test("an interrupted integration recorded before phases recovers once Git has released the checkout", () => {
+  const preload = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "interrupt-integration.mjs");
+  const root = repo();
+  const id = "run-legacy-pending";
+  reportedBuild(root, id);
+  const before = git(root, ["rev-parse", "HEAD"]).trim();
+  const result = spawnSync(process.execPath, [CLI, "run", "integrate", id, "build"], {
+    cwd: root, encoding: "utf8",
+    env: { ...process.env, NODE_OPTIONS: `--import=${preload}`, ORCH_TEST_INTEGRATION_INTERRUPT: "before-git" }
+  });
+  assert.equal(result.status, 86, result.stderr);
+  // Rewrite the record as the previous build wrote it: no phase.
+  const file = runFile(root, id);
+  const saved = JSON.parse(fs.readFileSync(file, "utf8"));
+  delete saved.pendingIntegration.phase;
+  fs.writeFileSync(file, `${JSON.stringify(saved, null, 2)}\n`);
+  const lock = path.join(root, ".git", "index.lock");
+  fs.writeFileSync(lock, "");
+  const refused = runCli(root, ["run", "resume", id]);
+  assert.equal(refused.code, 1, "a Git process may still hold the index");
+  assert.match(refused.stderr, /manual recovery/);
+  fs.rmSync(lock);
+  const resumed = runCli(root, ["run", "resume", id, "--json"]);
+  assert.equal(resumed.code, 0, resumed.stderr);
+  assert.equal(loadRun(root, id).pendingIntegration, undefined);
+  assert.equal(git(root, ["rev-parse", "HEAD"]).trim(), before);
+  assert.equal(loadRun(root, id).tasks.build.status, "reported");
+});
+
 test("a refused run cancellation leaves its still-running worker untouched", async () => {
   const root = repo();
   const id = "run-refused-cancel";
