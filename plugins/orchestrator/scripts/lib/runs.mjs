@@ -3285,6 +3285,20 @@ export function markWorktreesForRemoval(cwd, runId, taskId = null) {
   });
 }
 
+/** Clear the removal mark of a worktree `run cleanup` refused to remove, so a warm retry can reuse it. */
+export function unmarkWorktreeForRemoval(cwd, runId, taskId, attemptId) {
+  const id = assertId(runId, "run");
+  const filePath = runFile(cwd, id);
+  return withFileLock(filePath, () => {
+    const run = loadRun(cwd, id);
+    const attempt = run.tasks[taskId]?.attempts.find((entry) => entry.id === attemptId);
+    if (attempt?.worktree?.removing) {
+      delete attempt.worktree.removing;
+      writeRun(cwd, run);
+    }
+  });
+}
+
 export function cancelTask(
   cwd,
   runId,

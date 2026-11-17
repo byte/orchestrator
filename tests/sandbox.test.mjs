@@ -158,7 +158,8 @@ test("a worker stopped while proving its profile stops the probe, launches nothi
     codexCommand: [process.execPath, resumeFixture, `--log=${calls}`, "--sandbox-probe=hang", `--sandbox-probe-pid=${pidFile}`]
   });
   const deadline = Date.now() + 10000;
-  while (!fs.existsSync(pidFile) && Date.now() < deadline) {
+  // Wait for the pid itself, not just the file: an empty read would be pid 0.
+  while (!(Number(fs.existsSync(pidFile) && fs.readFileSync(pidFile, "utf8")) > 0) && Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, 40));
   }
   const probePid = Number(fs.readFileSync(pidFile, "utf8"));
@@ -175,6 +176,33 @@ test("a worker stopped while proving its profile stops the probe, launches nothi
   assert.equal(status.status, "cancelled");
   assert.equal(fs.existsSync(scratch), false, "scratch removed after a stop");
   assert.equal(fs.existsSync(calls), false, "Codex was never launched");
+});
+
+test("a poll that finds the wrapper died mid-probe stops the probe", async () => {
+  const root = setup("run-probe-orphan");
+  const calls = logFile();
+  const pidFile = path.join(path.dirname(calls), "probe.pid");
+  const launched = launchTaskWorker(root, "run-probe-orphan", "work", lane, {
+    codexCommand: [process.execPath, resumeFixture, `--log=${calls}`, "--sandbox-probe=hang", `--sandbox-probe-pid=${pidFile}`]
+  });
+  const deadline = Date.now() + 10000;
+  while (!(Number(fs.existsSync(pidFile) && fs.readFileSync(pidFile, "utf8")) > 0) && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 40));
+  }
+  const probePid = Number(fs.readFileSync(pidFile, "utf8"));
+  try {
+    process.kill(launched.runner.pid, "SIGKILL");
+    assert.ok(await gone(launched.runner.pid), "wrapper gone");
+    pollRunWorkers(root, "run-probe-orphan");
+    assert.equal(loadRun(root, "run-probe-orphan").tasks.work.status, "failed");
+    assert.ok(await gone(probePid, 3000), `probe ${probePid} outlived its dead wrapper`);
+  } finally {
+    try {
+      process.kill(probePid, "SIGKILL");
+    } catch {
+      // Already gone.
+    }
+  }
 });
 
 for (const [name, dir] of [["", "tmp-inside"], [" even when its name starts with ..", "..tmp-inside"]]) {

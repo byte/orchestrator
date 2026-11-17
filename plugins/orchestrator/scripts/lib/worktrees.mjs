@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { parseFileList } from "./briefing.mjs";
-import { SUPERVISOR_GIT_ARGS, changedFiles, currentBranch, headSha, worktreeGitEnv } from "./git.mjs";
+import { SUPERVISOR_GIT_ARGS, changedFiles, configuredDrivers, currentBranch, headSha, worktreeGitEnv } from "./git.mjs";
 import { partitionByScope } from "./glob.mjs";
 import { effectiveTaskScope } from "./runs.mjs";
 import { localDir } from "./state.mjs";
@@ -320,6 +320,18 @@ export function integrateTaskWorktree(cwd, run, task, attempt) {
       { reasonCode: "dirty_checkout", signals: ["dirty_checkout"] }
     );
   }
+  // Git treats ignored files as expendable, so the cherry-pick would overwrite
+  // a local ignored file (a `.env`, say) at a path the worker added.
+  const ignored = inspection.files.length
+    ? git(cwd, ["ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--",
+      ...inspection.files.map((file) => `:(literal)${file}`)]).split("\0").filter(Boolean)
+    : [];
+  if (ignored.length) {
+    throw new WorktreeOperationError(
+      `Integration would overwrite ignored files in the main checkout: ${ignored.join(", ")}.`,
+      { reasonCode: "dirty_checkout", signals: ["dirty_checkout"] }
+    );
+  }
   const supervisorHead = headSha(cwd);
   if (supervisorHead !== run.repository.integrationHead) {
     throw new WorktreeOperationError(
@@ -331,7 +343,11 @@ export function integrateTaskWorktree(cwd, run, task, attempt) {
     // No hook or fsmonitor runs (SUPERVISOR_GIT_ARGS). Rename detection is off:
     // with it, a change to a file another task moved would follow the move and
     // land on a path outside this task's inspected scope. It conflicts instead.
-    git(cwd, ["cherry-pick", "--strategy-option=no-renames", ...inspection.commits]);
+    // Every configured merge driver is replaced by `false`, so a file it would
+    // merge conflicts instead of running a driver script the worker may have
+    // changed in an earlier commit.
+    const noDrivers = configuredDrivers("merge", { cwd }).flatMap((name) => ["-c", `merge.${name}.driver=false`]);
+    git(cwd, [...noDrivers, "cherry-pick", "--strategy-option=no-renames", ...inspection.commits]);
   } catch (error) {
     try {
       git(cwd, ["cherry-pick", "--abort"]);
@@ -360,7 +376,9 @@ export function cleanupTaskWorktree(cwd, attempt) {
     return false;
   }
   if (changedFiles(worktree.path, { gitDir: trustedGitDir(worktree, cwd) }).length) {
-    throw new Error(`Refusing to remove dirty worktree ${worktree.path}.`);
+    const error = new Error(`Refusing to remove dirty worktree ${worktree.path}.`);
+    error.code = "WORKTREE_DIRTY";
+    throw error;
   }
   fs.rmSync(worktree.path, { recursive: true, force: false });
   git(cwd, ["worktree", "prune"]);

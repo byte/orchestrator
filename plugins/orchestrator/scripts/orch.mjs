@@ -31,6 +31,7 @@ import {
   listRuns,
   loadRun,
   markWorktreesForRemoval,
+  unmarkWorktreeForRemoval,
   readyTasks,
   effectiveTaskRoute,
   grantedSurfaceConflicts,
@@ -918,7 +919,17 @@ function commandRun(argv, cwd) {
     const taskId = positionals[1];
     const removed = [];
     for (const { taskId: owner, attempt } of markWorktreesForRemoval(cwd, runId, taskId)) {
-      if (cleanupTaskWorktree(cwd, attempt)) {
+      let cleaned;
+      try {
+        cleaned = cleanupTaskWorktree(cwd, attempt);
+      } catch (error) {
+        // Refused before anything was deleted: the worktree stays, usable again.
+        if (error.code === "WORKTREE_DIRTY") {
+          unmarkWorktreeForRemoval(cwd, runId, owner, attempt.id);
+        }
+        throw error;
+      }
+      if (cleaned) {
         removed.push(attempt.worktree.path);
       }
       removed.push(...removeLeftoverScratch(cwd, runId, owner, attempt.id));

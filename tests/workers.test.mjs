@@ -317,6 +317,98 @@ test("an edit to a file another task moved out of scope conflicts instead of fol
   assert.deepEqual(changedFiles(root), [], "rolled back");
 });
 
+function reportFiles(root, runId, attemptId, files) {
+  recordTaskResult(root, runId, "build", {
+    attemptId,
+    resultText: JSON.stringify({
+      summary: "Done.",
+      files_touched: files,
+      tests: [],
+      decisions: [],
+      assumptions: [],
+      blockers: [],
+      confidence: "high"
+    })
+  });
+}
+
+test("integration runs no configured merge driver a worker could have changed", () => {
+  const root = repo();
+  write(root, "src/merge.sh", "#!/bin/sh\nexit 1\n");
+  write(root, ".gitattributes", "src/*.dat merge=local\n");
+  write(root, "src/x.dat", "a\nb\nc\n");
+  git(root, ["add", "-A"]);
+  git(root, ["commit", "--quiet", "-m", "base"]);
+  git(root, ["config", "merge.local.driver", "sh src/merge.sh %O %A %B"]);
+  plan(root, "run-merge-driver");
+  checkpointPlan(root, "run-merge-driver");
+  const dispatch = claimTask(root, "run-merge-driver", "build", { constraints: [] });
+  let run = loadRun(root, "run-merge-driver");
+  const worktree = createTaskWorktree(root, run, run.tasks.build, run.tasks.build.attempts.at(-1));
+  const marker = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "orch-hook-")), "ran");
+  repos.push(path.dirname(marker));
+  write(worktree.path, "src/merge.sh", `#!/bin/sh\necho ran >> ${JSON.stringify(marker)}\nexit 0\n`);
+  git(worktree.path, ["commit", "--quiet", "-am", "driver"]);
+  write(worktree.path, "src/x.dat", "A\nb\nc\n");
+  git(worktree.path, ["commit", "--quiet", "-am", "data"]);
+  reportFiles(root, "run-merge-driver", dispatch.attemptId, ["src/merge.sh", "src/x.dat"]);
+  // Another task changed the same file, so the cherry-pick must merge it.
+  write(root, "src/x.dat", "a\nb\nC\n");
+  git(root, ["commit", "--quiet", "-am", "other task"]);
+  run = loadRun(root, "run-merge-driver");
+  run.repository.integrationHead = git(root, ["rev-parse", "HEAD"]).trim();
+  const task = run.tasks.build;
+  task.attempts.at(-1).worktree = worktree;
+  assert.throws(() => integrateTaskWorktree(root, run, task, task.attempts.at(-1)), /conflict/i);
+  assert.equal(fs.existsSync(marker) ? fs.readFileSync(marker, "utf8") : "", "", "the worker's merge driver did not run");
+  assert.equal(fs.readFileSync(path.join(root, "src/merge.sh"), "utf8"), "#!/bin/sh\nexit 1\n", "rolled back");
+});
+
+test("integration refuses to overwrite an ignored file in the main checkout", () => {
+  const root = repo();
+  write(root, "src/.gitignore", "private.txt\n");
+  git(root, ["add", "-A"]);
+  git(root, ["commit", "--quiet", "-m", "ignore"]);
+  write(root, "src/private.txt", "local secret\n");
+  plan(root, "run-ignored");
+  checkpointPlan(root, "run-ignored");
+  const dispatch = claimTask(root, "run-ignored", "build", { constraints: [] });
+  let run = loadRun(root, "run-ignored");
+  const worktree = createTaskWorktree(root, run, run.tasks.build, run.tasks.build.attempts.at(-1));
+  write(worktree.path, "src/.gitignore", "");
+  write(worktree.path, "src/private.txt", "worker content\n");
+  git(worktree.path, ["add", "-A"]);
+  git(worktree.path, ["commit", "--quiet", "-m", "take it"]);
+  reportFiles(root, "run-ignored", dispatch.attemptId, ["src/.gitignore", "src/private.txt"]);
+  run = loadRun(root, "run-ignored");
+  const task = run.tasks.build;
+  task.attempts.at(-1).worktree = worktree;
+  assert.throws(() => integrateTaskWorktree(root, run, task, task.attempts.at(-1)), /overwrite ignored files.*src\/private\.txt/);
+  assert.equal(fs.readFileSync(path.join(root, "src/private.txt"), "utf8"), "local secret\n");
+});
+
+test("a nested repository in a worker's worktree counts as changed, so cleanup keeps it", () => {
+  const root = repo();
+  plan(root, "run-nested");
+  checkpointPlan(root, "run-nested");
+  claimTask(root, "run-nested", "build", { constraints: [] });
+  const run = loadRun(root, "run-nested");
+  const attempt = run.tasks.build.attempts.at(-1);
+  const worktree = createTaskWorktree(root, run, run.tasks.build, attempt);
+  const nested = path.join(worktree.path, "src", "vendor");
+  fs.mkdirSync(nested, { recursive: true });
+  git(nested, ["init", "--quiet"]);
+  write(nested, "value.txt", "one\n");
+  git(nested, ["add", "-A"]);
+  git(nested, ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "--quiet", "-m", "v"]);
+  git(worktree.path, ["add", "-A"]);
+  git(worktree.path, ["commit", "--quiet", "-m", "vendor"]);
+  write(nested, "value.txt", "uncommitted work\n");
+  assert.deepEqual(changedFiles(worktree.path, { gitDir: worktree.gitDir }), ["src/vendor"]);
+  assert.throws(() => cleanupTaskWorktree(root, { ...attempt, worktree }), /dirty worktree/);
+  assert.equal(fs.readFileSync(path.join(nested, "value.txt"), "utf8"), "uncommitted work\n");
+});
+
 test("cleanup refuses a worker worktree with an uncommitted edit to a tracked .orchestrator file", () => {
   const root = repo();
   write(root, ".orchestrator/notes.md", "tracked\n");
@@ -692,6 +784,42 @@ test("cancelling a worker whose wrapper is gone kills what Codex started", async
   } finally {
     try {
       process.kill(descendant, "SIGKILL");
+    } catch {
+      // Already gone.
+    }
+  }
+});
+
+test("a cancel leaves nothing of the worker running once it returns", async () => {
+  const root = repo();
+  plan(root, "run-cancel-sync");
+  checkpointPlan(root, "run-cancel-sync");
+  const launched = launchTaskWorker(root, "run-cancel-sync", "build", { constraints: [] }, {
+    codexCommand: [process.execPath, slowFixture, "--delay=60000", "--ignore-term"]
+  });
+  // Codex's own pid: once it reports its thread (a read worker's first
+  // recorded child is the profile probe).
+  let childPid;
+  while (!childPid) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const status = fs.existsSync(launched.runner.statusFile) &&
+      JSON.parse(fs.readFileSync(launched.runner.statusFile, "utf8"));
+    childPid = status?.threadId ? status.childPid : null;
+  }
+  try {
+    // Codex ignores SIGTERM. The cancel escalates itself, so a wrapper that
+    // dies during the grace period cannot leave Codex running with no one to
+    // kill it.
+    cancelWorkers(root, "run-cancel-sync", "build", "user stopped it");
+    try {
+      process.kill(launched.runner.pid, "SIGKILL");
+    } catch {
+      // Already gone.
+    }
+    assert.ok(await exited(childPid, 1000), `Codex ${childPid} still running after cancel returned`);
+  } finally {
+    try {
+      process.kill(childPid, "SIGKILL");
     } catch {
       // Already gone.
     }

@@ -1,4 +1,6 @@
 import { execFileSync } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
 
 import { isGitRepository, resolveWorkspaceRoot } from "./workspace.mjs";
 
@@ -39,25 +41,31 @@ const filterDrivers = new Map();
  */
 function definedFilterDrivers(gitDir) {
   if (!filterDrivers.has(gitDir)) {
-    let output = "";
-    try {
-      output = execFileSync("git", ["config", "--name-only", "--get-regexp", "^filter\\."], {
-        encoding: "utf8",
-        env: { ...process.env, GIT_DIR: gitDir }
-      });
-    } catch {
-      // Exit 1: no filter is configured.
-    }
-    const names = new Set();
-    for (const key of output.split("\n").filter(Boolean)) {
-      const match = key.match(/^filter\.(.+)\.[^.]+$/);
-      if (match) {
-        names.add(match[1]);
-      }
-    }
-    filterDrivers.set(gitDir, [...names]);
+    filterDrivers.set(gitDir, configuredDrivers("filter", { env: { ...process.env, GIT_DIR: gitDir } }));
   }
   return filterDrivers.get(gitDir);
+}
+
+/** The names of every `<section>.<name>.*` driver in git config, read in `cwd` or with `env`. */
+export function configuredDrivers(section, { cwd = undefined, env = process.env } = {}) {
+  let output = "";
+  try {
+    output = execFileSync("git", ["config", "--name-only", "--get-regexp", `^${section}\\.`], {
+      cwd,
+      encoding: "utf8",
+      env
+    });
+  } catch {
+    // Exit 1: none is configured.
+  }
+  const names = new Set();
+  for (const key of output.split("\n").filter(Boolean)) {
+    const match = key.slice(section.length + 1).match(/^(.+)\.[^.]+$/);
+    if (match) {
+      names.add(match[1]);
+    }
+  }
+  return [...names];
 }
 
 export function worktreeGitEnv(worktreePath, gitDir) {
@@ -157,6 +165,23 @@ export function changedFiles(cwd, { gitDir = null } = {}) {
       }
     }
     files.add(filePath);
+  }
+
+  if (gitDir) {
+    // Submodules are ignored above (git would run a nested repository's own
+    // config), so any populated one counts as changed: its uncommitted work is
+    // invisible from here, and cleanup must not delete it unseen. A worker's
+    // worktree is created without submodules, so a populated one is the worker's.
+    const index = git(root, ["ls-files", "--stage", "-z"], gitDir).split("\0");
+    for (const entry of index) {
+      const tab = entry.indexOf("\t");
+      if (entry.startsWith("160000 ") && tab > 0) {
+        const gitlink = entry.slice(tab + 1);
+        if (fs.existsSync(path.join(root, gitlink, ".git"))) {
+          files.add(gitlink);
+        }
+      }
+    }
   }
 
   // Only the supervisor checkout's own bookkeeping is excluded. In a worker's

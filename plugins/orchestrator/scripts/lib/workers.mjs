@@ -871,6 +871,18 @@ function stopGroup(pid, signal = "SIGTERM") {
   }
 }
 
+function groupAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) {
+    return false;
+  }
+  try {
+    process.kill(-pid, 0);
+    return true;
+  } catch (error) {
+    return error.code === "EPERM";
+  }
+}
+
 function stopPid(pid) {
   if (!pid) {
     return;
@@ -938,10 +950,21 @@ export function stopTaskWorker(attempt) {
   // nothing would, so the group is killed outright.
   // A finished runner is not signalled: its wrapper already killed the group,
   // and its pids may since belong to unrelated processes.
+  // The group gets SIGTERM, then SIGKILL if it is still there 5 s later. This
+  // waits here rather than leaving the escalation to the wrapper: the status
+  // below says cancelled, so if the wrapper died meanwhile, nothing would.
+  // With the wrapper already gone there is nothing to wait for: SIGKILL at once.
   if (!TERMINAL_RUNNER_STATUSES.has(status?.status)) {
     const wrapperAlive = Number.isInteger(runner.pid) && processAlive(runner.pid);
     stopGroup(status?.childPid, wrapperAlive ? "SIGTERM" : "SIGKILL");
     stopPid(runner.pid);
+    const deadline = Date.now() + 5000;
+    while (groupAlive(status?.childPid) && Date.now() < deadline) {
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+    }
+    if (groupAlive(status?.childPid)) {
+      stopGroup(status.childPid, "SIGKILL");
+    }
   }
   atomicWrite(
     runner.statusFile,

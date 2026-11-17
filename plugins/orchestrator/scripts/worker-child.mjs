@@ -158,6 +158,12 @@ async function probeReadProfile() {
       // the pipes, so the probe would never close.
       { cwd: spec.worktreePath, env: { ...process.env, TMPDIR: scratchDir }, stdio: ["ignore", "pipe", "pipe"], detached: true }
     );
+    // Recorded like Codex's own group, so a poll or cancel can stop a probe
+    // whose wrapper died, and scratch cleanup waits for it.
+    if (child.pid) {
+      childPid = child.pid;
+      writeStatus({ status: currentStatus });
+    }
     let settled = false;
     const finish = (value) => {
       if (!settled) {

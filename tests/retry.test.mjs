@@ -262,6 +262,31 @@ test("a warm retry never reuses a worktree run cleanup has marked for removal", 
   assert.equal(fs.existsSync(marked[0].attempt.worktree.path), true, "nothing was written into the worktree");
 });
 
+test("a worktree run cleanup refused to remove stays usable for a warm retry", async () => {
+  const root = repo();
+  plan(root, "run-cleanup-refused", { kind: "write" });
+  const command = [process.execPath, resumeFixture, `--log=${logFile()}`, "--write"];
+  const first = launchTaskWorker(root, "run-cleanup-refused", "work", lane, { codexCommand: command });
+  await settle(root, "run-cleanup-refused");
+  recordTaskDisposition(root, "run-cleanup-refused", "work", {
+    terminalOutcome: "policy_refused",
+    action: "refuse",
+    reasonCode: "policy_boundary",
+    evidence: ["redo it"]
+  });
+  // Uncommitted work in the worktree: cleanup refuses it.
+  fs.writeFileSync(path.join(first.worktree.path, "src", "draft.txt"), "keep me\n");
+  const refused = runCli(root, ["run", "cleanup", "run-cleanup-refused"]);
+  assert.notEqual(refused.code, 0);
+  assert.match(refused.stderr, /dirty worktree/);
+  assert.equal(loadRun(root, "run-cleanup-refused").tasks.work.attempts[0].worktree.removing, undefined);
+  retryTask(root, "run-cleanup-refused", "work", { note: "Again." });
+  checkpointPlan(root, "run-cleanup-refused");
+  const second = launchTaskWorker(root, "run-cleanup-refused", "work", lane, { codexCommand: command });
+  assert.equal(second.worktree.path, first.worktree.path);
+  await settle(root, "run-cleanup-refused");
+});
+
 test("a warm retry resumes the thread with explicit model, effort, and sandbox in the same worktree", async () => {
   const root = repo();
   plan(root, "run-resume", { kind: "write" });

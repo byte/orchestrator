@@ -37,8 +37,11 @@ process.stdin.on("end", () => {
   })}\n`);
 });
 
+//   --ignore-term  ignore SIGTERM, so only SIGKILL stops it
 process.on("SIGTERM", () => {
-  process.exit(143);
+  if (!args.includes("--ignore-term")) {
+    process.exit(143);
+  }
 });
 
 setTimeout(() => {

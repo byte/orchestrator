@@ -383,6 +383,11 @@ real resume reports the same thread id it was given.
    so a hook or monitor script a worker changed in scope (`core.hooksPath=.husky`) never runs from
    the orchestrator. Cherry-pick runs without rename detection: a change to a file another task
    moved conflicts instead of following the move to a path outside this task's inspected scope.
+   Every configured merge driver is replaced by `false` there, so a file it would merge conflicts
+   instead of running a driver script the worker changed, and integration refuses to overwrite an
+   ignored file in the supervisor checkout at a path the worker added. A populated nested
+   repository in a worker's worktree counts as changed (git never runs inside it), so it blocks
+   inspection and cleanup instead of being deleted with uncommitted work.
    Checkout filters still run in the supervisor checkout and in a new worktree, so integrating a
    change to a script the repository's own filter config runs is a decision the supervisor makes by
    integrating.

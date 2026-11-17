@@ -86,6 +86,20 @@ Fixes:
   a finished runner's old pids are never signalled.
 - A failed answer's rollback undoes only the round it answered, so a rollback
   delayed past the worker's next request keeps the later round's answer.
+- Integration replaces every configured merge driver with `false`, so a file
+  it would merge conflicts instead of running a driver script a worker changed
+  in an earlier commit. It also refuses to overwrite an ignored file in the
+  main checkout (a local `.env` at a path the worker added), which git would
+  otherwise replace silently.
+- A populated nested repository in a worker's worktree counts as a change
+  (its own status is never run), so inspection is not ready and cleanup does
+  not delete its uncommitted work.
+- `run cleanup` clears its removal mark from a worktree it refused to remove
+  for uncommitted work, so a warm retry can still continue in it.
+- `run cancel` escalates to SIGKILL itself, 5 s after SIGTERM, before it
+  returns, so a worker whose wrapper dies during the grace period cannot keep
+  running. The read-profile probe's pid is recorded like Codex's, so a probe
+  whose wrapper died is stopped by the next poll or cancel.
 - Status writes are numbered, so a poll holding an older snapshot cannot save
   it over a newer one (a discarded thread over the answer's fresh fallback).
 - A launch whose briefing cannot be rendered leaves the task pending, and a
