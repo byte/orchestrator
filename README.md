@@ -24,7 +24,7 @@ what should happen, what is acceptable, what gets integrated, and when the whole
 - Recorded, never-silent fallback down the model ladder when Codex rejects a model as unavailable
 - One detached `codex exec` process and isolated Git worktree per task
 - Read-only sandboxes for analysis/review tasks and workspace-write sandboxes for implementation.
-  A read-only worker can still run tests: it gets a private, writable `TMPDIR`, and nothing else is writable.
+  A read-only worker can run tests that need only a private writable `TMPDIR`, not writes to its checkout.
 - JSON-schema-enforced worker reports with files, tests, decisions, assumptions, blockers, and
   confidence
 - Versioned terminal attempt outcomes that distinguish execution, contract, verification, policy,
@@ -48,6 +48,7 @@ what should happen, what is acceptable, what gets integrated, and when the whole
 
 ## Requirements
 
+- macOS or Linux (POSIX process groups are required; Windows is not supported)
 - Claude Code with plugin support
 - Node.js 18.18 or newer
 - Git, with at least one commit in the repository
@@ -59,6 +60,21 @@ be available to that account. If it is not, the runtime substitutes the next mod
 and records that it did; see the routing section below.
 
 `/orchestrator:run` invokes Codex CLI directly. No Claude-side Codex plugin is needed.
+
+### Project dependencies and test setup
+
+Each task starts in a fresh Git worktree. Ignored files such as `node_modules`, virtual
+environments, and build products are not copied from the supervisor checkout. The runtime does
+not install dependencies or provision these worktrees automatically. A private `TMPDIR` does not
+make a read worker's checkout writable.
+
+For projects that need setup, first use a write task with explicit scope and acceptance criteria
+to install dependencies and run the checks in its own worktree; the supervisor can inspect and
+rerun checks there before integration. A separate read verifier gets a different worktree: use it
+only when the project can run checks with existing external tools/caches and temporary output,
+or arrange dependencies outside its checkout before launch. Do not assume an install in one
+task provisions another. This repository's dependency-free fixtures do not certify that workflow
+for dependency-heavy projects.
 
 ## Install
 
@@ -458,7 +474,7 @@ GitHub Actions runs this suite on Linux and macOS with Node 18.18.2 and Node 22.
   machines.
 - Integration uses cherry-pick. Conflicts abort and require the supervisor to replan or request
   direction.
-- If integration is interrupted after Git applies the complete change but before acceptance is saved, `run resume` reconciles the saved intent and operation-specific Git receipts without replaying commits. Partial Git operations, missing receipts, unrelated commits, or manual edits require manual recovery; the command preserves them rather than guessing or resetting the checkout.
+- If integration is interrupted after Git has returned and its stopped phase is saved, `run resume` reconciles the saved intent and operation-specific receipts without replaying commits. An interruption while Git may still be running requires manual recovery, even if HEAD is unchanged or the expected commits are visible. Partial operations, missing receipts, unrelated commits, or manual edits also require manual recovery; the command preserves them rather than guessing or resetting the checkout. Acceptance-event publication failures are reported separately and retried by resume.
 - Retries resume the previous attempt's Codex thread by default. That depends on Codex still
   holding the thread on this machine; when it does not, the retry falls back to a fresh thread with
   the full briefing and records that it did. `run retry --fresh` always starts a new thread.

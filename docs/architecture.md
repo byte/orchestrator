@@ -161,6 +161,8 @@ it.
 
 Each new claim freezes an `assignmentSnapshot` in raw run state: plan revision, allowlisted structural facts, route, and the four exportable text fields. Collection and opted-in text export use that historical assignment, not the task's current definition after replanning. Legacy attempts without snapshots require event history establishing that their claimed plan is unchanged; ambiguous historical assignment data fails closed. Existing metadata-only samples remain readable and exportable, and later finalization evidence can still update them.
 
+Plan replacement archives removed assignments in `retiredTasks`, including their attempts, original text, runner handles, and cleanup references. They do not participate in scheduling or finalization. Reusing a task name allocates a new lifetime attempt ID; learning labels stay with the original attempt. Collection, text export, route evidence, and cleanup include retired history. Legacy route effort without saved corroboration is `unknown`, never inferred from the current task. This cannot restore history deleted by an older runtime or repair labels already attached to the wrong sample.
+
 Labels are stored as provenance-tagged, validated outcome records inside the canonical sample.
 Keeping sample and label history in the same locked JSONL record makes label, purge, and export
 membership atomic without a cross-file orphan state. Conflicting labels remain audit history; a
@@ -173,6 +175,8 @@ only for named allowlisted fields, and only after secret, credential, PII, netwo
 path redaction. The privacy-first IPv4 matcher intentionally may redact a version-like dotted
 quad; avoiding a possible address leak takes precedence over preserving ambiguous dotted text.
 Exports have no URL destination and use no network capability.
+
+Redaction version 4 consumes whole credential assignments before other rules can alter their boundaries. It covers quoted values, whitespace/quote/backtick-delimited unquoted tokens, and direct space-indented YAML credential block scalars. This is a bounded text redactor, not a general YAML or shell parser: tags, anchors/aliases, complex keys, multiline plain scalars, and arbitrary shell concatenation are not claimed safe. Review text exports before sharing them; metadata-only export remains the default.
 
 Retention belongs only to derived learning records. The default is 365 days; `forever` means
 retain until explicitly purged. Purge selectors can target a sample, run, task, attempt, expired
@@ -318,8 +322,15 @@ configuration it cannot reach, and processes that ignore SIGTERM. Containment me
 5. Integration changes only the inspected, in-scope, declared paths, never the orchestrator's own
    `.orchestrator/local/` state whatever the scope, and never replaces an untracked or ignored file
    in the supervisor checkout. Integrations of one checkout run one at a time.
-6. When a worker is stopped, cancelled, or finishes, nothing it started keeps running, and a dead
-   wrapper's processes are killed by the next poll or cancel.
+6. Before a worker's final result is collected, or a stop/cancellation returns, its recorded process groups are stopped. A dead wrapper's processes are killed by the next poll or cancel.
+
+The runtime resolves Git and Codex names through absolute PATH entries before switching to a worker checkout; relative entries are ignored. Process identity checks use `/bin/ps` with a two-second deadline. Git invocations have a 30-second deadline and private file-backed output capture outside the checkout. This deadline can also interrupt a large legitimate operation. The 32 MiB output check limits readback after execution, not disk consumption during execution; hard process death can leave private captures for manual cleanup. A blocked inspection or cleanup fails explicitly and preserves the worktree, rather than treating an unavailable dirt report as clean. Cancellation saves its decision under the run lock before signalling processes; refusal does not stop an otherwise running task.
+
+Process ownership is explicit:
+
+- Codex and sandbox probes have a detached child group recorded in worker status; wrapper exit handling, cancellation, and orphan polling stop that group.
+- Wrapper Git stays in the wrapper's group, recorded by the supervisor's runner handle, so a hard-killed wrapper cannot hide an unrecorded separate Git group. Once it has run Git, the wrapper publishes `groupCleanupPending` with its final result. That is a result, not proof of termination: liveness/cleanup checks retain ownership, and poll or cancel stops the group before collecting the result or clearing the obligation, on success as well as failure.
+- Supervisor Git gets its own detached group. The synchronous helper stops residual members after every leader return, including a signalled launcher, before reporting the operation stopped. Identity or signalling uncertainty propagates to integration and leaves its phase at `started` for manual recovery.
 
 Non-goals (decisions the supervisor or the user's own configuration owns, not defects):
 
@@ -704,7 +715,9 @@ For write tasks, `run inspect` checks:
 cherry-picks the worker commits. A conflict triggers `cherry-pick --abort`; it never resets,
 overwrites, or silently chooses a side.
 
-Before cherry-picking, integration saves `pendingIntegration` with the inspected source commits, old supervisor head, attempt identity, and acceptance evidence. It holds the checkout integration lock and the run-state lock through durable acceptance. Each applied commit gets an operation-specific Git reflog receipt. `run resume` and a repeated `run integrate` reconcile that intent: a clean, complete, linear chain carrying the exact operation's receipts can be accepted without replay; an unchanged original head clears the intent so integration can be attempted again. Partial cherry-picks, missing receipts, other commits, changed branches, and manual edits stop for manual recovery without resetting anything. Pending integration prevents task cancellation or redisposition from invalidating acceptance.
+Before cherry-picking, integration refuses an existing merge, rebase, cherry-pick, or sequencer operation, including one with an unchanged HEAD and clean checkout. It saves `pendingIntegration` with the inspected source commits, old supervisor head, attempt identity, and acceptance evidence. A `prepared` phase precedes launch, `started` is saved before spawning Git, and `stopped` is saved only after the synchronous invocation and any abort have returned. It holds the checkout integration lock and the run-state lock through durable acceptance. Each applied commit gets an operation-specific Git reflog receipt. `run resume` and repeated `run integrate` reconcile only prepared/stopped intents: a clean, complete, linear chain carrying the exact operation's receipts can be accepted without replay; an unchanged original head can release the intent for another attempt. A started intent (or legacy intent without a phase) requires manual recovery even at the original HEAD: absence of Git markers does not prove its child has stopped. Partial cherry-picks, missing receipts, other commits, changed branches, and manual edits also stop without resetting anything. Pending integration prevents task cancellation or redisposition from invalidating acceptance.
+
+Acceptance saves a `pendingIntegrationEvent` obligation in the same run-state write that marks the task completed. Its event has a stable identity and is published by atomic replacement of the existing JSONL bytes plus that event, under the run lock. Publication failure returns an explicit accepted-but-audit-pending warning, not a false integration failure. Resume or repeated integration flushes it idempotently, including a crash after publication but before clearing the obligation. Another integration cannot overwrite an outstanding obligation. This does not make every other event transactional; an already malformed event log requires manual repair and leaves the acceptance obligation intact.
 
 State locks record their owner's PID. A live owner is not evicted merely because an operation exceeds 30 seconds; dead owners can be reclaimed immediately. Stale-lock reclamation is serialized. A crash inside the reclamation critical section can leave a `.lock.reclaim` directory; inspect it and confirm no reclaimer is active before removing that guard manually. PID reuse conservatively leaves the lock occupied rather than risking a live operation.
 
