@@ -202,6 +202,11 @@ test("a poll that finds the wrapper died mid-probe stops the probe", async () =>
     } catch {
       // Already gone.
     }
+    // A hard-killed wrapper leaves its scratch for `run cleanup`; this test owns it.
+    const scratch = JSON.parse(fs.readFileSync(launched.runner.statusFile, "utf8")).scratchDir;
+    if (scratch) {
+      fs.rmSync(scratch, { recursive: true, force: true });
+    }
   }
 });
 
