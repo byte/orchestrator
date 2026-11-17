@@ -138,6 +138,10 @@ Fixes:
   filter override runs `/bin/cat`, not `cat` from PATH. A cancel kills a
   wrapper still stuck after its grace period (in a git command a worker's
   FIFO blocks, say) together with what it runs.
+- `run retry` on a reported task and `run finalize` with unfinished tasks
+  say what to do next: close a conflicted attempt with `run decide` before
+  retrying it, and drop an unwanted cancelled task by replanning. Both paths
+  are documented in commands/run.md (found running real Codex workers).
 - Status writes are numbered, so a poll holding an older snapshot cannot save
   it over a newer one (a discarded thread over the answer's fresh fallback).
 - A launch whose briefing cannot be rendered leaves the task pending, and a

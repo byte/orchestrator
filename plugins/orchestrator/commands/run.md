@@ -436,6 +436,21 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" run integrate <run-id> <task-id> \
 Integration cherry-picks the task commits onto the supervisor branch. Conflicts are aborted and
 reported; never resolve them by silently discarding another worker's change.
 
+A conflicted task stays `reported`, so the same attempt can still be integrated later (after
+reordering, say). To have the worker redo it on the current head instead, close the attempt and
+retry; the retry resumes the worker's thread in a fresh worktree at the integration head:
+
+```bash
+node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" run decide <run-id> <task-id> \
+  --outcome integration_failed --action replan --reason-code integration_conflict \
+  --evidence "<what it conflicted with>"
+node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" run retry <run-id> <task-id> \
+  --note "<what changed underneath it>"
+```
+
+A task you cancelled and no longer want keeps the run from finalizing; resubmit the plan without
+it (`run plan`) and checkpoint.
+
 ## 7. Continue, replan, and checkpoint
 
 Verified dependencies automatically unlock downstream tasks. Dispatch successive waves until every

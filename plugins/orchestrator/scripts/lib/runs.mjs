@@ -3272,7 +3272,14 @@ export function retryTask(cwd, runId, taskId, { note = null, fresh = false } = {
       throw new Error(`Run "${run.id}" was cancelled; its tasks cannot be retried. Create a new run.`);
     }
     if (!RETRYABLE_TASK_STATUSES.has(task.status)) {
-      throw new Error(`Task "${task.id}" cannot be retried from status "${task.status}".`);
+      throw new Error(
+        `Task "${task.id}" cannot be retried from status "${task.status}".` +
+        (task.status === "reported"
+          ? " A reported attempt stays integrable; to redo it instead (after an integration conflict, say), " +
+            `close it first: \`run decide ${run.id} ${task.id} --outcome integration_failed --action replan ` +
+            "--reason-code integration_conflict --evidence <why>`, then retry."
+          : "")
+      );
     }
     const previousAttempt = task.attempts.at(-1) ?? null;
     // Keep what the supervisor found on the attempt itself before the task-level
@@ -3534,7 +3541,13 @@ export function finalizeRun(
     const run = loadRun(cwd, id);
     const tasks = Object.values(run.tasks);
     if (!tasks.length || !tasks.every((task) => task.status === "completed")) {
-      throw new Error(`Run "${id}" cannot be finalized until every task is completed.`);
+      const open = tasks.filter((task) => task.status !== "completed").map((task) => `${task.id} (${task.status})`);
+      throw new Error(
+        `Run "${id}" cannot be finalized until every task is completed; not completed: ${open.join(", ") || "no tasks planned"}.` +
+        (tasks.some((task) => task.status === "cancelled")
+          ? " A cancelled task you no longer want is dropped by resubmitting the plan without it (`run plan`), then checkpointing."
+          : "")
+      );
     }
     const branch = currentBranch(cwd);
     if (branch !== run.repository.branch) {
