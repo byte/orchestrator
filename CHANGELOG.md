@@ -1,9 +1,10 @@
 # Changelog
 
-## Unreleased
+## 0.6.1
 
 Fixes:
 
+- A worker's wrapper records its real process start time, so on a heavily loaded machine a poll no longer mistakes a live wrapper for a reused process ID and fails its task.
 - Redaction no longer leaks a PEM private key or a `Bearer`/`Basic` token written as a credential assignment (`secret: -----BEGIN ...`, `access_token: Bearer ...`); a quote inside a sensitive URL query value no longer exposes the rest of it.
 - A torn line in a run's event log no longer blocks publishing an accepted integration's audit event, and while that event is pending the run refuses every other change (claims, plan changes, cancellation, finalize). Interrupted integrations recorded before integration phases existed can be recovered again.
 - One worker that cannot be stopped no longer stops a poll from collecting the other tasks or a cancellation from stopping the other workers, and a failed launch or answer reports a worker it could not stop instead of hiding it. Git's own group kill tolerates macOS zombie-only groups. A finished worker's wrapper completes its scratch removal and log flush before publishing its final status, so a poll cannot kill it mid-cleanup.
