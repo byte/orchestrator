@@ -1,5 +1,55 @@
-export const REDACTION_VERSION = 3;
-export const SUPPORTED_REDACTION_VERSIONS = Object.freeze([1, 2, REDACTION_VERSION]);
+export const REDACTION_VERSION = 4;
+export const SUPPORTED_REDACTION_VERSIONS = Object.freeze([1, 2, 3, REDACTION_VERSION]);
+
+function redactAssignments(text) {
+  // Consume complete assignments in the ORIGINAL text, left to right. A quoted
+  // value can contain a YAML-looking header and a block can contain unmatched
+  // quotes; neither may destroy the other's boundaries or a sibling assignment.
+  // Supported YAML blocks: direct mapping/sequence keys, |/>, indentation and
+  // chomping indicators, comments, and space-indented bodies (not general YAML).
+  const block = /^(?<indent> *)(?<sequence>- +)?(?<blockQuote>["']?)(?<blockKey>api[_-]?key|access[_-]?token|auth[_-]?token|password|passwd|secret|aws_secret_access_key)\k<blockQuote>[ \t]*:[ \t]*[|>](?:[1-9][+-]?|[+-][1-9]?)?[ \t]*(?:#[^\r\n]*)?(?<eol>\r?\n|$)/;
+  // Unquoted values are whitespace-delimited or bounded by quotes/backticks.
+  // URL query assignments retain their own &/# boundaries in RULES instead.
+  const assignment = /(?<![\w?&])(?<key>api[_-]?key|access[_-]?token|auth[_-]?token|password|passwd|secret|aws_secret_access_key)(?<keyQuote>["']?)\s*[:=](?:\s*(?:"(?:\\[\s\S]|[^"\\])*"|'(?:''|\\[\s\S]|[^'\\])*')|[ \t]*[^\s"'`]+)/;
+  const pattern = new RegExp(`${block.source}|${assignment.source}`, "gim");
+  const output = [];
+  const findings = {};
+  let offset = 0;
+  let match;
+  while ((match = pattern.exec(text))) {
+    const { indent, sequence = "", blockKey, eol, key, keyQuote } = match.groups;
+    let type = "credential";
+    let replacement;
+    if (blockKey) {
+      const indentation = indent.length + sequence.length;
+      let end = pattern.lastIndex;
+      while (end < text.length) {
+        const newline = text.indexOf("\n", end);
+        const lineEnd = newline === -1 ? text.length : newline + 1;
+        const line = text.slice(end, lineEnd);
+        if (line.trim() && /^ */.exec(line)[0].length <= indentation) {
+          break;
+        }
+        // Conservatively consume deeper lines even if an explicit indentation
+        // indicator would make this a malformed scalar.
+        end = lineEnd;
+      }
+      pattern.lastIndex = end;
+      replacement = `${indent}${sequence}${blockKey}=<redacted:credential>${eol}`;
+    } else {
+      // Preserve the existing AWS category for unquoted AWS key names.
+      if (key.toLowerCase() === "aws_secret_access_key" && !keyQuote) {
+        type = "aws_secret_key";
+      }
+      replacement = `${key}=<redacted:${type}>`;
+    }
+    output.push(text.slice(offset, match.index), replacement);
+    offset = pattern.lastIndex;
+    findings[type] = (findings[type] ?? 0) + 1;
+  }
+  output.push(text.slice(offset));
+  return { text: output.join(""), findings };
+}
 
 const RULES = Object.freeze([
   {
@@ -21,11 +71,6 @@ const RULES = Object.freeze([
     type: "aws_access_key",
     pattern: /\bAKIA[0-9A-Z]{16}\b/g,
     replacement: "<redacted:aws_access_key>"
-  },
-  {
-    type: "aws_secret_key",
-    pattern: /\baws_secret_access_key\s*[:=]\s*(?:"(?:\\[\s\S]|[^"\\])*"|'(?:''|\\[\s\S]|[^'\\])*'|[A-Za-z0-9/+=]{32,})/gi,
-    replacement: "aws_secret_access_key=<redacted:aws_secret_key>"
   },
   {
     type: "google_api_key",
@@ -64,13 +109,10 @@ const RULES = Object.freeze([
   },
   {
     type: "sensitive_query",
-    pattern: /([?&](?:token|api[_-]?key|secret|password)=)[^&#\s]+/gi,
+    // Apostrophes are valid URL data. Generated credential markers are data too:
+    // stopping at one would expose the remaining suffix of the query value.
+    pattern: /([?&](?:token|api[_-]?key|access[_-]?token|auth[_-]?token|secret|password|passwd|aws_secret_access_key)=)[^&#\s"`]+/gi,
     replacement: (match, prefix) => `${prefix}<redacted:sensitive_query>`
-  },
-  {
-    type: "credential",
-    pattern: /\b(api[_-]?key|access[_-]?token|auth[_-]?token|password|passwd|secret|aws_secret_access_key)["']?\s*[:=]\s*(?:"(?:\\[\s\S]|[^"\\])*"|'(?:''|\\[\s\S]|[^'\\])*'|[A-Za-z0-9+/_=-]{8,})/gi,
-    replacement: (match, key) => `${key}=<redacted:credential>`
   },
   {
     type: "email",
@@ -121,22 +163,19 @@ const RULES = Object.freeze([
 ]);
 
 export function redactText(value) {
-  let text = String(value ?? "");
-  const findings = {};
+  const assignments = redactAssignments(String(value ?? ""));
+  let text = assignments.text;
+  const findings = assignments.findings;
   for (const rule of RULES) {
-    let count = 0;
     text = text.replace(rule.pattern, (...args) => {
       if (rule.shouldRedact && !rule.shouldRedact(args[0])) {
         return args[0];
       }
-      count += 1;
+      findings[rule.type] = (findings[rule.type] ?? 0) + 1;
       return typeof rule.replacement === "function"
         ? rule.replacement(...args)
         : rule.replacement;
     });
-    if (count > 0) {
-      findings[rule.type] = count;
-    }
   }
   return { text, findings };
 }
