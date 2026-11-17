@@ -183,6 +183,17 @@ unavailable model. The substitution is recorded on the attempt and in the run ev
 `run poll`, `/orchestrator:resume`, and the supervisor briefing; a substituted pin is flagged so
 Claude tells you which model actually ran.
 
+### When to use it
+
+It pays off when the work splits into pieces that touch different files and can be checked
+separately: several modules, a feature plus an independent review, a fix in one subsystem and its
+tests in another. Each task costs a briefing, a worktree, a worker, and a supervisor review, so a
+one-file change is usually quicker to ask Claude for directly.
+
+Keep the lane's definition of done passing before you start. Claude runs it before planning,
+because workers are told to meet it: a check that already fails sends every worker asking for files
+outside its scope.
+
 ### When you want exact control
 
 Everything the conversation infers can be stated outright. Name a lane, pin the pool, or define the
@@ -232,7 +243,8 @@ replacement run or rely on conversational memory.
 
 ## Lifecycle
 
-1. **Plan.** Claude turns the objective into bounded `write`, `read`, and `verify` tasks with scope,
+1. **Plan.** Claude first runs the lane's definition-of-done check on the current head and settles
+   any failure before dispatch. It then turns the objective into bounded `write`, `read`, and `verify` tasks with scope,
    dependencies, constraints, and checkable acceptance criteria, and routes each one using the
    lane's route evidence when there is enough of it.
 2. **Launch.** Ready tasks claim pool capacity. Each gets a fresh worktree (a warm retry reuses its
@@ -247,7 +259,9 @@ replacement run or rely on conversational memory.
    pauses, is substituted, falls back from a missing thread, or exceeds its wall-clock limit, and
    Claude Code wakes the supervisor when it exits.
 4. **Review.** Worker output becomes `reported`, never automatically complete. Claude evaluates the
-   evidence and acceptance criteria. Terminal attempt outcomes are recorded separately from task
+   evidence and acceptance criteria, and runs the checks itself. A read task is passed or failed
+   with `run verify`; a write task passes only by integration, and one that fails review is
+   rejected with `run verify --verdict fail` and specific evidence for the retry. Terminal attempt outcomes are recorded separately from task
    lifecycle state so retries retain an auditable reason for each earlier result.
 5. **Integrate.** A write task must be clean, committed, in scope, and exactly match its declared
    files. Passing commits are cherry-picked. Conflicts abort without discarding either side.
@@ -264,6 +278,32 @@ replacement run or rely on conversational memory.
    `completed`.
 
 See [Architecture and recovery](docs/architecture.md) for the state machine and failure behavior.
+
+## Worktrees and your branch
+
+You do not need a branching workflow. Integrated work lands as ordinary commits on the branch the
+run started from, `main` included. The worktrees are scratch checkouts under
+`.orchestrator/local/worktrees/` that you never switch to, and `run cleanup` removes them.
+
+Every task gets its own worktree (read and verify tasks cannot write theirs). For write tasks this
+matters because:
+
+- **Workers run in parallel.** Several Codex processes in one folder would see each other's
+  half-finished edits, their tests would fail on each other's changes, and each wrapper's commit
+  would sweep up the others' files.
+- **Your checkout is untouched until review passes.** A rejected attempt never reaches your branch;
+  rejecting it costs nothing to undo.
+- **Scope checks are exact.** A task's changed files are the diff of its own commits, so
+  out-of-scope and undeclared edits are caught before integration.
+- **Retries build on them.** A warm retry continues in the same worktree; a retry after a
+  conflict starts again from the integrated head.
+
+While a run is active, leave the checkout to it: launch, integration, and finalization require it
+to be clean, and a commit made outside the run is refused as branch drift until you reconcile it.
+
+The cost is setup: ignored files such as `node_modules` are not in a fresh worktree (see
+[Project dependencies and test setup](#project-dependencies-and-test-setup)). There is no mode
+that runs workers directly in your checkout yet.
 
 ## Commands
 
@@ -313,6 +353,13 @@ attempts are left out unless `--include-legacy` is passed. Counts sit beside eve
 is printed for fewer than 5 samples. `run plan`, `run briefing`, and `run resume` show the table
 for the run's lane once it holds at least 5 counted attempts.
 
+Reject a reported write task that fails review. `--verdict pass` is refused on a write task,
+because it completes only by `run integrate`:
+
+```text
+orch run verify <run-id> <task-id> --verdict fail --evidence "<input, what it returned, what was expected>"
+```
+
 Retry a failed or blocked task with a correction for the worker:
 
 ```text
@@ -337,7 +384,12 @@ trips; a further request becomes an ordinary blocker.
 Supervisors can explicitly stop a reported task at a policy or authority boundary, or terminalize
 an unrecoverable integration failure, with `run decide`. The decision records a versioned
 `policy_refused`, `authority_escalated`, or `integration_failed` outcome; policy and authority
-decisions are never inferred from worker prose.
+decisions are never inferred from worker prose. A failed review is not a disposition; use
+`run verify --verdict fail`.
+
+Every `--evidence`, `--decision`, `--risk`, `--next`, `--scope`, `--constraint`, and
+`--grant-scope` value is one entry, commas included; repeat the flag to give several. Only
+identifier filters such as `--run` and `--task` also accept a comma-separated list.
 
 The lower-level `learn` commands derive evaluation-ready metadata without copying prompts,
 objectives, source, diffs, worker output, evidence text, ledger text, stderr, tool output,
@@ -472,6 +524,8 @@ GitHub Actions runs this suite on Linux and macOS with Node 18.18.2 and Node 22.
   can make supervisory decisions without Claude.
 - Run state is machine-local by design. Move stable knowledge to the ledger before changing
   machines.
+- Every write task runs in its own worktree; there is no in-place mode. Worktrees do not inherit
+  ignored files, so dependency-heavy projects need the setup described under requirements.
 - Integration uses cherry-pick. Conflicts abort and require the supervisor to replan or request
   direction.
 - If integration is interrupted after Git has returned and its stopped phase is saved, `run resume` reconciles the saved intent and operation-specific receipts without replaying commits. An interruption while Git may still be running requires manual recovery, even if HEAD is unchanged or the expected commits are visible. Partial operations, missing receipts, unrelated commits, or manual edits also require manual recovery; the command preserves them rather than guessing or resetting the checkout. Acceptance-event publication failures are reported separately and retried by resume.

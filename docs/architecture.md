@@ -713,6 +713,12 @@ For write tasks, `run inspect` checks:
 - every changed path was declared by the worker
 - every declared path actually changed
 
+A write task that passes inspection but fails the supervisor's own review (a failing check, a
+missed acceptance criterion, a reproducible defect) is rejected with `run verify --verdict fail`.
+The attempt ends as `verification_failed` / `supervisor_verification_failed`, its worktree is kept,
+and `run retry` resumes the same thread there with the evidence. `run verify --verdict pass` is
+refused on a write task: only `run integrate` completes one.
+
 `run integrate` repeats the safety checks, confirms the supervisor checkout has not moved, and
 cherry-picks the worker commits. A conflict triggers `cherry-pick --abort`; it never resets,
 overwrites, or silently chooses a side.
@@ -794,6 +800,7 @@ memory.
 | Fourth request on one task | Attempt `worker_blocked` (`scope_required` or `ambiguous_objective`) | Retry with a note or replan |
 | Malformed result | Task `failed` (`contract_failed`) | Retry (warm when a thread id exists); otherwise report |
 | Warm retry's thread missing or replaced | Same attempt continues on a fresh thread in the same worktree; `resumeFallback` and `task.resume_fallback` recorded | Review as usual; the briefing was self-contained |
+| Supervisor review finds a write task wrong | Attempt `verification_failed` / `supervisor_verification_failed`; worktree kept | `run retry --note`, which resumes the thread in the same worktree with the evidence |
 | Scope/declaration mismatch | Integration refused | Reject result and replan; do not cherry-pick |
 | Dirty worker checkout | Inspection and cleanup refused | Ask worker/reviewer to resolve or preserve for diagnosis |
 | Cherry-pick conflict | Cherry-pick aborted | Replan integration order or create a bounded conflict task |
