@@ -924,29 +924,28 @@ test("a cancellation while a worker is launched stays cancelled and the worker i
   assert.equal(fs.existsSync(worktree.path), false);
 });
 
-test("a worker attached after cancel read the run is still stopped by the cancellation", async () => {
+test("a worker attached just before cancellation acquires its lock is still stopped", async () => {
   const root = repo();
   plan(root, "run-cancel-late");
   const file = runFile(root, "run-cancel-late");
-  // Cancel reads the run while the task is still pending; a launch then attaches
-  // its worker before the cancellation is saved.
-  const original = fs.readFileSync;
+  // Attachment can finish before cancellation acquires the lock, not between
+  // its locked read and save. The stop pass must see the newly attached worker.
+  const original = fs.openSync;
   let fired = false;
-  fs.readFileSync = function (target, ...rest) {
-    const content = original.call(this, target, ...rest);
-    if (!fired && String(target) === file) {
+  fs.openSync = function (target, ...rest) {
+    if (!fired && String(target) === `${file}.lock` && rest[0] === "wx") {
       fired = true;
-      fs.readFileSync = original;
+      fs.openSync = original;
       launchTaskWorker(root, "run-cancel-late", "work", lane(root), {
         codexCommand: [process.execPath, path.join(fixtures, "fake-codex-slow.mjs"), "--delay=10000"]
       });
     }
-    return content;
+    return original.call(this, target, ...rest);
   };
   try {
     cancelWorkers(root, "run-cancel-late", "work", "user stopped it");
   } finally {
-    fs.readFileSync = original;
+    fs.openSync = original;
   }
   assert.ok(fired);
   const attempt = loadRun(root, "run-cancel-late").tasks.work.attempts[0];
@@ -1191,19 +1190,18 @@ test("a worker attached during a cancellation whose event fails is still stopped
   plan(root, "run-cancel-event");
   const file = runFile(root, "run-cancel-event");
   const events = eventsFile(root, "run-cancel-event");
-  const originalRead = fs.readFileSync;
+  const originalOpen = fs.openSync;
   const originalAppend = fs.appendFileSync;
   let fired = false;
-  fs.readFileSync = function (target, ...rest) {
-    const content = originalRead.call(this, target, ...rest);
-    if (!fired && String(target) === file) {
+  fs.openSync = function (target, ...rest) {
+    if (!fired && String(target) === `${file}.lock` && rest[0] === "wx") {
       fired = true;
-      fs.readFileSync = originalRead;
+      fs.openSync = originalOpen;
       launchTaskWorker(root, "run-cancel-event", "work", lane(root), {
         codexCommand: [process.execPath, path.join(fixtures, "fake-codex-slow.mjs"), "--delay=10000"]
       });
     }
-    return content;
+    return originalOpen.call(this, target, ...rest);
   };
   fs.appendFileSync = function (target, data, ...rest) {
     if (String(target) === events && String(data).includes("\"task.cancelled\"")) {
@@ -1214,7 +1212,7 @@ test("a worker attached during a cancellation whose event fails is still stopped
   try {
     assert.throws(() => cancelWorkers(root, "run-cancel-event", "work", "user stopped it"), /disk full/);
   } finally {
-    fs.readFileSync = originalRead;
+    fs.openSync = originalOpen;
     fs.appendFileSync = originalAppend;
   }
   assert.ok(fired);

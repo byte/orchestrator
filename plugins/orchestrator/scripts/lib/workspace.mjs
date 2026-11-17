@@ -1,5 +1,6 @@
-import { execFileSync } from "node:child_process";
 import path from "node:path";
+
+import { execGit } from "./exec.mjs";
 
 /**
  * Resolve the repository root for a working directory.
@@ -8,11 +9,7 @@ import path from "node:path";
  */
 export function resolveWorkspaceRoot(cwd = process.cwd()) {
   try {
-    const top = execFileSync("git", ["rev-parse", "--show-toplevel"], {
-      cwd,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"]
-    }).trim();
+    const top = execGit(["rev-parse", "--show-toplevel"], { cwd }).trim();
     return top ? path.resolve(top) : path.resolve(cwd);
   } catch {
     return path.resolve(cwd);
@@ -21,11 +18,7 @@ export function resolveWorkspaceRoot(cwd = process.cwd()) {
 
 export function isGitRepository(cwd = process.cwd()) {
   try {
-    execFileSync("git", ["rev-parse", "--git-dir"], {
-      cwd,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"]
-    });
+    execGit(["rev-parse", "--git-dir"], { cwd });
     return true;
   } catch {
     return false;

@@ -1,10 +1,11 @@
 #!/usr/bin/env node
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { execGit } from "./lib/exec.mjs";
 import { worktreeGitEnv } from "./lib/git.mjs";
 import { removeTree, SCRATCH_OWNER_FILE } from "./lib/remove-tree.mjs";
 
@@ -45,6 +46,7 @@ process.on("exit", () => {
 });
 let resumeFallback = null;
 let sandboxFallback = null;
+let groupCleanupPending = false;
 
 // Every status write is numbered, so a poll that read an older snapshot cannot
 // save it over a newer one another poll already synchronized.
@@ -65,6 +67,7 @@ function writeStatus(fields) {
     ...(resumeFallback ? { resumeFallback } : {}),
     ...(sandboxFallback ? { sandboxFallback } : {}),
     ...(scratchDir ? { scratchDir } : {}),
+    ...(groupCleanupPending ? { groupCleanupPending: true } : {}),
     ...fields
   });
 }
@@ -270,23 +273,33 @@ function commitWorkerChanges() {
   if (!spec.gitDir) {
     return "no recorded git directory for the worktree; not committing";
   }
+  // Git shares our group so a hard-killed wrapper cannot orphan an unrecorded
+  // separate group. Its leader returning does not prove every member stopped:
+  // publish the cleanup obligation with the final result for poll/cancel.
+  groupCleanupPending = true;
   // worktreeGitEnv also turns off hooks, fsmonitor, signing and submodule recursion.
-  const git = (args) => spawnSync("git", args, {
+  const git = (args) => execGit(args, {
     cwd: spec.worktreePath,
-    encoding: "utf8",
-    env: worktreeGitEnv(spec.worktreePath, spec.gitDir)
+    env: worktreeGitEnv(spec.worktreePath, spec.gitDir),
+    // Keep Git in the wrapper's group so cancellation and orphan polling can
+    // stop it even if this wrapper dies during the synchronous operation.
+    detached: false
   });
-  const add = git(["add", "-A"]);
-  if (add.status !== 0) {
-    return `git add failed: ${(add.stderr || add.error?.message || "").trim()}`;
+  try {
+    git(["add", "-A"]);
+  } catch (error) {
+    return `git add failed: ${error.stderr || error.message}`;
   }
   // No textconv or external diff: the worker's .gitattributes apply, and could
   // select a configured diff program to run on files it wrote.
-  if (git(["diff", "--cached", "--quiet", "--no-textconv", "--no-ext-diff"]).status === 0) {
+  try {
+    git(["diff", "--cached", "--quiet", "--no-textconv", "--no-ext-diff"]);
     return null;
+  } catch (error) {
+    if (error.status !== 1) throw error;
   }
-  const commit = git(["commit", "--no-verify", "--quiet", "-m", spec.commitMessage || "Orchestrator worker changes"]);
-  return commit.status === 0 ? null : `git commit failed: ${(commit.stderr || commit.error?.message || "").trim()}`;
+  git(["commit", "--no-verify", "--quiet", "-m", spec.commitMessage || "Orchestrator worker changes"]);
+  return null;
 }
 
 /** commitWorkerChanges, with any exception (an unsupported Git, say) as its error. */

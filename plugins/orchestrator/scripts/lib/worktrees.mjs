@@ -1,8 +1,8 @@
-import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 
 import { parseFileList } from "./briefing.mjs";
+import { execGit } from "./exec.mjs";
 import { SUPERVISOR_GIT_ARGS, changedFiles, configuredDrivers, currentBranch, headSha, worktreeGitEnv } from "./git.mjs";
 import { partitionByScope } from "./glob.mjs";
 import { effectiveTaskScope } from "./runs.mjs";
@@ -13,11 +13,8 @@ import { localDir } from "./state.mjs";
 const RESERVED = /^\.orchestrator\/local(\/|$)/i;
 
 function gitRaw(cwd, args, gitDir = null, env = process.env) {
-  return execFileSync("git", gitDir ? args : [...SUPERVISOR_GIT_ARGS, ...args], {
+  return execGit(gitDir ? args : [...SUPERVISOR_GIT_ARGS, ...args], {
     cwd,
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "pipe"],
-    maxBuffer: 32 * 1024 * 1024,
     env: gitDir ? worktreeGitEnv(cwd, gitDir) : env
   });
 }
@@ -359,7 +356,14 @@ function untrackedInTheWay(cwd, files) {
   return blocked.sort();
 }
 
-export function integrateTaskWorktree(cwd, run, task, attempt, { operationId, beforeApply = () => {} } = {}) {
+function gitOperationInProgress(cwd) {
+  return ["sequencer", "CHERRY_PICK_HEAD", "MERGE_HEAD", "rebase-merge", "rebase-apply"]
+    .some((entry) => fs.existsSync(path.resolve(cwd, git(cwd, ["rev-parse", "--git-path", entry]))));
+}
+
+export function integrateTaskWorktree(cwd, run, task, attempt, {
+  operationId, beforeApply = () => {}, beforeStart = () => {}, afterStop = () => {}
+} = {}) {
   const inspection = inspectTaskWorktree(task, attempt, { cwd });
   if (!inspection.ready) {
     const scopeViolation = inspection.outOfScope.length > 0;
@@ -386,6 +390,11 @@ export function integrateTaskWorktree(cwd, run, task, attempt, { operationId, be
       `Cannot integrate on branch ${currentBranch(cwd)}; expected ${run.repository.branch}.`,
       { reasonCode: "wrong_branch", signals: ["wrong_branch"] }
     );
+  }
+  if (gitOperationInProgress(cwd)) {
+    throw new WorktreeOperationError("A Git operation is already in progress; preserve and finish or abort it before integration.", {
+      reasonCode: "integration_inspection_failed", signals: ["integration_inspection_failed"]
+    });
   }
   const dirt = changedFiles(cwd);
   if (dirt.length) {
@@ -418,6 +427,9 @@ export function integrateTaskWorktree(cwd, run, task, attempt, { operationId, be
   // Persist the inspected intent before Git can move the supervisor branch.
   // The caller holds the checkout and run locks through acceptance.
   beforeApply(inspection);
+  const noDrivers = configuredDrivers("merge", { cwd }).flatMap((name) => ["-c", `merge.${name}.driver=false`]);
+  beforeStart();
+  let stopped = false;
   try {
     // No hook or fsmonitor runs (SUPERVISOR_GIT_ARGS). Rename detection is off:
     // with it, a change to a file another task moved would follow the move and
@@ -425,13 +437,18 @@ export function integrateTaskWorktree(cwd, run, task, attempt, { operationId, be
     // Every configured merge driver is replaced by `false`, so a file it would
     // merge conflicts instead of running a driver script the worker may have
     // changed in an earlier commit.
-    const noDrivers = configuredDrivers("merge", { cwd }).flatMap((name) => ["-c", `merge.${name}.driver=false`]);
     git(cwd, ["-c", "core.logAllRefUpdates=true", ...noDrivers, "cherry-pick", "--strategy-option=no-renames", ...inspection.commits], null,
       operationId ? { ...process.env, GIT_REFLOG_ACTION: `orchestrator-integrate-${operationId}` } : process.env);
+    stopped = true;
   } catch (error) {
+    // Do not abort or release ownership while the original Git group could
+    // still mutate this checkout. Leave the durable phase at started.
+    if (error.gitMayBeRunning) throw error;
+    stopped = true;
     try {
       git(cwd, ["cherry-pick", "--abort"]);
-    } catch {
+    } catch (abortError) {
+      if (abortError.gitMayBeRunning) stopped = false;
       // Preserve the original cherry-pick error; the caller reports manual recovery.
     }
     throw new WorktreeOperationError(
@@ -442,6 +459,8 @@ export function integrateTaskWorktree(cwd, run, task, attempt, { operationId, be
         signals: ["integration_conflict"]
       }
     );
+  } finally {
+    if (stopped) afterStop();
   }
   return {
     inspection,
@@ -459,14 +478,13 @@ export function recoverTaskIntegration(cwd, run, pending) {
   const refuse = () => {
     throw new Error(`Integration of task "${pending.taskId}" is interrupted; preserve the checkout and inspect Git state before manual recovery.`);
   };
+  // Receipts prove what was applied, not that the original mutator has exited.
+  // A process that died during Git cannot attest to that child's termination.
+  if (!["prepared", "stopped"].includes(pending.phase)) refuse();
   if (currentBranch(cwd) !== run.repository.branch || changedFiles(cwd).length) {
     refuse();
   }
-  for (const entry of ["sequencer", "CHERRY_PICK_HEAD", "MERGE_HEAD", "rebase-merge", "rebase-apply"]) {
-    if (fs.existsSync(path.resolve(cwd, git(cwd, ["rev-parse", "--git-path", entry])))) {
-      refuse();
-    }
-  }
+  if (gitOperationInProgress(cwd)) refuse();
   const head = headSha(cwd);
   if (head === pending.priorHead) {
     return null;

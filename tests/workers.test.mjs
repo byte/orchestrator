@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync, spawn } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -24,6 +24,7 @@ import {
 } from "../plugins/orchestrator/scripts/lib/runs.mjs";
 import {
   WORKER_RESULT_SCHEMA,
+  attemptLive,
   cancelWorkers,
   launchTaskWorker,
   modelUnavailableError,
@@ -138,6 +139,15 @@ test("write worktrees require committed, clean, declared, in-scope changes befor
   assert.equal(inspection.ready, true);
   assert.deepEqual(inspection.files, ["src/module.js"]);
 
+  // A stopped empty cherry-pick is clean and has not advanced HEAD, but still
+  // belongs to its caller. Integration must neither consume nor abort it.
+  assert.throws(() => git(root, ["cherry-pick", "HEAD"]));
+  const cherryPickHead = path.join(root, git(root, ["rev-parse", "--git-path", "CHERRY_PICK_HEAD"]).trim());
+  assert.ok(fs.existsSync(cherryPickHead));
+  assert.throws(() => integrateTaskWorktree(root, run, task, task.attempts.at(-1)), /Git operation/);
+  assert.ok(fs.existsSync(cherryPickHead));
+  git(root, ["cherry-pick", "--abort"]);
+
   const integrated = integrateTaskWorktree(root, run, task, task.attempts.at(-1));
   const result = recordIntegration(root, "run-worktree", "build", {
     evidence: ["worker tests passed", "scope inspection passed"],
@@ -149,9 +159,96 @@ test("write worktrees require committed, clean, declared, in-scope changes befor
   assert.equal(cleanupTaskWorktree(root, task.attempts.at(-1)), true);
 });
 
-test("integration recovers across process death without accepting partial or foreign work", () => {
+test("inspection does not select a worker-written git through relative PATH entries", () => {
+  const root = repo();
+  const marker = path.join(root, ".orchestrator", "local", "planted-git-ran");
+  const planted = write(root, "git", `#!/bin/sh\necho ran > ${JSON.stringify(marker)}\n`);
+  fs.chmodSync(planted, 0o755);
+  const saved = process.env.PATH;
+  try {
+    process.env.PATH = `.:${saved}`;
+    const files = changedFiles(root, { gitDir: path.join(root, ".git") });
+    assert.equal(fs.existsSync(marker), false);
+    assert.ok(files.includes("git"), "the planted program is inspected as a file, not executed");
+  } finally {
+    process.env.PATH = saved;
+  }
+});
+
+test("polling does not execute an integrated worker-written ps through relative PATH", async () => {
+  const root = repo();
+  const id = "run-relative-ps";
+  plan(root, id);
+  replacePlan(root, id, [loadRun(root, id).tasks.build, {
+    id: "waiting", title: "Wait", objective: "Wait", kind: "read", scope: ["src/**"]
+  }]);
+  checkpointPlan(root, id);
+  const dispatch = claimTask(root, id, "build", { constraints: [] });
+  const run = loadRun(root, id);
+  const worktree = createTaskWorktree(root, run, run.tasks.build, run.tasks.build.attempts.at(-1));
+  attachExecution(root, id, "build", { attemptId: dispatch.attemptId, worktree });
+  const marker = path.join(root, ".orchestrator", "local", "planted-ps-ran");
+  fs.chmodSync(write(worktree.path, "src/ps", `#!/bin/sh\necho ran > ${JSON.stringify(marker)}\nexec /bin/ps "$@"\n`), 0o755);
+  git(worktree.path, ["add", "src/ps"]);
+  git(worktree.path, ["commit", "--quiet", "-m", "Add ps fixture"]);
+  reportFiles(root, id, dispatch.attemptId, ["src/ps"]);
+  const second = claimTask(root, id, "waiting", { constraints: [] });
+  const idle = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { detached: true, stdio: "ignore" });
+  const statusFile = path.join(path.dirname(runFile(root, id)), "idle-status.json");
+  const startedAt = new Date().toISOString();
+  fs.writeFileSync(statusFile, JSON.stringify({ pid: idle.pid, startedAt, status: "running" }));
+  attachExecution(root, id, "waiting", { attemptId: second.attemptId, runner: { pid: idle.pid, statusFile, launchedAt: startedAt } });
+  try {
+    const integrated = runCli(root, ["run", "integrate", id, "build"]);
+    assert.equal(integrated.code, 0, integrated.stderr);
+    const polled = spawnSync(process.execPath, [CLI, "run", "poll", id], {
+      cwd: root, encoding: "utf8", env: { ...process.env, PATH: `src:.:${process.env.PATH}` }
+    });
+    assert.equal(polled.status, 0, polled.stderr);
+    assert.equal(fs.existsSync(marker), false, "process identity checks must use trusted ps, not integrated code");
+    assert.equal(loadRun(root, id).tasks.waiting.status, "running");
+  } finally {
+    process.kill(-idle.pid, "SIGKILL");
+    await exited(idle.pid);
+  }
+});
+
+test("inspection and cleanup bound a Git command blocked on a worker FIFO", () => {
+  const root = repo();
+  const id = "run-fifo-inspection";
+  plan(root, id);
+  checkpointPlan(root, id);
+  const dispatch = claimTask(root, id, "build", { constraints: [] });
+  const run = loadRun(root, id);
+  const worktree = createTaskWorktree(root, run, run.tasks.build, run.tasks.build.attempts.at(-1));
+  attachExecution(root, id, "build", { attemptId: dispatch.attemptId, worktree, runner: {} });
+  cancelTask(root, id, "build");
+  fs.mkdirSync(path.join(worktree.path, "src"));
+  const fifo = path.join(worktree.path, "src", ".gitignore");
+  execFileSync("mkfifo", [fifo]);
   const preload = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "interrupt-integration.mjs");
-  for (const phase of ["before-git", "after-git", "direct-retry", "detached-head", "partial-git", "foreign-git", "dirty-checkout", "missing-receipts"]) {
+  try {
+    for (const action of ["inspect", "cleanup"]) {
+      const result = spawnSync(process.execPath, [CLI, "run", action, id, "build"], {
+        cwd: root, encoding: "utf8", detached: true, timeout: 3500, killSignal: "SIGKILL",
+        env: { ...process.env, NODE_OPTIONS: `--import=${preload}`, ORCH_TEST_SHORT_GIT_TIMEOUT: "1" }
+      });
+      if (result.error?.code === "ETIMEDOUT") {
+        try { process.kill(-result.pid, "SIGKILL"); } catch { /* Already gone. */ }
+      }
+      assert.equal(result.status, 1, `${action} must return an explicit failure, not hang`);
+      assert.match(result.stderr, /Git timed out/);
+      assert.ok(fs.existsSync(worktree.path));
+      assert.ok(fs.lstatSync(fifo).isFIFO());
+    }
+  } finally {
+    fs.unlinkSync(fifo);
+  }
+});
+
+test("integration recovers across process death without accepting partial or foreign work", async () => {
+  const preload = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "interrupt-integration.mjs");
+  for (const phase of ["before-git", "after-git", "direct-retry", "detached-head", "partial-git", "foreign-git", "dirty-checkout", "missing-receipts", "orphan-git"]) {
     const root = repo();
     const id = `run-recovery-${phase}`;
     if (phase === "detached-head") {
@@ -177,12 +274,34 @@ test("integration recovers across process death without accepting partial or for
     assert.throws(() => execFileSync(process.execPath, [CLI, "run", "integrate", id, "build", "--evidence", "reviewed both modules"], {
       cwd: root, stdio: "pipe",
       env: { ...process.env, NODE_OPTIONS: `--import=${preload}`,
-        ORCH_TEST_INTEGRATION_INTERRUPT: ["before-git", "partial-git"].includes(phase) ? phase : "after-git" }
+        ORCH_TEST_GIT_PID: path.join(path.dirname(runFile(root, id)), "git.pid"),
+        ORCH_TEST_INTEGRATION_INTERRUPT: ["before-git", "partial-git", "orphan-git"].includes(phase) ? phase : "after-git" }
     }), (error) => error.status === 86);
     run = loadRun(root, id);
     assert.equal(run.tasks.build.status, "reported");
     assert.ok(run.pendingIntegration);
     assert.throws(() => cancelTask(root, id, "build"), /interrupted integration/);
+    if (phase === "orphan-git") {
+      const pid = Number(fs.readFileSync(path.join(path.dirname(runFile(root, id)), "git.pid"), "utf8"));
+      try {
+        const deadline = Date.now() + 5000;
+        while (!execFileSync("ps", ["-o", "stat=", "-p", String(pid)], { encoding: "utf8" }).includes("T")) {
+          assert.ok(Date.now() < deadline, "the orphan child stopped before recovery");
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+        const refused = runCli(root, ["run", "resume", id]);
+        assert.equal(refused.code, 1, "a child may still apply the saved operation despite unchanged HEAD");
+        assert.match(refused.stderr, /manual recovery/);
+        assert.ok(loadRun(root, id).pendingIntegration);
+        assert.throws(() => cancelTask(root, id, "build"), /interrupted integration/);
+        // Even after application, receipts cannot attest to mutator termination;
+        // without the parent's stopped phase this remains manual recovery.
+        process.kill(pid, "SIGCONT");
+        assert.ok(await exited(pid, 5000), "the orphan Git child finished");
+      } finally {
+        try { process.kill(-pid, "SIGKILL"); } catch { /* Already gone. */ }
+      }
+    }
     if (phase === "foreign-git") {
       write(root, "foreign.txt", "unrelated\n");
       git(root, ["add", "foreign.txt"]);
@@ -198,7 +317,7 @@ test("integration recovers across process death without accepting partial or for
     const resumed = runCli(root, phase === "direct-retry"
       ? ["run", "integrate", id, "build", "--json"]
       : ["run", "resume", id, "--json"]);
-    if (["partial-git", "foreign-git", "dirty-checkout", "missing-receipts"].includes(phase)) {
+    if (["partial-git", "foreign-git", "dirty-checkout", "missing-receipts", "orphan-git"].includes(phase)) {
       assert.equal(resumed.code, 1);
       assert.match(resumed.stderr, /manual recovery/);
       assert.equal(loadRun(root, id).tasks.build.status, "reported");
@@ -228,6 +347,174 @@ test("integration recovers across process death without accepting partial or for
     assert.equal(fs.readFileSync(path.join(root, "src/second.js"), "utf8"), "export const value = 29;\n");
     assert.equal(run.repository.integrationHead, git(root, ["rev-parse", "HEAD"]).trim());
     assert.equal(runCli(root, ["run", "resume", id, "--json"]).code, 0);
+  }
+});
+
+test("integration reaps a signalled Git launcher's group or retains mutation ownership", async () => {
+  const preload = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "interrupt-integration.mjs");
+  for (const phase of ["signalled-git", "unreapable-git"]) {
+    const root = repo();
+    const id = `run-${phase}`;
+    plan(root, id);
+    checkpointPlan(root, id);
+    const dispatch = claimTask(root, id, "build", { constraints: [] });
+    const run = loadRun(root, id);
+    const worktree = createTaskWorktree(root, run, run.tasks.build, run.tasks.build.attempts.at(-1));
+    attachExecution(root, id, "build", { attemptId: dispatch.attemptId, worktree });
+    write(worktree.path, "src/module.js", "export const value = 67;\n");
+    git(worktree.path, ["add", "src/module.js"]);
+    git(worktree.path, ["commit", "--quiet", "-m", "Add module"]);
+    reportFiles(root, id, dispatch.attemptId, ["src/module.js"]);
+    const pidFile = path.join(path.dirname(runFile(root, id)), "git.pid");
+    const head = git(root, ["rev-parse", "HEAD"]).trim();
+    const result = spawnSync(process.execPath, [CLI, "run", "integrate", id, "build"], {
+      cwd: root, encoding: "utf8",
+      env: { ...process.env, NODE_OPTIONS: `--import=${preload}`, ORCH_TEST_INTEGRATION_INTERRUPT: phase,
+        ORCH_TEST_GIT_PID: pidFile }
+    });
+    const pid = Number(fs.readFileSync(pidFile, "utf8"));
+    try {
+      assert.equal(result.status, 1, result.stderr);
+      if (phase === "unreapable-git") {
+        assert.equal(loadRun(root, id).pendingIntegration.phase, "started");
+        assert.equal(runCli(root, ["run", "resume", id]).code, 1);
+        assert.equal(runCli(root, ["run", "cancel", id, "build"]).code, 1);
+      } else {
+        assert.ok(await exited(pid, 2000), "the signalled launcher's stopped child must not survive integration");
+        assert.equal(loadRun(root, id).pendingIntegration, undefined);
+        assert.equal(runCli(root, ["run", "cancel", id, "build"]).code, 0);
+      }
+      assert.equal(git(root, ["rev-parse", "HEAD"]).trim(), head);
+      assert.equal(fs.existsSync(path.join(root, "src/module.js")), false);
+    } finally {
+      try { process.kill(pid, "SIGKILL"); } catch { /* Already gone. */ }
+    }
+  }
+});
+
+test("a wrapper's final Git result retains group ownership until poll or cancel reaps descendants", async () => {
+  const preload = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "interrupt-integration.mjs");
+  for (const [phase, action] of [
+    ["wrapper-signalled-git", "poll"], ["wrapper-signalled-git", "cancel"],
+    ["wrapper-success-git", "poll"], ["wrapper-delayed-git", "cancel"],
+    ["wrapper-signalled-git", "denied"], ["wrapper-delayed-git", "stale"]
+  ]) {
+    const root = repo();
+    const id = `run-${phase}-${action}`;
+    plan(root, id);
+    checkpointPlan(root, id);
+    const pidFile = path.join(path.dirname(runFile(root, id)), "git.pid");
+    const saved = { ...process.env };
+    let launched;
+    try {
+      Object.assign(process.env, { NODE_OPTIONS: `--import=${preload}`, ORCH_TEST_INTEGRATION_INTERRUPT: phase, ORCH_TEST_GIT_PID: pidFile });
+      launched = launchTaskWorker(root, id, "build", { constraints: [] }, {
+        codexCommand: [process.execPath, writeFixture, "--no-commit"]
+      });
+    } finally {
+      for (const key of ["NODE_OPTIONS", "ORCH_TEST_INTEGRATION_INTERRUPT", "ORCH_TEST_GIT_PID"]) {
+        if (saved[key] === undefined) delete process.env[key];
+        else process.env[key] = saved[key];
+      }
+    }
+    let child;
+    const staleSnapshot = `${pidFile}.stale-status.json`;
+    try {
+      if (phase === "wrapper-delayed-git") {
+        const deadline = Date.now() + 10000;
+        while (!fs.existsSync(pidFile) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20));
+        assert.equal(JSON.parse(fs.readFileSync(launched.runner.statusFile, "utf8")).status, "running");
+        if (action === "stale") {
+          fs.copyFileSync(launched.runner.statusFile, staleSnapshot);
+          assert.ok(await exited(launched.runner.pid, 10000));
+        }
+      } else {
+        assert.ok(await exited(launched.runner.pid, 10000), "the wrapper finished its result");
+      }
+      child = Number(fs.readFileSync(pidFile, "utf8"));
+      const attempt = loadRun(root, id).tasks.build.attempts.at(-1);
+      const head = git(root, ["rev-parse", "HEAD"]).trim();
+      assert.equal(await exited(child, 50), false, "the gated Git child remains for supervisor cleanup");
+      assert.equal(attemptLive(attempt), true, "a final result does not release the group's ownership");
+      if (action === "cancel" && phase !== "wrapper-delayed-git") {
+        cancelTask(root, id, "build", "save cancellation before stopping processes");
+        const cleanupResult = runCli(root, ["run", "cleanup", id, "build"]);
+        assert.equal(cleanupResult.code, 1);
+        assert.match(cleanupResult.stderr, /still running/);
+      }
+      if (action === "denied") {
+        for (const denied of ["poll", "cancel"]) {
+          const result = spawnSync(process.execPath, [CLI, "run", denied, id, ...(denied === "cancel" ? ["build"] : [])], {
+            cwd: root, encoding: "utf8", env: { ...process.env, NODE_OPTIONS: `--import=${preload}`, ORCH_TEST_DENY_GROUP: String(launched.runner.pid) }
+          });
+          assert.equal(result.status, 1, `${denied} must report the failed reap`);
+          assert.match(result.stderr, /injected group denial/);
+          assert.equal(JSON.parse(fs.readFileSync(launched.runner.statusFile, "utf8")).groupCleanupPending, true);
+          assert.equal(attemptLive(attempt), true);
+          assert.equal(await exited(child, 50), false);
+        }
+      }
+      if (action === "stale") {
+        const result = spawnSync(process.execPath, [CLI, "run", "poll", id], {
+          cwd: root, encoding: "utf8", env: { ...process.env, NODE_OPTIONS: `--import=${preload}`,
+            ORCH_TEST_STALE_STATUS_FILE: launched.runner.statusFile, ORCH_TEST_STALE_STATUS_SNAPSHOT: staleSnapshot }
+        });
+        assert.equal(result.status, 0, result.stderr);
+      } else {
+        const command = action === "denied" ? "cancel" : action;
+        const result = runCli(root, ["run", command, id, ...(command === "cancel" ? ["build"] : [])]);
+        assert.equal(result.code, 0, result.stderr);
+      }
+      assert.ok(await exited(child, 2000), `${action} reaped the commit descendant`);
+      assert.equal(attemptLive(loadRun(root, id).tasks.build.attempts.at(-1)), false);
+      assert.equal(git(launched.worktree.path, ["rev-parse", "HEAD"]).trim(), head, "the gated commit never ran");
+    } finally {
+      for (const pid of [child, launched.runner.pid]) {
+        if (pid) try { process.kill(pid, "SIGKILL"); } catch { /* Already gone. */ }
+      }
+    }
+  }
+});
+
+test("a refused run cancellation leaves its still-running worker untouched", async () => {
+  const root = repo();
+  const id = "run-refused-cancel";
+  plan(root, id);
+  replacePlan(root, id, [loadRun(root, id).tasks.build, {
+    id: "waiting", title: "Wait", objective: "Wait", kind: "read", scope: ["src/**"]
+  }]);
+  checkpointPlan(root, id);
+  const first = claimTask(root, id, "build", { constraints: [] });
+  const run = loadRun(root, id);
+  const worktree = createTaskWorktree(root, run, run.tasks.build, run.tasks.build.attempts.at(-1));
+  attachExecution(root, id, "build", { attemptId: first.attemptId, worktree });
+  write(worktree.path, "src/module.js", "export const value = 41;\n");
+  git(worktree.path, ["add", "src/module.js"]);
+  git(worktree.path, ["commit", "--quiet", "-m", "module"]);
+  reportFiles(root, id, first.attemptId, ["src/module.js"]);
+  const second = claimTask(root, id, "waiting", { constraints: [] });
+  const idle = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { detached: true, stdio: "ignore" });
+  const statusFile = path.join(path.dirname(runFile(root, id)), "idle-status.json");
+  const startedAt = new Date().toISOString();
+  fs.writeFileSync(statusFile, JSON.stringify({ pid: idle.pid, startedAt, status: "running" }));
+  attachExecution(root, id, "waiting", { attemptId: second.attemptId, runner: { pid: idle.pid, statusFile, launchedAt: startedAt } });
+  const preload = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "interrupt-integration.mjs");
+  try {
+    assert.throws(() => execFileSync(process.execPath, [CLI, "run", "integrate", id, "build"], {
+      cwd: root, stdio: "pipe",
+      env: { ...process.env, NODE_OPTIONS: `--import=${preload}`, ORCH_TEST_INTEGRATION_INTERRUPT: "before-git" }
+    }), (error) => error.status === 86);
+    const cancelled = runCli(root, ["run", "cancel", id]);
+    assert.equal(cancelled.code, 1);
+    assert.match(cancelled.stderr, /interrupted integration/);
+    assert.equal(JSON.parse(fs.readFileSync(statusFile, "utf8")).status, "running");
+    assert.equal(loadRun(root, id).tasks.waiting.status, "running");
+    assert.equal(await exited(idle.pid, 100), false);
+    assert.equal(runCli(root, ["run", "resume", id]).code, 0);
+    cancelWorkers(root, id, null, "stop after recovery");
+    assert.ok(await exited(idle.pid));
+  } finally {
+    try { process.kill(-idle.pid, "SIGKILL"); } catch { /* Already gone. */ }
   }
 });
 
@@ -970,6 +1257,43 @@ test("cancelling a worker whose wrapper is gone kills what Codex started", async
     }
   }
 });
+
+for (const action of ["cancel", "poll"]) {
+test(`${action} stops same-group children after their wrapper has died`, async () => {
+  const root = repo();
+  const id = `run-wrapper-group-${action}`;
+  plan(root, id);
+  checkpointPlan(root, id);
+  const dispatch = claimTask(root, id, "build", { constraints: [] });
+  const directory = path.dirname(runFile(root, id));
+  const pidFile = path.join(directory, "same-group.pid");
+  const wrapper = spawn(process.execPath, ["-e", `
+    const { spawn } = require('node:child_process');
+    const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+    require('node:fs').writeFileSync(${JSON.stringify(pidFile)}, String(child.pid));
+    setInterval(() => {}, 1000);
+  `], { detached: true, stdio: "ignore" });
+  const statusFile = path.join(directory, "wrapper-status.json");
+  const startedAt = new Date().toISOString();
+  fs.writeFileSync(statusFile, JSON.stringify({ pid: wrapper.pid, startedAt, status: "running" }));
+  attachExecution(root, id, "build", { attemptId: dispatch.attemptId, runner: { pid: wrapper.pid, statusFile, launchedAt: startedAt } });
+  try {
+    const deadline = Date.now() + 5000;
+    while (!fs.existsSync(pidFile) && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    const child = Number(fs.readFileSync(pidFile, "utf8"));
+    process.kill(wrapper.pid, "SIGKILL");
+    assert.ok(await exited(wrapper.pid));
+    if (action === "cancel") cancelWorkers(root, id, "build", "stop it");
+    else pollRunWorkers(root, id);
+    assert.ok(await exited(child), "the wrapper's child did not survive the freed task slot");
+    assert.equal(loadRun(root, id).tasks.build.status, action === "cancel" ? "cancelled" : "failed");
+  } finally {
+    try { process.kill(-wrapper.pid, "SIGKILL"); } catch { /* Already gone. */ }
+  }
+});
+}
 
 test("a cancel leaves nothing of the worker running once it returns", async () => {
   const root = repo();

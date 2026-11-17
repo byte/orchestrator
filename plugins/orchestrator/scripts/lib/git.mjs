@@ -1,7 +1,7 @@
-import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 
+import { execGit } from "./exec.mjs";
 import { isGitRepository, resolveWorkspaceRoot } from "./workspace.mjs";
 
 /**
@@ -13,11 +13,8 @@ import { isGitRepository, resolveWorkspaceRoot } from "./workspace.mjs";
 export const SUPERVISOR_GIT_ARGS = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"];
 
 function git(cwd, args, gitDir = null) {
-  return execFileSync("git", gitDir ? args : [...SUPERVISOR_GIT_ARGS, ...args], {
+  return execGit(gitDir ? args : [...SUPERVISOR_GIT_ARGS, ...args], {
     cwd,
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "pipe"],
-    maxBuffer: 32 * 1024 * 1024,
     ...(gitDir ? { env: worktreeGitEnv(cwd, gitDir) } : {})
   });
 }
@@ -50,13 +47,10 @@ function definedFilterDrivers(gitDir) {
 export function configuredDrivers(section, { cwd = undefined, env = process.env } = {}) {
   let output = "";
   try {
-    output = execFileSync("git", ["config", "--name-only", "--get-regexp", `^${section}\\.`], {
-      cwd,
-      encoding: "utf8",
-      env
-    });
-  } catch {
+    output = execGit(["config", "--name-only", "--get-regexp", `^${section}\\.`], { cwd, env });
+  } catch (error) {
     // Exit 1: none is configured.
+    if (error.status !== 1) throw error;
   }
   const names = new Set();
   for (const key of output.split("\n").filter(Boolean)) {

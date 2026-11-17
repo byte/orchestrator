@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { resolveExecutable } from "./exec.mjs";
 import { requireLane } from "./lanes.mjs";
 import {
   AnswerSavedError,
@@ -21,6 +22,7 @@ import {
   revertTaskAnswer,
   substitutionNotice,
   syncExecutionStatus,
+  taskHistory,
   taskTimeoutMinutes,
   workerClockStart,
   StaleRunnerError
@@ -314,9 +316,11 @@ function processAlive(pid) {
 /** When the process with this pid started, from `ps`, or null when that cannot be told. */
 function processStart(pid) {
   try {
-    const out = execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], {
+    const out = execFileSync("/bin/ps", ["-o", "lstart=", "-p", String(pid)], {
       encoding: "utf8",
       env: { ...process.env, LC_ALL: "C" },
+      timeout: 2000,
+      killSignal: "SIGKILL",
       stdio: ["ignore", "pipe", "ignore"]
     }).trim();
     const time = Date.parse(out);
@@ -373,10 +377,10 @@ export function attemptLive(attempt) {
   } catch {
     status = null;
   }
-  if (TERMINAL_RUNNER_STATUSES.has(status?.status)) {
+  if (TERMINAL_RUNNER_STATUSES.has(status?.status) && !status.groupCleanupPending) {
     return false;
   }
-  return sameProcess(runner.pid, status?.startedAt ?? runner.launchedAt) ||
+  return groupLive(runner.pid, status?.startedAt ?? runner.launchedAt) ||
     groupLive(status?.childPid, status?.childStartedAt);
 }
 
@@ -430,7 +434,7 @@ function spawnWorker(
   atomicWrite(files.schemaFile, `${JSON.stringify(WORKER_RESULT_SCHEMA, null, 2)}\n`);
   const spec = {
     ...files,
-    codexCommand,
+    codexCommand: [resolveExecutable(codexCommand[0], cwd), ...codexCommand.slice(1)],
     worktreePath,
     model,
     reasoningEffort,
@@ -664,6 +668,7 @@ export function pollRunWorkers(cwd, runId, { now = Date.now() } = {}) {
     // A wrapper that died before writing any status (it could not start, say)
     // gets a failed one, or its task would wait forever.
     if (statusFile && !fs.existsSync(statusFile) && wrapperGone()) {
+      stopGroup(attempt.runner.pid, "SIGKILL", attempt.runner.launchedAt);
       atomicWrite(statusFile, `${JSON.stringify({
         pid: attempt.runner.pid,
         status: "failed",
@@ -696,7 +701,15 @@ export function pollRunWorkers(cwd, runId, { now = Date.now() } = {}) {
           // Codex runs in its own group and outlives the wrapper; nothing else
           // would stop it once the task is failed and its slot is free.
           stopGroup(status.childPid, "SIGKILL", status.childStartedAt);
+          stopGroup(attempt.runner.pid, "SIGKILL", status.startedAt ?? attempt.runner.launchedAt);
         }
+      }
+      if (status.groupCleanupPending) {
+        // The refresh can reveal a final result and its obligation. Reap the
+        // group before synchronizing terminal state or reading its changes.
+        stopGroup(attempt.runner.pid, "SIGKILL", status.startedAt ?? attempt.runner.launchedAt);
+        status = { ...status, groupCleanupPending: false };
+        atomicWrite(statusFile, `${JSON.stringify(status, null, 2)}\n`);
       }
       const hadFallback = fallbackRecorded(attempt);
       const synced = syncExecutionStatus(cwd, runId, task.id, {
@@ -941,7 +954,20 @@ function stopGroup(pid, signal = "SIGTERM", startedAt = null) {
   }
   try {
     process.kill(-pid, signal);
-  } catch {
+  } catch (error) {
+    // Darwin returns EPERM for a group containing only unreaped zombies.
+    // Those cannot mutate anything; do not confuse them with a denied signal
+    // to live descendants. A failed inspection must preserve the obligation.
+    if (error.code === "EPERM" && process.platform === "darwin") {
+      const members = execFileSync("/bin/ps", ["-axo", "pgid=,stat="], {
+        encoding: "utf8", timeout: 2000, killSignal: "SIGKILL",
+        stdio: ["ignore", "pipe", "ignore"]
+      }).trim().split("\n").map((line) => line.trim().split(/\s+/))
+        .filter(([group]) => Number(group) === pid);
+      if (members.every(([, state]) => state?.startsWith("Z"))) return;
+    }
+    // A denied group signal is not discharged by an already-absent leader.
+    if (error.code !== "ESRCH") throw error;
     stopPid(pid);
   }
 }
@@ -961,15 +987,12 @@ function stopPid(pid) {
 
 /**
  * Cancel a task (or, with no task id, the whole run) and stop its workers. A
- * launch or answer may attach its worker after the first stop reads the run but
- * before the cancellation is saved; nothing can attach once it is saved, so a
- * second pass stops any worker still live on a cancelled task.
+ * launch or answer may attach its worker around the cancellation. Save the
+ * cancellation first, under the run lock, so a refusal has no process effects;
+ * then stop every cancelled attempt, including one attached during that save.
  */
 export function cancelWorkers(cwd, runId, taskId, reason) {
-  const pick = (run) => (taskId ? [run.tasks[taskId]] : Object.values(run.tasks)).filter(Boolean);
-  for (const task of pick(loadRun(cwd, runId))) {
-    stopTaskWorker(task.attempts.at(-1));
-  }
+  const pick = (run) => taskHistory(run).filter((task) => !taskId || task.id === taskId);
   try {
     return taskId ? cancelTask(cwd, runId, taskId, reason) : cancelRun(cwd, runId, reason);
   } finally {
@@ -995,8 +1018,8 @@ function stopLiveTaskWorker(attempt) {
   if (!runner) {
     return false;
   }
-  const status = fs.existsSync(runner.statusFile) ? readJson(runner.statusFile)?.status : null;
-  if (TERMINAL_RUNNER_STATUSES.has(status)) {
+  const status = fs.existsSync(runner.statusFile) ? readJson(runner.statusFile) : null;
+  if (TERMINAL_RUNNER_STATUSES.has(status?.status) && !status.groupCleanupPending) {
     return false;
   }
   return stopTaskWorker(attempt);
@@ -1017,9 +1040,9 @@ export function stopTaskWorker(attempt) {
   // read), and escalates to SIGKILL itself. Whatever group the status records
   // once the wrapper is gone, or after the wait, is then killed outright, so
   // nothing is left running when this returns even if the wrapper died
-  // midway. A finished runner is not signalled: its pids may since belong to
-  // unrelated processes.
-  if (!TERMINAL_RUNNER_STATUSES.has(status?.status)) {
+  // midway. A finished runner without a cleanup obligation is not signalled:
+  // its pids may since belong to unrelated processes.
+  if (!TERMINAL_RUNNER_STATUSES.has(status?.status) || status.groupCleanupPending) {
     const current = () => (fs.existsSync(runner.statusFile) ? readJson(runner.statusFile) : status);
     if (Number.isInteger(runner.pid) && sameProcess(runner.pid, status?.startedAt ?? runner.launchedAt)) {
       stopPid(runner.pid);
@@ -1032,13 +1055,14 @@ export function stopTaskWorker(attempt) {
       }
     }
     status = current();
-    if (!TERMINAL_RUNNER_STATUSES.has(status?.status)) {
+    // Git can finish and publish an obligation while the stop waits. Inspect
+    // the refreshed status, not just the one from before signalling.
+    if (!TERMINAL_RUNNER_STATUSES.has(status?.status) || status.groupCleanupPending) {
       stopGroup(status?.childPid, "SIGKILL", status?.childStartedAt);
       // A wrapper that ignored SIGTERM this long is stuck (in a git command a
       // worker's file blocks, say): kill it and what it runs, its own group.
-      if (Number.isInteger(runner.pid) && sameProcess(runner.pid, status?.startedAt ?? runner.launchedAt)) {
-        stopGroup(runner.pid, "SIGKILL", status?.startedAt ?? runner.launchedAt);
-      }
+      stopGroup(runner.pid, "SIGKILL", status?.startedAt ?? runner.launchedAt);
+      if (status?.groupCleanupPending) status = { ...status, groupCleanupPending: false };
     }
   }
   atomicWrite(

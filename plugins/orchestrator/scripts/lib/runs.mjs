@@ -3006,8 +3006,17 @@ export function integrateRunTask(cwd, runId, taskId, { evidence = [] } = {}) {
           beforeApply(inspection) {
             run.pendingIntegration = {
               id: operationId, taskId: task.id, attemptId: currentAttempt(task).id,
-              priorHead: run.repository.integrationHead, inspection, evidence: checks
+              priorHead: run.repository.integrationHead, inspection, evidence: checks,
+              phase: "prepared"
             };
+            writeRun(cwd, run);
+          },
+          beforeStart() {
+            run.pendingIntegration.phase = "started";
+            writeRun(cwd, run);
+          },
+          afterStop() {
+            run.pendingIntegration.phase = "stopped";
             writeRun(cwd, run);
           }
         });
