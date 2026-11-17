@@ -159,6 +159,8 @@ sample ID identifies the source attempt, while a separate fingerprint changes wh
 facts such as finalization change; collection then updates the one sample instead of duplicating
 it.
 
+Each new claim freezes an `assignmentSnapshot` in raw run state: plan revision, allowlisted structural facts, route, and the four exportable text fields. Collection and opted-in text export use that historical assignment, not the task's current definition after replanning. Legacy attempts without snapshots require event history establishing that their claimed plan is unchanged; ambiguous historical assignment data fails closed. Existing metadata-only samples remain readable and exportable, and later finalization evidence can still update them.
+
 Labels are stored as provenance-tagged, validated outcome records inside the canonical sample.
 Keeping sample and label history in the same locked JSONL record makes label, purge, and export
 membership atomic without a cross-file orphan state. Conflicting labels remain audit history; a
@@ -702,6 +704,10 @@ For write tasks, `run inspect` checks:
 cherry-picks the worker commits. A conflict triggers `cherry-pick --abort`; it never resets,
 overwrites, or silently chooses a side.
 
+Before cherry-picking, integration saves `pendingIntegration` with the inspected source commits, old supervisor head, attempt identity, and acceptance evidence. It holds the checkout integration lock and the run-state lock through durable acceptance. Each applied commit gets an operation-specific Git reflog receipt. `run resume` and a repeated `run integrate` reconcile that intent: a clean, complete, linear chain carrying the exact operation's receipts can be accepted without replay; an unchanged original head clears the intent so integration can be attempted again. Partial cherry-picks, missing receipts, other commits, changed branches, and manual edits stop for manual recovery without resetting anything. Pending integration prevents task cancellation or redisposition from invalidating acceptance.
+
+State locks record their owner's PID. A live owner is not evicted merely because an operation exceeds 30 seconds; dead owners can be reclaimed immediately. Stale-lock reclamation is serialized. A crash inside the reclamation critical section can leave a `.lock.reclaim` directory; inspect it and confirm no reclaimer is active before removing that guard manually. PID reuse conservatively leaves the lock occupied rather than risking a live operation.
+
 ## Finalization
 
 Completing every task moves the run to `finalizing`, not `completed`. `run finalize` requires:
@@ -734,7 +740,7 @@ a block.
 
 ## Recovery protocol
 
-`run resume` first polls all durable worker handles. It then returns:
+`run resume` first reconciles any pending integration, then polls all durable worker handles. It then returns:
 
 - current run and task status
 - process, status-file, thread, and worktree handles

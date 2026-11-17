@@ -447,6 +447,8 @@ The package has no runtime dependencies. Tests use throwaway Git repositories an
 processes to exercise concurrency, cancellation, structured collection, worktree integration,
 finalization, and cleanup without consuming model quota.
 
+GitHub Actions runs this suite on Linux and macOS with Node 18.18.2 and Node 22. These are protocol tests, not real-model sandbox certification. Before relying on a new Codex installation or upgrade, separately exercise a write task through integration/finalization, a read task that can write only its scratch directory, warm resume, and cancellation with the authenticated CLI; these opt-in checks consume model quota.
+
 ## Operational limits
 
 - Claude drives every decision while the command is active. The only background process on the
@@ -456,6 +458,7 @@ finalization, and cleanup without consuming model quota.
   machines.
 - Integration uses cherry-pick. Conflicts abort and require the supervisor to replan or request
   direction.
+- If integration is interrupted after Git applies the complete change but before acceptance is saved, `run resume` reconciles the saved intent and operation-specific Git receipts without replaying commits. Partial Git operations, missing receipts, unrelated commits, or manual edits require manual recovery; the command preserves them rather than guessing or resetting the checkout.
 - Retries resume the previous attempt's Codex thread by default. That depends on Codex still
   holding the thread on this machine; when it does not, the retry falls back to a fresh thread with
   the full briefing and records that it did. `run retry --fresh` always starts a new thread.

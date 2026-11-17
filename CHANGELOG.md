@@ -4,6 +4,10 @@
 
 Fixes:
 
+- Interrupted integration now persists inspected intent before cherry-pick and reconciles complete operation-specific Git receipts on `run resume` or repeated integration. Partial operations, unrelated commits, manual edits, and missing receipts remain untouched for manual recovery. Run-state locking protects acceptance from concurrent cancellation; live locks are no longer evicted solely because they are older than 30 seconds.
+- Learning freezes each attempt's original assignment metadata and opted-in text, so replanning cannot retroactively relabel historical outcomes. Legacy attempts require corroborating unchanged-plan history rather than guessing their assignment.
+- Text-export redaction now recognizes quoted JSON/YAML credential keys and consumes complete quoted values, including escaped quotes and punctuation. Redaction version 3 retains compatibility with older stored records.
+- The test command works on the documented Node 18.18 line. A dependency-free Linux/macOS CI matrix covers Node 18.18.2 and Node 22 without launching real model workers.
 - Read and verify workers can run tests. `--sandbox read-only` denied every
   write, the system temp directory included, so a reviewer could not run a
   suite that creates temporary files. These workers now get a Codex
