@@ -5,13 +5,13 @@
   },
   "metadata": {
     "description": "A durable Claude supervisor for a routed Codex worker pool.",
-    "version": "0.6.1"
+    "version": "0.6.2"
   },
   "plugins": [
     {
       "name": "orchestrator",
       "description": "Have Claude plan, route, manage, recover, and verify a Codex worker pool.",
-      "version": "0.6.1",
+      "version": "0.6.2",
       "author": {
         "name": "Colin Charles"
       },

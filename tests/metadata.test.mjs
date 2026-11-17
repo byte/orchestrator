@@ -32,7 +32,7 @@ test("release metadata stays synchronized", () => {
   const packageManifest = json("package.json");
   const pluginManifest = json("plugins/orchestrator/.claude-plugin/plugin.json");
   const marketplace = json(".claude-plugin/marketplace.json");
-  assert.equal(packageManifest.version, "0.6.1");
+  assert.equal(packageManifest.version, "0.6.2");
   assert.equal(pluginManifest.version, packageManifest.version);
   assert.equal(marketplace.metadata.version, packageManifest.version);
   assert.equal(marketplace.plugins[0].version, packageManifest.version);

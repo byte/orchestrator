@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.2
+
+Fixes found by a real run on Codex CLI 0.169.0 (every tier, a warm retry, and a three-worker wave):
+
+- Text and glob options keep their commas. `--evidence`, `--decision`, `--risk`, `--next`, `--constraint`, `--scope`, and `--grant-scope` were split at every comma, so evidence such as `f('a b', 9) returned ...` was stored as fragments in run state, checkpoints, and retry briefings, and a brace glob such as `src/{a,b}.mjs` became two broken patterns. Each value is now one entry; repeat the flag for several. Identifier filters (`--run`, `--task`, `--sample`, `--attempt`, `--outcome`, `--include-text`) still accept comma lists.
+- A supervisor can reject a reviewed write task. `run verify --verdict fail` now works on a reported write task: the attempt ends as `verification_failed` / `supervisor_verification_failed`, and `run retry --note` resumes the worker's thread in the same worktree with the evidence. `--verdict pass` is still refused, since a write task completes only by integration. Before, the only route was `run decide --outcome integration_failed`, which recorded a failed review as an integration failure, and the `run retry` error suggested the `integration_conflict` reason code.
+- `/orchestrator:run` now tells the supervisor to run the lane's definition-of-done check before planning (a check that already fails sends every worker asking for out-of-scope files) and to give `run finalize --verdict pass` only when that check holds.
+
 ## 0.6.1
 
 Fixes:

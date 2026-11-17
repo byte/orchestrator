@@ -185,9 +185,9 @@ Depends on: M0.
 - [x] **M1.18** Add a test that a new plan naming `gpt-5.6-sol`, `gpt-5.6`, or
   a bare family name is rejected with the specific message.
 - [x] **M1.19** Add a test for each model's rejected effort combination.
-- [ ] **M1 gate** `npm test` passes, and one real `/orchestrator:run` completes
+- [x] **M1 gate** `npm test` passes, and one real `/orchestrator:run` completes
   with at least one task on each of `astra`, `sol`, and `terra`. (`npm test`
-  part met; the real run is outstanding, see evidence.)
+  part met; real run done, see "Real-run checks".)
 
 ### Milestone 1 evidence
 
@@ -244,9 +244,9 @@ nothing from the failure.
 - [x] **M2.11** Add a `tests/fixtures/fake-codex-resume.mjs` fixture and tests
   for warm retry, forced fresh retry, missing-thread fallback, and the rendered
   "Previous attempt" section.
-- [ ] **M2 gate** In a real run, a deliberately failed verification is retried
+- [x] **M2 gate** In a real run, a deliberately failed verification is retried
   and the worker's second attempt references the supervisor's evidence.
-  (`npm test` part met; the real run is outstanding, see evidence.)
+  (`npm test` part met; real run done, see "Real-run checks".)
 
 ### Milestone 2 evidence
 
@@ -331,9 +331,9 @@ attempt.
   convert further requests to a blocker.
 - [x] **M3.9** Tests for grant, deny, reply, overlap refusal, the cap, and
   integration with an extended scope.
-- [ ] **M3 gate** A real run in which a worker requests one adjacent file,
-  receives it, and integrates cleanly without a retry. (`npm test` part met; the
-  real run is outstanding, see evidence.)
+- [x] **M3 gate** A real run in which a worker requests one adjacent file,
+  receives it, and integrates cleanly without a retry. (`npm test` part met;
+  real run done, see "Real-run checks".)
 
 ### Milestone 3 evidence
 
@@ -408,9 +408,9 @@ Independent of M2 and M3.
   exceeds it instead of waiting forever.
 - [x] **M4.6** Tests with `fake-codex-slow.mjs` for wake-on-completion,
   timeout, and the over-limit report.
-- [ ] **M4 gate** A three-worker wave completes with one `run wait` per state
+- [x] **M4 gate** A three-worker wave completes with one `run wait` per state
   change and no polling calls in the transcript. (`npm test` part
-  met; the real run is outstanding, see evidence.)
+  met; real run done, see "Real-run checks".)
 
 ### Milestone 4 evidence
 
@@ -557,8 +557,8 @@ learning plan; this only shows the supervisor what already happened.
   repository; the owner will update it.)
 - [ ] **M6 gate** `npm test` passes; a fresh install from the local checkout
   runs one full `/orchestrator:run` that exercises a warm retry, a scope
-  request, and `run wait`. (`npm test` part met; the real run is outstanding,
-  see evidence.)
+  request, and `run wait`. (`npm test` part met; real-run pieces done separately,
+  see "Real-run checks".)
 
 ### Milestone 6 evidence
 
@@ -621,20 +621,35 @@ learning plan; this only shows the supervisor what already happened.
    rejection text was observed. The detector also accepts `model_not_found`,
    which is inferred. Confirm on an API-key login if one is supported.
 
-## Outstanding real-run checks
+## Real-run checks
 
-None of these has been performed. Items 1 to 5 need the owner to run
-`/orchestrator:run` from a fresh install of the local checkout with an
-authenticated Codex CLI; item 6 needs a Codex CLI logged in with an API key.
+Real runs on Codex CLI 0.169.0 (ChatGPT login) were driven through the
+installed plugin's CLI in scratch repositories. Each step of
+`/orchestrator:run` was invoked by hand, so the slash command itself has not
+been run from a user session.
 
-1. **M1 gate** One run completes with at least one task on each of `astra`,
-   `sol`, and `terra`.
-2. **M2 gate** A deliberately failed verification is retried, and the worker's
-   second attempt references the supervisor's evidence.
-3. **M3 gate** A worker requests one adjacent file, receives it, and integrates
-   cleanly without a retry.
-4. **M4 gate** A three-worker wave completes with one `run wait` per state
-   change and no polling calls in the transcript.
-5. **M6 gate** One full run exercises a warm retry, a scope request, and `run
-   wait`.
-6. **Open decision 4** Model-unavailable detection on an API-key login.
+1. **M1 gate — done** (0.6.1, `945e3d4`, 2026-11-17). One run had tasks on
+   `sol`, `terra`, `astra` (an independent verify task), and `luna` (a leaf
+   task). There were no substitutions, and each attempt took 0.5 to 1.5 minutes
+   at low effort.
+2. **M2 gate — done** (same run). A reviewed write task was rejected with
+   specific evidence and retried with a note. The retry resumed the same Codex
+   thread in the same worktree, its briefing carried the evidence and the note,
+   and the worker fixed exactly the reported defect. In 0.6.1 the rejection had
+   to go through `run decide --outcome integration_failed`; 0.6.2 makes it
+   `run verify --verdict fail`.
+3. **M3 gate — done** (`f4784d8`). A `scope_extension` request was granted with
+   `run answer --grant-scope`, the task resumed on the same thread, and it
+   integrated without a retry. At `945e3d4`, a `question` request was answered
+   with `--reply`, and the lane-authority guard refused a grant outside the lane
+   without `--user-approved`.
+4. **M4 gate — done** (`945e3d4`). Three write workers ran as one wave. Each
+   state change came from one background `run wait`, and no `run poll` calls
+   were made.
+5. **M6 gate — done in parts.** Each piece passed on real Codex: a warm retry, a
+   scope request, `run wait`, and the full create → plan → checkpoint → launch
+   → inspect → integrate → finalize → cleanup cycle. They were spread across the
+   runs above, not done in one run started by the slash command.
+6. **Still open:** running `/orchestrator:run` from a session in a user project;
+   model-unavailable detection on an API-key login (Open decision 4); any time
+   or cost comparison against a single agent doing the same job.
