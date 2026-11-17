@@ -1058,6 +1058,7 @@ test("reverting a failed answer restores the thread the next answer resumes", as
   });
   revertTaskAnswer(root, "run-answer-thread", "work", {
     attemptId: answered.attemptId,
+    round: answered.round.round,
     error: "attach failed",
     failedRunnerStatusFile: failedStatusFile
   });
@@ -1328,4 +1329,60 @@ test("a cancelled run's tasks cannot be retried", () => {
   plan(root, "run-cancelled-retry");
   runCli(root, ["run", "cancel", "run-cancelled-retry"]);
   assert.throws(() => retryTask(root, "run-cancelled-retry", "work"), /was cancelled; its tasks cannot be retried/);
+});
+
+test("a delayed answer rollback leaves a later round's answer alone", () => {
+  const root = repo();
+  plan(root, "run-answer-rounds");
+  const claimed = paused(root, "run-answer-rounds", "work");
+  // Process A answers round 1 and attaches its runner, but its event fails.
+  const first = answerTask(root, "run-answer-rounds", "work", lane(root), { grantScope: ["lib/helper.js"] });
+  const failedStatusFile = path.join(path.dirname(runFile(root, "run-answer-rounds")), "round-1-status.json");
+  attachExecution(root, "run-answer-rounds", "work", {
+    attemptId: claimed.attemptId,
+    worktree: first.worktree,
+    runner: { pid: null, status: "starting", statusFile: failedStatusFile, inputRound: 1 }
+  });
+  // Before A reverts, another poll collects that runner's next request, and
+  // process B answers round 2.
+  recordTaskResult(root, "run-answer-rounds", "work", {
+    attemptId: claimed.attemptId,
+    resultText: structured({ needs_input: scopeRequest(["lib/other.js"]) }),
+    runnerStatusFile: failedStatusFile
+  });
+  answerTask(root, "run-answer-rounds", "work", lane(root), { grantScope: ["lib/other.js"] });
+  revertTaskAnswer(root, "run-answer-rounds", "work", {
+    attemptId: claimed.attemptId,
+    round: first.round.round,
+    error: "event append failed",
+    failedRunnerStatusFile: failedStatusFile
+  });
+  const task = loadRun(root, "run-answer-rounds").tasks.work;
+  assert.equal(task.status, "dispatching");
+  assert.equal(task.attempts[0].inputRequests.at(-1).round, 2);
+  assert.ok(task.attempts[0].inputRequests.at(-1).answer, "round 2's answer is kept");
+  assert.ok(task.scopeGrants.some((grant) => grant.round === 2), "round 2's grant is kept");
+});
+
+test("a worker that finishes leaves no process it started running", async () => {
+  const root = repo();
+  plan(root, "run-finish-quiet");
+  const pidFile = path.join(path.dirname(runFile(root, "run-finish-quiet")), "descendant.pid");
+  launchTaskWorker(root, "run-finish-quiet", "work", lane(root), {
+    codexCommand: [process.execPath, path.join(fixtures, "fake-codex-slow.mjs"), "--delay=300", "--complete", `--descendant=${pidFile}`, "--quiet-descendant"]
+  });
+  let descendant = null;
+  try {
+    await settle(root, "run-finish-quiet");
+    descendant = Number(fs.readFileSync(pidFile, "utf8"));
+    assert.ok(await gone(descendant, 3000), `descendant ${descendant} outlived its finished worker`);
+  } finally {
+    try {
+      if (descendant) {
+        process.kill(descendant, "SIGKILL");
+      }
+    } catch {
+      // Already gone.
+    }
+  }
 });

@@ -22,6 +22,7 @@ import {
 } from "../plugins/orchestrator/scripts/lib/runs.mjs";
 import {
   WORKER_RESULT_SCHEMA,
+  cancelWorkers,
   launchTaskWorker,
   modelUnavailableError,
   pollRunWorkers,
@@ -33,6 +34,7 @@ import {
   inspectTaskWorktree,
   integrateTaskWorktree
 } from "../plugins/orchestrator/scripts/lib/worktrees.mjs";
+import { changedFiles, worktreeGitEnv } from "../plugins/orchestrator/scripts/lib/git.mjs";
 import { checkpointPlan, cleanup, git, makeRepo, runCli, write } from "./helpers.mjs";
 
 const repos = [];
@@ -189,6 +191,130 @@ test("a conflicted integration rolls back without running a worker-changed fsmon
   assert.equal(fs.existsSync(marker) ? fs.readFileSync(marker, "utf8") : "", "", "the worker's fsmonitor did not run");
   assert.equal(fs.readFileSync(path.join(root, "src/mon.sh"), "utf8"), "#!/bin/sh\nexit 1\n", "rolled back");
   git(root, ["config", "--unset", "core.fsmonitor"]);
+});
+
+test("supervisor git after an integration runs no hook or fsmonitor the worker changed", () => {
+  const root = repo();
+  write(root, "src/mon.sh", "#!/bin/sh\nexit 1\n");
+  write(root, "src/hooks/post-checkout", "#!/bin/sh\nexit 0\n");
+  fs.chmodSync(path.join(root, "src/mon.sh"), 0o755);
+  fs.chmodSync(path.join(root, "src/hooks/post-checkout"), 0o755);
+  git(root, ["add", "-A"]);
+  git(root, ["commit", "--quiet", "-m", "base"]);
+  plan(root, "run-supervisor-git");
+  checkpointPlan(root, "run-supervisor-git");
+  const dispatch = claimTask(root, "run-supervisor-git", "build", { constraints: [] });
+  let run = loadRun(root, "run-supervisor-git");
+  const worktree = createTaskWorktree(root, run, run.tasks.build, run.tasks.build.attempts.at(-1));
+  const marker = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "orch-hook-")), "ran");
+  repos.push(path.dirname(marker));
+  const planted = `#!/bin/sh\necho ran >> ${JSON.stringify(marker)}\nexit 1\n`;
+  write(worktree.path, "src/mon.sh", planted);
+  write(worktree.path, "src/hooks/post-checkout", planted);
+  git(worktree.path, ["commit", "--quiet", "-am", "monitor and hook"]);
+  recordTaskResult(root, "run-supervisor-git", "build", {
+    attemptId: dispatch.attemptId,
+    resultText: JSON.stringify({
+      summary: "Changed both.",
+      files_touched: ["src/hooks/post-checkout", "src/mon.sh"],
+      tests: [],
+      decisions: [],
+      assumptions: [],
+      blockers: [],
+      confidence: "high"
+    })
+  });
+  git(root, ["config", "core.fsmonitor", path.join(root, "src/mon.sh")]);
+  git(root, ["config", "core.hooksPath", "src/hooks"]);
+  try {
+    run = loadRun(root, "run-supervisor-git");
+    const task = run.tasks.build;
+    task.attempts.at(-1).worktree = worktree;
+    run.repository.integrationHead = integrateTaskWorktree(root, run, task, task.attempts.at(-1)).integrationHead;
+    assert.equal(fs.readFileSync(path.join(root, "src/mon.sh"), "utf8"), planted, "integrated");
+    // The supervisor's next status check and the next worker's worktree.
+    assert.deepEqual(changedFiles(root), []);
+    createTaskWorktree(root, run, task, { ...task.attempts.at(-1), id: "attempt-next" });
+    assert.equal(fs.existsSync(marker) ? fs.readFileSync(marker, "utf8") : "", "", "no worker-written script ran");
+  } finally {
+    execFileSync("git", ["config", "--unset", "core.fsmonitor"], { cwd: root });
+    execFileSync("git", ["config", "--unset", "core.hooksPath"], { cwd: root });
+  }
+});
+
+test("a worker's working-tree-encoded file integrates with the bytes it wrote", () => {
+  const root = repo();
+  write(root, ".gitattributes", "src/*.txt working-tree-encoding=UTF-16LE\n");
+  fs.mkdirSync(path.join(root, "src"), { recursive: true });
+  fs.writeFileSync(path.join(root, "src/value.txt"), Buffer.from("old\n", "utf16le"));
+  git(root, ["add", "-A"]);
+  git(root, ["commit", "--quiet", "-m", "encoded"]);
+  plan(root, "run-encoding");
+  checkpointPlan(root, "run-encoding");
+  const dispatch = claimTask(root, "run-encoding", "build", { constraints: [] });
+  let run = loadRun(root, "run-encoding");
+  const worktree = createTaskWorktree(root, run, run.tasks.build, run.tasks.build.attempts.at(-1));
+  const written = Buffer.from("new\n", "utf16le");
+  fs.writeFileSync(path.join(worktree.path, "src/value.txt"), written);
+  // Committed the way the wrapper commits it.
+  const env = worktreeGitEnv(worktree.path, worktree.gitDir);
+  execFileSync("git", ["add", "-A"], { cwd: worktree.path, env });
+  execFileSync("git", ["commit", "--quiet", "--no-verify", "-m", "value"], { cwd: worktree.path, env });
+  recordTaskResult(root, "run-encoding", "build", {
+    attemptId: dispatch.attemptId,
+    resultText: JSON.stringify({
+      summary: "Changed the value.",
+      files_touched: ["src/value.txt"],
+      tests: [],
+      decisions: [],
+      assumptions: [],
+      blockers: [],
+      confidence: "high"
+    })
+  });
+  run = loadRun(root, "run-encoding");
+  const task = run.tasks.build;
+  task.attempts.at(-1).worktree = worktree;
+  integrateTaskWorktree(root, run, task, task.attempts.at(-1));
+  assert.deepEqual(fs.readFileSync(path.join(root, "src/value.txt")), written);
+});
+
+test("an edit to a file another task moved out of scope conflicts instead of following the move", () => {
+  const root = repo();
+  write(root, "src/a.txt", "one\ntwo\nthree\n");
+  git(root, ["add", "-A"]);
+  git(root, ["commit", "--quiet", "-m", "base"]);
+  plan(root, "run-rename");
+  checkpointPlan(root, "run-rename");
+  const dispatch = claimTask(root, "run-rename", "build", { constraints: [] });
+  let run = loadRun(root, "run-rename");
+  const worktree = createTaskWorktree(root, run, run.tasks.build, run.tasks.build.attempts.at(-1));
+  write(worktree.path, "src/a.txt", "one\nTWO\nthree\n");
+  git(worktree.path, ["commit", "--quiet", "-am", "edit"]);
+  recordTaskResult(root, "run-rename", "build", {
+    attemptId: dispatch.attemptId,
+    resultText: JSON.stringify({
+      summary: "Edited a.",
+      files_touched: ["src/a.txt"],
+      tests: [],
+      decisions: [],
+      assumptions: [],
+      blockers: [],
+      confidence: "high"
+    })
+  });
+  // Another task's integration moved the file outside this task's scope.
+  fs.mkdirSync(path.join(root, "lib"), { recursive: true });
+  git(root, ["mv", "src/a.txt", "lib/a.txt"]);
+  git(root, ["commit", "--quiet", "-m", "move"]);
+  run = loadRun(root, "run-rename");
+  run.repository.integrationHead = git(root, ["rev-parse", "HEAD"]).trim();
+  const task = run.tasks.build;
+  task.attempts.at(-1).worktree = worktree;
+  assert.equal(inspectTaskWorktree(task, task.attempts.at(-1)).ready, true);
+  assert.throws(() => integrateTaskWorktree(root, run, task, task.attempts.at(-1)), /conflict/i);
+  assert.equal(fs.readFileSync(path.join(root, "lib/a.txt"), "utf8"), "one\ntwo\nthree\n", "lib/a.txt untouched");
+  assert.deepEqual(changedFiles(root), [], "rolled back");
 });
 
 test("cleanup refuses a worker worktree with an uncommitted edit to a tracked .orchestrator file", () => {
@@ -502,8 +628,9 @@ test("a worker whose wrapper died without a final status is failed by poll, not 
   const root = repo();
   plan(root, "run-dead-wrapper");
   checkpointPlan(root, "run-dead-wrapper");
+  const pidFile = path.join(path.dirname(runFile(root, "run-dead-wrapper")), "descendant.pid");
   const launched = launchTaskWorker(root, "run-dead-wrapper", "build", { constraints: [] }, {
-    codexCommand: [process.execPath, slowFixture, "--delay=60000"]
+    codexCommand: [process.execPath, slowFixture, "--delay=60000", `--descendant=${pidFile}`, "--quiet-descendant"]
   });
   for (let index = 0; index < 100; index += 1) {
     await new Promise((resolve) => setTimeout(resolve, 40));
@@ -513,12 +640,11 @@ test("a worker whose wrapper died without a final status is failed by poll, not 
     }
   }
   const { childPid } = JSON.parse(fs.readFileSync(launched.runner.statusFile, "utf8"));
-  process.kill(launched.runner.pid, "SIGKILL");
-  try {
-    process.kill(-childPid, "SIGKILL");
-  } catch {
-    // Already gone.
+  while (!fs.existsSync(pidFile)) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
   }
+  const descendant = Number(fs.readFileSync(pidFile, "utf8"));
+  process.kill(launched.runner.pid, "SIGKILL");
   let update;
   for (let index = 0; index < 100; index += 1) {
     await new Promise((resolve) => setTimeout(resolve, 40));
@@ -528,32 +654,62 @@ test("a worker whose wrapper died without a final status is failed by poll, not 
     }
   }
   const task = loadRun(root, "run-dead-wrapper").tasks.build;
-  assert.equal(task.status, "failed");
-  assert.match(task.attempts[0].error, /exited without a final status/);
+  try {
+    assert.equal(task.status, "failed");
+    assert.match(task.attempts[0].error, /exited without a final status/);
+    // Its Codex and what Codex started do not keep running in the freed slot.
+    assert.ok(await exited(childPid), `Codex ${childPid} outlived its failed task`);
+    assert.ok(await exited(descendant), `descendant ${descendant} outlived its failed task`);
+  } finally {
+    for (const pid of [childPid, descendant]) {
+      try {
+        process.kill(pid, "SIGKILL");
+      } catch {
+        // Already gone.
+      }
+    }
+  }
 });
 
-test("a wrapper whose commit throws (an unsupported Git) fails the worker instead of dying", async () => {
+test("cancelling a worker whose wrapper is gone kills what Codex started", async () => {
   const root = repo();
-  plan(root, "run-old-git");
-  checkpointPlan(root, "run-old-git");
-  const shim = fs.mkdtempSync(path.join(os.tmpdir(), "orch-hook-"));
-  repos.push(shim);
-  const realGit = execFileSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).trim();
-  fs.writeFileSync(path.join(shim, "git"), `#!/bin/sh\nif [ "$1" = version ]; then echo "git version 2.41.0"; exit 0; fi\nexec ${realGit} "$@"\n`, { mode: 0o755 });
-  const savedPath = process.env.PATH;
-  process.env.PATH = `${shim}:${savedPath}`;
-  let launched;
-  try {
-    launched = launchTaskWorker(root, "run-old-git", "build", { constraints: [] }, {
-      codexCommand: [process.execPath, writeFixture, "--no-commit"]
-    });
-  } finally {
-    process.env.PATH = savedPath;
+  plan(root, "run-dead-cancel");
+  checkpointPlan(root, "run-dead-cancel");
+  const pidFile = path.join(path.dirname(runFile(root, "run-dead-cancel")), "descendant.pid");
+  const launched = launchTaskWorker(root, "run-dead-cancel", "build", { constraints: [] }, {
+    codexCommand: [process.execPath, slowFixture, "--delay=60000", `--descendant=${pidFile}`, "--quiet-descendant"]
+  });
+  while (!fs.existsSync(pidFile)) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
   }
-  const status = await runnerDone(launched.runner.statusFile);
-  assert.equal(status.status, "failed");
-  assert.match(status.error, /Git 2\.42 or later is required/);
+  const descendant = Number(fs.readFileSync(pidFile, "utf8"));
+  process.kill(launched.runner.pid, "SIGKILL");
+  assert.ok(await exited(launched.runner.pid), "wrapper gone");
+  try {
+    cancelWorkers(root, "run-dead-cancel", "build", "user stopped it");
+    // The descendant ignores SIGTERM, and no wrapper is left to escalate.
+    assert.ok(await exited(descendant), `descendant ${descendant} survived the cancellation`);
+  } finally {
+    try {
+      process.kill(descendant, "SIGKILL");
+    } catch {
+      // Already gone.
+    }
+  }
 });
+
+async function exited(pid, ms = 3000) {
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) {
+    try {
+      process.kill(pid, 0);
+    } catch {
+      return true;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 40));
+  }
+  return false;
+}
 
 test("a write worker paused for input keeps its changes uncommitted, and a failed commit fails the worker", async () => {
   const root = repo();

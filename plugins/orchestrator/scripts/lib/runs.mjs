@@ -787,11 +787,6 @@ export class StaleRunnerError extends Error {}
  */
 export class AttachRefusedError extends Error {}
 
-/**
- * Thrown by answerTask when the answer was saved but its event could not be
- * appended. The answer is on disk with no runner attached, so the caller must
- * revert it, which needs the attempt id this carries.
- */
 /** A claim reached disk but its event did not; the caller fails the attempt. */
 export class ClaimSavedError extends Error {
   constructor(message, { attemptId }) {
@@ -800,10 +795,16 @@ export class ClaimSavedError extends Error {
   }
 }
 
+/**
+ * Thrown by answerTask when the answer was saved but its event could not be
+ * appended. The answer is on disk with no runner attached, so the caller must
+ * revert it, which needs the attempt id and round this carries.
+ */
 export class AnswerSavedError extends Error {
-  constructor(message, { attemptId }) {
+  constructor(message, { attemptId, round }) {
     super(message);
     this.attemptId = attemptId;
+    this.round = round;
   }
 }
 
@@ -2420,7 +2421,7 @@ export function answerTask(
         replyPresent: Boolean(text)
       });
     } catch (error) {
-      throw new AnswerSavedError(error.message, { attemptId: attempt.id });
+      throw new AnswerSavedError(error.message, { attemptId: attempt.id, round: round.round });
     }
     return {
       runId: id,
@@ -2439,7 +2440,7 @@ export function answerTask(
 }
 
 /** Undo a recorded answer whose resume could not be launched, returning the task to `needs_input`. */
-export function revertTaskAnswer(cwd, runId, taskId, { attemptId, error, failedRunnerStatusFile = null }) {
+export function revertTaskAnswer(cwd, runId, taskId, { attemptId, round: answeredRound, error, failedRunnerStatusFile = null }) {
   const id = assertId(runId, "run");
   const filePath = runFile(cwd, id);
   return withFileLock(filePath, () => {
@@ -2451,7 +2452,11 @@ export function revertTaskAnswer(cwd, runId, taskId, { attemptId, error, failedR
     // (its event append failed, say); that runner was stopped, so it is reverted too.
     const attachedFailedRunner = attempt.status === "running" && failedRunnerStatusFile !== null &&
       attempt.runner?.statusFile === failedRunnerStatusFile;
-    if (!round?.answer || (attempt.status !== "dispatching" && !attachedFailedRunner)) {
+    // Only the round this answer was for: a revert delayed past the failed
+    // runner's next request (collected by another poll) must not undo the
+    // answer to that later round.
+    if (!round?.answer || round.round !== answeredRound ||
+        (attempt.status !== "dispatching" && !attachedFailedRunner)) {
       return task;
     }
     round.failedAnswers ??= [];

@@ -34,10 +34,7 @@ Fixes:
   leave their changes in the worktree and the wrapper commits them, outside the
   sandbox, when Codex finishes (not when it pauses for input). A failed commit
   fails the worker.
-- Git in a worker's worktree also reads attributes from the empty tree, so no
-  filter a worker attributed to a script it wrote runs (this needs Git 2.42; a
-  worker's LFS files are committed as content). Integration's cherry-pick runs
-  no hooks. Scope matching no longer treats a backslash in a path as a
+- Integration's cherry-pick runs no hooks. Scope matching no longer treats a backslash in a path as a
   separator, so `src\outside.txt` is not inside `src/**`. File names keep
   their exact bytes in inspection (a trailing space is part of the name), and
   a worktree recorded before its git directory was recorded resolves it from
@@ -52,7 +49,7 @@ Fixes:
   `.git/info/attributes` cannot run a script the worker wrote either.
 - `run poll` fails a worker whose wrapper died without a final status (a hard
   kill, an uncaught error) instead of reporting it running forever, and the
-  wrapper reports a commit that throws (Git older than 2.42) as a failure.
+  wrapper reports a commit that throws as a failure.
 - After a stop, the wrapper kills whatever is left of Codex's process group
   even when Codex itself exited first, and stopping a silently replaced
   resume uses the same group stop, so a process holding the pipes cannot
@@ -71,6 +68,24 @@ Fixes:
   group, killed 5 s after SIGTERM if still there), so a process it started no
   longer survives `run cancel`. A worker attached while a cancellation failed
   after saving is still stopped.
+- Every git command the supervisor runs in its own checkout (status checks,
+  `worktree add`, integration) runs with hooks and fsmonitor off, so a hook or
+  monitor script a worker changed in scope and that was integrated does not run
+  at the next status check or the next worker's launch. Integration's
+  cherry-pick runs without rename detection, so an edit to a file another task
+  moved out of scope conflicts instead of following the move.
+- Git in a worker's worktree no longer reads attributes from the empty tree
+  (configured filters are already overridden), so a `working-tree-encoding`
+  file is committed as the worker wrote it instead of being encoded twice at
+  integration; Git 2.42 is no longer required. The wrapper's commit check runs
+  no textconv or external diff.
+- When Codex exits, the wrapper kills whatever is left of its process group,
+  so a process it started that ignores SIGTERM does not outlive a finished
+  worker. The group is recorded as soon as Codex starts, a poll that finds the
+  wrapper dead kills it, and a cancel with the wrapper gone kills it outright;
+  a finished runner's old pids are never signalled.
+- A failed answer's rollback undoes only the round it answered, so a rollback
+  delayed past the worker's next request keeps the later round's answer.
 - Status writes are numbered, so a poll holding an older snapshot cannot save
   it over a newer one (a discarded thread over the answer's fresh fallback).
 - A launch whose briefing cannot be rendered leaves the task pending, and a

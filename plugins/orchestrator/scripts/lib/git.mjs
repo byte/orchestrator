@@ -2,8 +2,16 @@ import { execFileSync } from "node:child_process";
 
 import { isGitRepository, resolveWorkspaceRoot } from "./workspace.mjs";
 
+/**
+ * Prepended to every git command the supervisor runs in its own checkout.
+ * Integration brings worker-written files into that checkout, and a hook kept
+ * in the tree (`core.hooksPath=.husky`) or an fsmonitor script would run them
+ * outside any sandbox the next time git ran there.
+ */
+export const SUPERVISOR_GIT_ARGS = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"];
+
 function git(cwd, args, gitDir = null) {
-  return execFileSync("git", args, {
+  return execFileSync("git", gitDir ? args : [...SUPERVISOR_GIT_ARGS, ...args], {
     cwd,
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
@@ -19,7 +27,6 @@ function git(cwd, args, gitDir = null) {
  * next time the supervisor ran git there. With the git directory recorded at
  * creation, the pointer file is never read.
  */
-const emptyTrees = new Map();
 const filterDrivers = new Map();
 
 /**
@@ -53,31 +60,16 @@ function definedFilterDrivers(gitDir) {
   return filterDrivers.get(gitDir);
 }
 
-/** The empty tree of the repository's hash format, so attributes can be read from it. */
-function emptyTree(gitDir) {
-  if (!emptyTrees.has(gitDir)) {
-    const version = execFileSync("git", ["version"], { encoding: "utf8" }).match(/(\d+)\.(\d+)/);
-    if (!version || Number(version[1]) < 2 || (Number(version[1]) === 2 && Number(version[2]) < 42)) {
-      throw new Error("Git 2.42 or later is required to run git safely in a worker's worktree (GIT_ATTR_SOURCE).");
-    }
-    emptyTrees.set(gitDir, execFileSync("git", ["hash-object", "-t", "tree", "/dev/null"], {
-      encoding: "utf8",
-      env: { ...process.env, GIT_DIR: gitDir }
-    }).trim());
-  }
-  return emptyTrees.get(gitDir);
-}
-
 export function worktreeGitEnv(worktreePath, gitDir) {
   // A worker can also plant a nested repository with its own config: git would
   // run `git status` inside it for a committed gitlink, and that config's
   // fsmonitor with it. So nothing recurses into submodules, and no fsmonitor or
   // hook runs. Passed as GIT_CONFIG_* so every git command gets them.
-  // Attributes come from the empty tree, not from the worktree's .gitattributes,
-  // so no clean, smudge or process filter a worker attributed (to a script it
-  // can edit) runs either; a global attributes file is ignored too.
+  // Attributes still apply, as they will when the commit is integrated (so a
+  // `working-tree-encoding` file is staged the same way), but every configured
+  // filter driver is overridden, so a filter a worker attributes to a file runs
+  // nothing it wrote.
   const config = [
-    ["core.attributesFile", "/dev/null"],
     ["core.fsmonitor", "false"],
     ["core.hooksPath", "/dev/null"],
     ["diff.ignoreSubmodules", "all"],
@@ -95,7 +87,6 @@ export function worktreeGitEnv(worktreePath, gitDir) {
     ...process.env,
     GIT_DIR: gitDir,
     GIT_WORK_TREE: worktreePath,
-    GIT_ATTR_SOURCE: emptyTree(gitDir),
     GIT_CONFIG_COUNT: String(config.length)
   };
   config.forEach(([key, value], index) => {

@@ -373,16 +373,19 @@ real resume reports the same thread id it was given.
    repository's `worktrees/*/gitdir` records, never from the worktree's `.git` pointer file, which a
    worker could re-aim at a repository config it wrote), with hooks, fsmonitor, signing and
    submodule recursion off: a worker could otherwise plant a hook, or a nested repository whose
-   config git would run during `git status`. Attributes are read from the empty tree
-   (`GIT_ATTR_SOURCE`, Git 2.42 or later; older Git is refused), and every filter driver defined in
-   git config is overridden (`cat` for clean, smudge and process, not required), since
-   `.git/info/attributes` can still select one; so no clean, smudge or process filter runs either: a repository whose config runs an in-tree script as a filter would
-   otherwise run whatever the worker wrote there. The cost is that a worker's changes are committed
-   without filters, so a Git LFS file is committed as content, not as a pointer. Integration's
-   cherry-pick into the supervisor checkout runs with hooks and fsmonitor off, so a hook the worker
-   changed in scope (`core.hooksPath=.husky`) does not run while it is being applied; checkout
-   filters still run there, so integrating a change to a script the repository's own filter
-   config runs is a decision the supervisor makes by integrating.
+   config git would run during `git status`. Every filter driver defined in git config is
+   overridden there (`cat` for clean, smudge and process, not required), so no filter runs a script
+   the worker wrote, whichever attributes select it. The worktree's attributes otherwise apply, as
+   they will at integration, so a `working-tree-encoding` file is staged the same way. The cost is
+   that a worker's changes are committed without filters, so a Git LFS file is committed as content,
+   not as a pointer. Every git command the supervisor runs in its own checkout (status checks,
+   `worktree add`, integration's cherry-pick and its `--abort`) runs with hooks and fsmonitor off,
+   so a hook or monitor script a worker changed in scope (`core.hooksPath=.husky`) never runs from
+   the orchestrator. Cherry-pick runs without rename detection: a change to a file another task
+   moved conflicts instead of following the move to a path outside this task's inspected scope.
+   Checkout filters still run in the supervisor checkout and in a new worktree, so integrating a
+   change to a script the repository's own filter config runs is a decision the supervisor makes by
+   integrating.
 
    Scope matching treats a backslash in a path as part of the filename, as git does on macOS and
    Linux: `src\outside.txt` is a root-level file, not inside `src/`. Patterns may still use `\`.

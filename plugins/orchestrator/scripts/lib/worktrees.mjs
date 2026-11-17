@@ -3,13 +3,13 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { parseFileList } from "./briefing.mjs";
-import { changedFiles, currentBranch, headSha, worktreeGitEnv } from "./git.mjs";
+import { SUPERVISOR_GIT_ARGS, changedFiles, currentBranch, headSha, worktreeGitEnv } from "./git.mjs";
 import { partitionByScope } from "./glob.mjs";
 import { effectiveTaskScope } from "./runs.mjs";
 import { localDir } from "./state.mjs";
 
 function gitRaw(cwd, args, gitDir = null) {
-  return execFileSync("git", args, {
+  return execFileSync("git", gitDir ? args : [...SUPERVISOR_GIT_ARGS, ...args], {
     cwd,
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
@@ -328,12 +328,13 @@ export function integrateTaskWorktree(cwd, run, task, attempt) {
     );
   }
   try {
-    // No hook runs while worker commits are applied: a worker can change a hook
-    // a repository keeps in its tree (`core.hooksPath=.husky`) in scope.
-    git(cwd, ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "cherry-pick", ...inspection.commits]);
+    // No hook or fsmonitor runs (SUPERVISOR_GIT_ARGS). Rename detection is off:
+    // with it, a change to a file another task moved would follow the move and
+    // land on a path outside this task's inspected scope. It conflicts instead.
+    git(cwd, ["cherry-pick", "--strategy-option=no-renames", ...inspection.commits]);
   } catch (error) {
     try {
-      git(cwd, ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "cherry-pick", "--abort"]);
+      git(cwd, ["cherry-pick", "--abort"]);
     } catch {
       // Preserve the original cherry-pick error; the caller reports manual recovery.
     }

@@ -36,8 +36,11 @@ let sandboxFallback = null;
 // save it over a newer one another poll already synchronized.
 let statusSeq = 0;
 
+let currentStatus = "starting";
+
 function writeStatus(fields) {
   statusSeq += 1;
+  currentStatus = fields.status ?? currentStatus;
   atomicWrite(spec.statusFile, {
     seq: statusSeq,
     pid: process.pid,
@@ -252,7 +255,9 @@ function commitWorkerChanges() {
   if (add.status !== 0) {
     return `git add failed: ${(add.stderr || add.error?.message || "").trim()}`;
   }
-  if (git(["diff", "--cached", "--quiet"]).status === 0) {
+  // No textconv or external diff: the worker's .gitattributes apply, and could
+  // select a configured diff program to run on files it wrote.
+  if (git(["diff", "--cached", "--quiet", "--no-textconv", "--no-ext-diff"]).status === 0) {
     return null;
   }
   const commit = git(["commit", "--no-verify", "--quiet", "-m", spec.commitMessage || "Orchestrator worker changes"]);
@@ -340,16 +345,15 @@ function runCodex(resumeThreadId, input = prompt) {
     });
     const timers = [];
     let settled = false;
-    let stopRequested = false;
     const resolve = (value) => {
       if (!settled) {
         settled = true;
         timers.forEach(clearTimeout);
-        // Codex exiting does not end what it started: after a stop, kill
-        // whatever is left of its group before the escalation timers go.
-        if (stopRequested) {
-          killGroup("SIGKILL");
-        }
+        // Codex exiting does not end what it started (a command that ignores
+        // SIGTERM and does not hold the pipes, say): kill whatever is left of
+        // its group, however Codex ended. Once the wrapper exits, nothing else
+        // would escalate a stop.
+        killGroup("SIGKILL");
         resolveRun(value);
       }
     };
@@ -369,7 +373,6 @@ function runCodex(resumeThreadId, input = prompt) {
     // even SIGKILL (it left the group) cannot keep the wrapper running.
     current = {
       kill: (signal) => {
-        stopRequested = true;
         killGroup(signal);
         timers.push(setTimeout(() => {
           killGroup("SIGKILL");
@@ -382,6 +385,11 @@ function runCodex(resumeThreadId, input = prompt) {
       }
     };
     childPid = child.pid ?? childPid;
+    // Recorded at once: if the wrapper is killed before Codex reports its
+    // thread, a poll or cancel still knows which group to stop.
+    if (child.pid) {
+      writeStatus({ status: currentStatus });
+    }
     let sawThread = false;
     let replacedWithoutBriefing = false;
     let stderrText = "";

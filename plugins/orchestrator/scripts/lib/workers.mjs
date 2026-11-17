@@ -623,6 +623,9 @@ export function pollRunWorkers(cwd, runId, { now = Date.now() } = {}) {
         status = readJson(statusFile);
         if (["starting", "running"].includes(status.status)) {
           status = { ...status, status: "failed", error: "The worker wrapper exited without a final status." };
+          // Codex runs in its own group and outlives the wrapper; nothing else
+          // would stop it once the task is failed and its slot is free.
+          stopGroup(status.childPid, "SIGKILL");
         }
       }
       const hadFallback = fallbackRecorded(attempt);
@@ -796,7 +799,7 @@ export function answerTaskWorker(
     // The answer reached disk but its event did not: undo it, or the task would
     // sit dispatching with no runner and refuse every later answer.
     if (error instanceof AnswerSavedError) {
-      revertTaskAnswer(cwd, runId, taskId, { attemptId: error.attemptId, error: error.message });
+      revertTaskAnswer(cwd, runId, taskId, { attemptId: error.attemptId, round: error.round, error: error.message });
     }
     throw error;
   }
@@ -840,6 +843,7 @@ export function answerTaskWorker(
     try {
       revertTaskAnswer(cwd, runId, taskId, {
         attemptId: answered.attemptId,
+        round: answered.round.round,
         error: error.message,
         failedRunnerStatusFile: runner?.statusFile ?? null
       });
@@ -856,12 +860,12 @@ export function answerTaskWorker(
   }
 }
 
-function stopGroup(pid) {
+function stopGroup(pid, signal = "SIGTERM") {
   if (!Number.isInteger(pid) || pid <= 0) {
     return;
   }
   try {
-    process.kill(-pid, "SIGTERM");
+    process.kill(-pid, signal);
   } catch {
     stopPid(pid);
   }
@@ -930,9 +934,15 @@ export function stopTaskWorker(attempt) {
   }
   // The wrapper starts Codex in its own process group: signal the group, so
   // processes Codex started stop too; a runner from before that falls back to
-  // its pid.
-  stopGroup(status?.childPid);
-  stopPid(runner.pid);
+  // its pid. A live wrapper escalates to SIGKILL itself; with the wrapper gone,
+  // nothing would, so the group is killed outright.
+  // A finished runner is not signalled: its wrapper already killed the group,
+  // and its pids may since belong to unrelated processes.
+  if (!TERMINAL_RUNNER_STATUSES.has(status?.status)) {
+    const wrapperAlive = Number.isInteger(runner.pid) && processAlive(runner.pid);
+    stopGroup(status?.childPid, wrapperAlive ? "SIGTERM" : "SIGKILL");
+    stopPid(runner.pid);
+  }
   atomicWrite(
     runner.statusFile,
     `${JSON.stringify({
