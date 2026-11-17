@@ -171,6 +171,35 @@ test("credential assignments are consumed before nested rules destroy their boun
   assert.equal(redactText("password:\nordinary: keep").text, "password:\nordinary: keep");
 });
 
+test("assignment values that contain whitespace by design are consumed whole", () => {
+  const pem = "-----BEGIN RSA PRIVATE KEY-----\nMIIEsensitiveBody\n-----END RSA PRIVATE KEY-----";
+  for (const [input, expected, type] of [
+    [`secret: ${pem}\nnext: keep`, "secret=<redacted:private_key>\nnext: keep", "private_key"],
+    [`secret:\n${pem}`, "secret=<redacted:private_key>", "private_key"],
+    // No END line: everything after the header may be key material.
+    ["secret: -----BEGIN PRIVATE KEY-----\nMIIEsensitiveBody", "secret=<redacted:private_key>", "private_key"],
+    ["access_token: Bearer abcdefghijklmnop rest", "access_token=<redacted:authorization> rest", "authorization"],
+    ["auth_token=Basic dXNlcjpwYXNzd29yZA==", "auth_token=<redacted:authorization>", "authorization"]
+  ]) {
+    const result = redactText(input);
+    assert.equal(result.text, expected);
+    assert.deepEqual(result.findings, { [type]: 1 });
+    assert.doesNotMatch(result.text, /sensitive|abcdefghijklmnop|dXNlcjpw/i);
+  }
+});
+
+test("a quote inside a sensitive query value does not expose the rest of it", () => {
+  assert.equal(
+    redactText("https://example.com/?password=pa'ss\"wo`rd&view=public").text,
+    "https://example.com/?password=<redacted:sensitive_query>&view=public"
+  );
+  // A quote that closes the surrounding string still ends the value.
+  assert.equal(
+    redactText('{"url": "https://example.com/?token=abcdefgh", "keep": 1}').text,
+    '{"url": "https://example.com/?token=<redacted:sensitive_query>", "keep": 1}'
+  );
+});
+
 test("YAML credential block scalars consume their indented body but not sibling text", () => {
   for (const indicator of ["|", ">", "|-", ">+", "|2-", ">-2"]) {
     for (const [prefix, bodyIndent] of [["", "  "], ["  ", "    "], ["- ", "    "]]) {

@@ -8,16 +8,19 @@ function redactAssignments(text) {
   // Supported YAML blocks: direct mapping/sequence keys, |/>, indentation and
   // chomping indicators, comments, and space-indented bodies (not general YAML).
   const block = /^(?<indent> *)(?<sequence>- +)?(?<blockQuote>["']?)(?<blockKey>api[_-]?key|access[_-]?token|auth[_-]?token|password|passwd|secret|aws_secret_access_key)\k<blockQuote>[ \t]*:[ \t]*[|>](?:[1-9][+-]?|[+-][1-9]?)?[ \t]*(?:#[^\r\n]*)?(?<eol>\r?\n|$)/;
-  // Unquoted values are whitespace-delimited or bounded by quotes/backticks.
+  // Unquoted values are whitespace-delimited or bounded by quotes/backticks,
+  // except two values that contain whitespace by design and must be consumed
+  // whole: a PEM private key (to its END line, or to the end of the text when
+  // it has none) and an HTTP auth scheme with its token.
   // URL query assignments retain their own &/# boundaries in RULES instead.
-  const assignment = /(?<![\w?&])(?<key>api[_-]?key|access[_-]?token|auth[_-]?token|password|passwd|secret|aws_secret_access_key)(?<keyQuote>["']?)\s*[:=](?:\s*(?:"(?:\\[\s\S]|[^"\\])*"|'(?:''|\\[\s\S]|[^'\\])*')|[ \t]*[^\s"'`]+)/;
+  const assignment = /(?<![\w?&])(?<key>api[_-]?key|access[_-]?token|auth[_-]?token|password|passwd|secret|aws_secret_access_key)(?<keyQuote>["']?)\s*[:=](?:\s*(?:"(?:\\[\s\S]|[^"\\])*"|'(?:''|\\[\s\S]|[^'\\])*')|\s*(?<pem>-----BEGIN(?: [A-Z0-9]+)? PRIVATE KEY-----(?:[\s\S]*?-----END(?: [A-Z0-9]+)? PRIVATE KEY-----|[\s\S]*))|[ \t]*(?<scheme>(?:Bearer|Basic)[ \t]+[^\s"'`]+)|[ \t]*[^\s"'`]+)/;
   const pattern = new RegExp(`${block.source}|${assignment.source}`, "gim");
   const output = [];
   const findings = {};
   let offset = 0;
   let match;
   while ((match = pattern.exec(text))) {
-    const { indent, sequence = "", blockKey, eol, key, keyQuote } = match.groups;
+    const { indent, sequence = "", blockKey, eol, key, keyQuote, pem, scheme } = match.groups;
     let type = "credential";
     let replacement;
     if (blockKey) {
@@ -37,8 +40,12 @@ function redactAssignments(text) {
       pattern.lastIndex = end;
       replacement = `${indent}${sequence}${blockKey}=<redacted:credential>${eol}`;
     } else {
-      // Preserve the existing AWS category for unquoted AWS key names.
-      if (key.toLowerCase() === "aws_secret_access_key" && !keyQuote) {
+      // Keep the specific categories the token rules would have reported.
+      if (pem) {
+        type = "private_key";
+      } else if (scheme) {
+        type = "authorization";
+      } else if (key.toLowerCase() === "aws_secret_access_key" && !keyQuote) {
         type = "aws_secret_key";
       }
       replacement = `${key}=<redacted:${type}>`;
@@ -111,7 +118,10 @@ const RULES = Object.freeze([
     type: "sensitive_query",
     // Apostrophes are valid URL data. Generated credential markers are data too:
     // stopping at one would expose the remaining suffix of the query value.
-    pattern: /([?&](?:token|api[_-]?key|access[_-]?token|auth[_-]?token|secret|password|passwd|aws_secret_access_key)=)[^&#\s"`]+/gi,
+    // A quote or backtick ends the value only where it plausibly closes the
+    // surrounding string (before whitespace, punctuation, or the end): one
+    // inside the value must not expose the rest of it.
+    pattern: /([?&](?:token|api[_-]?key|access[_-]?token|auth[_-]?token|secret|password|passwd|aws_secret_access_key)=)(?:[^&#\s"`]|["`](?![\s,;)}\]>]|$))+/gi,
     replacement: (match, prefix) => `${prefix}<redacted:sensitive_query>`
   },
   {
