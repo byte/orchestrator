@@ -12,18 +12,18 @@ import { localDir } from "./state.mjs";
 // is the same directory.
 const RESERVED = /^\.orchestrator\/local(\/|$)/i;
 
-function gitRaw(cwd, args, gitDir = null) {
+function gitRaw(cwd, args, gitDir = null, env = process.env) {
   return execFileSync("git", gitDir ? args : [...SUPERVISOR_GIT_ARGS, ...args], {
     cwd,
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
     maxBuffer: 32 * 1024 * 1024,
-    ...(gitDir ? { env: worktreeGitEnv(cwd, gitDir) } : {})
+    env: gitDir ? worktreeGitEnv(cwd, gitDir) : env
   });
 }
 
-function git(cwd, args, gitDir = null) {
-  return gitRaw(cwd, args, gitDir).trim();
+function git(cwd, args, gitDir = null, env = process.env) {
+  return gitRaw(cwd, args, gitDir, env).trim();
 }
 
 /**
@@ -329,7 +329,7 @@ function untrackedInTheWay(cwd, files) {
   return blocked.sort();
 }
 
-export function integrateTaskWorktree(cwd, run, task, attempt) {
+export function integrateTaskWorktree(cwd, run, task, attempt, { operationId, beforeApply = () => {} } = {}) {
   const inspection = inspectTaskWorktree(task, attempt, { cwd });
   if (!inspection.ready) {
     const scopeViolation = inspection.outOfScope.length > 0;
@@ -378,6 +378,9 @@ export function integrateTaskWorktree(cwd, run, task, attempt) {
       { reasonCode: "branch_drift", signals: ["branch_drift"] }
     );
   }
+  // Persist the inspected intent before Git can move the supervisor branch.
+  // The caller holds the checkout and run locks through acceptance.
+  beforeApply(inspection);
   try {
     // No hook or fsmonitor runs (SUPERVISOR_GIT_ARGS). Rename detection is off:
     // with it, a change to a file another task moved would follow the move and
@@ -386,7 +389,8 @@ export function integrateTaskWorktree(cwd, run, task, attempt) {
     // merge conflicts instead of running a driver script the worker may have
     // changed in an earlier commit.
     const noDrivers = configuredDrivers("merge", { cwd }).flatMap((name) => ["-c", `merge.${name}.driver=false`]);
-    git(cwd, [...noDrivers, "cherry-pick", "--strategy-option=no-renames", ...inspection.commits]);
+    git(cwd, ["-c", "core.logAllRefUpdates=true", ...noDrivers, "cherry-pick", "--strategy-option=no-renames", ...inspection.commits], null,
+      operationId ? { ...process.env, GIT_REFLOG_ACTION: `orchestrator-integrate-${operationId}` } : process.env);
   } catch (error) {
     try {
       git(cwd, ["cherry-pick", "--abort"]);
@@ -407,6 +411,40 @@ export function integrateTaskWorktree(cwd, run, task, attempt) {
     commits: inspection.commits,
     integrationHead: headSha(cwd)
   };
+}
+
+/**
+ * Reconcile only a complete integration made by this exact saved operation.
+ * Equal patches or commit subjects are not receipts. A partial cherry-pick,
+ * manual edits, missing reflog, or foreign commit needs manual recovery.
+ */
+export function recoverTaskIntegration(cwd, run, pending) {
+  const refuse = () => {
+    throw new Error(`Integration of task "${pending.taskId}" is interrupted; preserve the checkout and inspect Git state before manual recovery.`);
+  };
+  if (currentBranch(cwd) !== run.repository.branch || changedFiles(cwd).length) {
+    refuse();
+  }
+  for (const entry of ["sequencer", "CHERRY_PICK_HEAD", "MERGE_HEAD", "rebase-merge", "rebase-apply"]) {
+    if (fs.existsSync(path.resolve(cwd, git(cwd, ["rev-parse", "--git-path", entry])))) {
+      refuse();
+    }
+  }
+  const head = headSha(cwd);
+  if (head === pending.priorHead) {
+    return null;
+  }
+  const chain = git(cwd, ["rev-list", "--reverse", "--parents", `${pending.priorHead}..${head}`])
+    .split("\n").filter(Boolean).map((line) => line.split(" "));
+  const receipts = new Set(gitRaw(cwd, ["reflog", "show", "--format=%H%x09%gs",
+    run.repository.branch === "HEAD" ? "HEAD" : `refs/heads/${run.repository.branch}`])
+    .split("\n").filter((line) => line.includes(`\torchestrator-integrate-${pending.id}: `))
+    .map((line) => line.split("\t")[0]));
+  if (chain.length !== pending.inspection.commits.length || chain.some(([commit, ...parents], index) =>
+    parents.length !== 1 || parents[0] !== (index === 0 ? pending.priorHead : chain[index - 1][0]) || !receipts.has(commit))) {
+    refuse();
+  }
+  return { inspection: pending.inspection, commits: pending.inspection.commits, integrationHead: head };
 }
 
 /**

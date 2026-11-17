@@ -157,6 +157,7 @@ const LOCK_SLEEP = new Int32Array(new SharedArrayBuffer(4));
 
 export function withFileLock(filePath, operation) {
   const lockPath = `${filePath}.lock`;
+  const reclaimPath = `${lockPath}.reclaim`;
   const deadline = Date.now() + LOCK_TIMEOUT_MS;
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
 
@@ -170,26 +171,56 @@ export function withFileLock(filePath, operation) {
       }
 
       try {
-        const age = Date.now() - fs.statSync(lockPath).mtimeMs;
-        if (age > STALE_LOCK_MS) {
-          fs.unlinkSync(lockPath);
-          continue;
+        // Serialize stale-owner checks and removal. Without this guard, two
+        // reclaimers could remove the new owner's lock after removing the old
+        // one. A crash inside this tiny section leaves the guard for manual
+        // inspection rather than risking concurrent owners.
+        fs.mkdirSync(reclaimPath, { mode: 0o700 });
+        let existing;
+        try {
+          existing = fs.openSync(lockPath, "r");
+          const stat = fs.fstatSync(existing);
+          const owner = Number(fs.readFileSync(existing, "utf8"));
+          let abandoned = false;
+          if (Number.isSafeInteger(owner) && owner > 0) {
+            try {
+              process.kill(owner, 0);
+            } catch (ownerError) {
+              abandoned = ownerError.code === "ESRCH";
+            }
+          } else {
+            // Older builds wrote empty locks. A newly created lock is also empty
+            // until its owner is saved, so never reclaim that creation window.
+            abandoned = Date.now() - stat.mtimeMs > STALE_LOCK_MS;
+          }
+          if (abandoned && fs.statSync(lockPath).ino === stat.ino) {
+            fs.unlinkSync(lockPath);
+            continue;
+          }
+        } finally {
+          if (existing !== undefined) {
+            fs.closeSync(existing);
+          }
+          fs.rmdirSync(reclaimPath);
         }
       } catch (statError) {
         if (statError.code === "ENOENT") {
           continue;
         }
-        throw statError;
+        if (statError.code !== "EEXIST") {
+          throw statError;
+        }
       }
 
       if (Date.now() >= deadline) {
-        throw new Error(`Timed out waiting for state lock ${lockPath}.`);
+        throw new Error(`Timed out waiting for state lock ${lockPath}${fs.existsSync(reclaimPath) ? ` (inspect its recovery guard ${reclaimPath})` : ""}.`);
       }
       Atomics.wait(LOCK_SLEEP, 0, 0, LOCK_WAIT_MS);
       continue;
     }
 
     try {
+      fs.writeFileSync(descriptor, String(process.pid));
       return operation();
     } finally {
       fs.closeSync(descriptor);

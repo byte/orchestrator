@@ -29,6 +29,7 @@ import {
   configureRunGuidance,
   createRun,
   finalizeRun,
+  integrateRunTask,
   listRuns,
   loadRun,
   takeWorktreesForRemoval,
@@ -38,8 +39,8 @@ import {
   summarizeInputRequest,
   recordIntegrationDiagnostic,
   recordTaskResult,
-  recordIntegration,
   recordTaskDisposition,
+  recoverRunIntegration,
   modelSubstitutionSummary,
   recoveryReport,
   renderSupervisorBriefing,
@@ -69,10 +70,9 @@ import {
   detachTaskWorktree,
   finishWorktreeRemoval,
   inspectTaskWorktree,
-  integrateTaskWorktree,
   WorktreeOperationError
 } from "./lib/worktrees.mjs";
-import { initWorkspace, isInitialized, localDir, orchDir, withFileLock } from "./lib/state.mjs";
+import { initWorkspace, isInitialized, orchDir } from "./lib/state.mjs";
 import { resolveWorkspaceRoot } from "./lib/workspace.mjs";
 
 const USAGE = `orchestrator — a Claude-supervised Codex worker pool
@@ -680,6 +680,7 @@ function commandRun(argv, cwd) {
   }
 
   if (action === "resume") {
+    const integrationRecovery = recoverRunIntegration(cwd, runId);
     const updates = pollRunWorkers(cwd, runId);
     const run = loadRun(cwd, runId);
     const recovery = recoveryReport(run);
@@ -692,6 +693,7 @@ function commandRun(argv, cwd) {
     return options.json
       ? emitJson({
           updates,
+          integrationRecovery,
           recovery,
           substitutions,
           routes: routes.text ? routes.evidence : null,
@@ -875,10 +877,7 @@ function commandRun(argv, cwd) {
   }
 
   if (action === "integrate") {
-    // One integration at a time per checkout: its head check, cherry-pick and
-    // recorded head must not interleave with another's, or a stale head is
-    // recorded and every later launch refuses branch drift.
-    return withFileLock(path.join(localDir(cwd), "integration"), () => integrateCommand(cwd, runId, positionals, options));
+    return integrateCommand(cwd, runId, positionals, options);
   }
 
   if (action === "finalize") {
@@ -918,20 +917,12 @@ function commandRun(argv, cwd) {
 }
 
 function integrateCommand(cwd, runId, positionals, options) {
-  const run = loadRun(cwd, runId);
   const taskId = positionals[1];
-  const task = run.tasks[taskId];
-  if (!task) {
-    throw new Error(`Unknown task "${taskId}" in run "${runId}".`);
-  }
-  if (task.status !== "reported") {
-    throw new Error(`Task "${task.id}" cannot be integrated from status "${task.status}".`);
-  }
-  let integrated;
+  let result;
   try {
-    integrated = integrateTaskWorktree(cwd, run, task, task.attempts.at(-1));
+    result = integrateRunTask(cwd, runId, taskId, { evidence: splitList(options.evidence) });
   } catch (error) {
-    if (error instanceof WorktreeOperationError) {
+    if (error instanceof WorktreeOperationError && !loadRun(cwd, runId).pendingIntegration) {
       recordIntegrationDiagnostic(cwd, runId, taskId, {
         kind: error.kind,
         reasonCode: error.reasonCode,
@@ -942,10 +933,6 @@ function integrateCommand(cwd, runId, positionals, options) {
     }
     throw error;
   }
-  const result = recordIntegration(cwd, runId, taskId, {
-    evidence: splitList(options.evidence),
-    ...integrated
-  });
   return options.json ? emitJson(result) : emit(`Integrated ${taskId}; run: ${result.runStatus}.`);
 }
 

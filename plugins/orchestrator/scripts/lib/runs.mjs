@@ -25,6 +25,7 @@ import {
   nowIso,
   withFileLock
 } from "./state.mjs";
+import { integrateTaskWorktree, recoverTaskIntegration } from "./worktrees.mjs";
 
 export const DEFAULT_WORKER_MODEL = null;
 export const DEFAULT_REASONING_EFFORT = null;
@@ -1301,7 +1302,14 @@ export function answeredInputRounds(task) {
   return inputRounds(task).filter((round) => round.answer).length;
 }
 
+function assertNoPendingIntegration(run) {
+  if (run.pendingIntegration) {
+    throw new Error(`Run "${run.id}" has an interrupted integration; use \`orch run resume ${run.id}\` before changing its tasks.`);
+  }
+}
+
 function requireTask(run, taskId) {
+  assertNoPendingIntegration(run);
   const id = assertId(taskId, "task");
   const task = run.tasks[id];
   if (!task) {
@@ -2862,54 +2870,113 @@ export function recordIntegration(
   cwd,
   runId,
   taskId,
-  { evidence = [], inspection, commits, integrationHead }
+  integration
 ) {
   const id = assertId(runId, "run");
   const filePath = runFile(cwd, id);
   return withFileLock(filePath, () => {
     const run = loadRun(cwd, id);
     const task = requireTask(run, taskId);
-    if (task.status !== "reported") {
-      throw new Error(`Task "${task.id}" cannot be integrated from status "${task.status}".`);
-    }
-    task.verification = {
-      verdict: "pass",
-      evidence: stringList(evidence, "integration evidence"),
-      at: nowIso()
-    };
-    task.integration = {
-      inspection,
-      commits,
-      integrationHead,
-      integratedAt: nowIso()
-    };
-    task.status = "completed";
-    task.updatedAt = nowIso();
-    const attempt = currentAttempt(task);
-    attempt.status = "completed";
-    attempt.finishedAt ??= nowIso();
-    const outcome = assignAttemptOutcome(
-      attempt,
-      outcomeInput("accepted", "execute", "integration_succeeded", {
-        provenance: "supervisor",
-        evidence: task.verification.evidence,
-        metadata: { integrationHead }
-      })
-    );
-    run.repository.integrationHead = integrationHead;
-    refreshRunStatus(run);
-    writeRun(cwd, run);
-    appendEvent(cwd, id, {
-      type: "task.integrated",
-      taskId: task.id,
-      attemptId: attempt.id,
-      commits,
-      integrationHead,
-      evidence: task.verification.evidence,
-      outcome
-    });
-    return { task, ready: readyTasks(run), runStatus: run.status };
+    return finishIntegration(cwd, run, task, integration);
   });
+}
+
+function finishIntegration(cwd, run, task, { evidence = [], inspection, commits, integrationHead }) {
+  if (task.status !== "reported") {
+    throw new Error(`Task "${task.id}" cannot be integrated from status "${task.status}".`);
+  }
+  task.verification = { verdict: "pass", evidence: stringList(evidence, "integration evidence"), at: nowIso() };
+  task.integration = { inspection, commits, integrationHead, integratedAt: nowIso() };
+  task.status = "completed";
+  task.updatedAt = nowIso();
+  const attempt = currentAttempt(task);
+  attempt.status = "completed";
+  attempt.finishedAt ??= nowIso();
+  const outcome = assignAttemptOutcome(attempt,
+    outcomeInput("accepted", "execute", "integration_succeeded", {
+      provenance: "supervisor",
+      evidence: task.verification.evidence,
+      metadata: { integrationHead }
+    }));
+  run.repository.integrationHead = integrationHead;
+  delete run.pendingIntegration;
+  refreshRunStatus(run);
+  writeRun(cwd, run);
+  appendEvent(cwd, run.id, {
+    type: "task.integrated", taskId: task.id, attemptId: attempt.id,
+    commits, integrationHead, evidence: task.verification.evidence, outcome
+  });
+  return { task, ready: readyTasks(run), runStatus: run.status };
+}
+
+function recoverIntegration(cwd, run) {
+  const pending = run.pendingIntegration;
+  if (!pending) {
+    return null;
+  }
+  const task = run.tasks[pending.taskId];
+  if (task?.status !== "reported" || task.attempts.at(-1)?.id !== pending.attemptId) {
+    throw new Error(`Run "${run.id}" has inconsistent pending integration state; inspect it before manual recovery.`);
+  }
+  const integrated = recoverTaskIntegration(cwd, run, pending);
+  if (integrated) {
+    return finishIntegration(cwd, run, task, { ...integrated, evidence: pending.evidence });
+  }
+  // Interrupted before Git started, or safely aborted back to the original head.
+  delete run.pendingIntegration;
+  writeRun(cwd, run);
+  return null;
+}
+
+export function recoverRunIntegration(cwd, runId) {
+  return withFileLock(path.join(localDir(cwd), "integration"), () =>
+    withFileLock(runFile(cwd, runId), () => recoverIntegration(cwd, loadRun(cwd, runId))));
+}
+
+/** The checkout lock serializes runs; the run lock protects acceptance from cancellation. */
+export function integrateRunTask(cwd, runId, taskId, { evidence = [] } = {}) {
+  const checks = stringList(evidence, "integration evidence");
+  return withFileLock(path.join(localDir(cwd), "integration"), () =>
+    withFileLock(runFile(cwd, runId), () => {
+      const run = loadRun(cwd, runId);
+      const recovered = recoverIntegration(cwd, run);
+      if (recovered?.task.id === taskId) {
+        return recovered;
+      }
+      const task = requireTask(run, taskId);
+      if (task.status !== "reported") {
+        throw new Error(`Task "${task.id}" cannot be integrated from status "${task.status}".`);
+      }
+      const operationId = randomUUID();
+      let integrated;
+      try {
+        integrated = integrateTaskWorktree(cwd, run, task, currentAttempt(task), {
+          operationId,
+          beforeApply(inspection) {
+            run.pendingIntegration = {
+              id: operationId, taskId: task.id, attemptId: currentAttempt(task).id,
+              priorHead: run.repository.integrationHead, inspection, evidence: checks
+            };
+            writeRun(cwd, run);
+          }
+        });
+      } catch (error) {
+        // A normal conflict rolls back. Clear intent only if Git proves that no
+        // integration remains; otherwise retain it and require recovery first.
+        if (run.pendingIntegration) {
+          try {
+            if (!recoverTaskIntegration(cwd, run, run.pendingIntegration)) {
+              delete run.pendingIntegration;
+              writeRun(cwd, run);
+            }
+          } catch {
+            // Preserve the original failure and the durable recovery intent.
+          }
+        }
+        throw error;
+      }
+      return finishIntegration(cwd, run, task, { ...integrated, evidence: checks });
+    }));
 }
 
 export function verifyTask(cwd, runId, taskId, { verdict, evidence = [] }) {
@@ -3374,6 +3441,7 @@ export function cancelRun(cwd, runId, reason = "") {
   const filePath = runFile(cwd, id);
   return withFileLock(filePath, () => {
     const run = loadRun(cwd, id);
+    assertNoPendingIntegration(run);
     const outcomes = [];
     for (const task of Object.values(run.tasks)) {
       if (task.status !== "completed") {

@@ -7,6 +7,7 @@ import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import {
+  attachExecution,
   cancelTask,
   claimTask,
   createRun,
@@ -36,7 +37,7 @@ import {
   integrateTaskWorktree
 } from "../plugins/orchestrator/scripts/lib/worktrees.mjs";
 import { changedFiles, worktreeGitEnv } from "../plugins/orchestrator/scripts/lib/git.mjs";
-import { checkpointPlan, cleanup, git, makeRepo, runCli, write } from "./helpers.mjs";
+import { CLI, checkpointPlan, cleanup, git, makeRepo, runCli, write } from "./helpers.mjs";
 
 const repos = [];
 const fixture = path.join(
@@ -148,6 +149,88 @@ test("write worktrees require committed, clean, declared, in-scope changes befor
   assert.equal(cleanupTaskWorktree(root, task.attempts.at(-1)), true);
 });
 
+test("integration recovers across process death without accepting partial or foreign work", () => {
+  const preload = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "interrupt-integration.mjs");
+  for (const phase of ["before-git", "after-git", "direct-retry", "detached-head", "partial-git", "foreign-git", "dirty-checkout", "missing-receipts"]) {
+    const root = repo();
+    const id = `run-recovery-${phase}`;
+    if (phase === "detached-head") {
+      git(root, ["checkout", "--quiet", "--detach"]);
+    }
+    plan(root, id);
+    checkpointPlan(root, id);
+    const dispatch = claimTask(root, id, "build", { constraints: [] });
+    let run = loadRun(root, id);
+    const worktree = createTaskWorktree(root, run, run.tasks.build, run.tasks.build.attempts.at(-1));
+    attachExecution(root, id, "build", { attemptId: dispatch.attemptId, worktree, runner: {} });
+    for (const file of ["src/first.js", "src/second.js"]) {
+      write(worktree.path, file, `export const value = ${file.includes("first") ? 17 : 29};\n`);
+      git(worktree.path, ["add", file]);
+      git(worktree.path, ["commit", "--quiet", "-m", `Add ${file}`]);
+    }
+    recordTaskResult(root, id, "build", {
+      attemptId: dispatch.attemptId,
+      resultText: JSON.stringify({ summary: "Built", files_touched: ["src/first.js", "src/second.js"],
+        tests: [], decisions: [], assumptions: [], blockers: [], confidence: "high" })
+    });
+    const before = git(root, ["rev-parse", "HEAD"]).trim();
+    assert.throws(() => execFileSync(process.execPath, [CLI, "run", "integrate", id, "build", "--evidence", "reviewed both modules"], {
+      cwd: root, stdio: "pipe",
+      env: { ...process.env, NODE_OPTIONS: `--import=${preload}`,
+        ORCH_TEST_INTEGRATION_INTERRUPT: ["before-git", "partial-git"].includes(phase) ? phase : "after-git" }
+    }), (error) => error.status === 86);
+    run = loadRun(root, id);
+    assert.equal(run.tasks.build.status, "reported");
+    assert.ok(run.pendingIntegration);
+    assert.throws(() => cancelTask(root, id, "build"), /interrupted integration/);
+    if (phase === "foreign-git") {
+      write(root, "foreign.txt", "unrelated\n");
+      git(root, ["add", "foreign.txt"]);
+      git(root, ["commit", "--quiet", "-m", "Unrelated supervisor edit"]);
+    }
+    if (phase === "dirty-checkout") {
+      write(root, "src/first.js", "manual work must survive\n");
+    }
+    if (phase === "missing-receipts") {
+      git(root, ["reflog", "expire", "--expire=now", "--all"]);
+    }
+    const integratedHead = git(root, ["rev-parse", "HEAD"]).trim();
+    const resumed = runCli(root, phase === "direct-retry"
+      ? ["run", "integrate", id, "build", "--json"]
+      : ["run", "resume", id, "--json"]);
+    if (["partial-git", "foreign-git", "dirty-checkout", "missing-receipts"].includes(phase)) {
+      assert.equal(resumed.code, 1);
+      assert.match(resumed.stderr, /manual recovery/);
+      assert.equal(loadRun(root, id).tasks.build.status, "reported");
+      assert.ok(loadRun(root, id).pendingIntegration);
+      assert.equal(git(root, ["rev-parse", "HEAD"]).trim(), integratedHead);
+      if (phase === "dirty-checkout") {
+        assert.equal(fs.readFileSync(path.join(root, "src/first.js"), "utf8"), "manual work must survive\n");
+      }
+      continue;
+    }
+    assert.equal(resumed.code, 0, resumed.stderr);
+    if (phase === "before-git") {
+      assert.equal(integratedHead, before);
+      assert.equal(loadRun(root, id).tasks.build.status, "reported");
+      const integrated = runCli(root, ["run", "integrate", id, "build", "--evidence", "reviewed both modules"]);
+      assert.equal(integrated.code, 0, integrated.stderr);
+    } else {
+      assert.notEqual(integratedHead, before);
+      assert.equal(git(root, ["rev-parse", "HEAD"]).trim(), integratedHead, "recovery must not cherry-pick twice");
+    }
+    run = loadRun(root, id);
+    assert.equal(run.tasks.build.status, "completed");
+    assert.equal(run.tasks.build.attempts.at(-1).outcome.terminalOutcome, "accepted");
+    assert.equal(run.pendingIntegration, undefined);
+    assert.deepEqual(run.tasks.build.verification.evidence, ["reviewed both modules"]);
+    assert.equal(git(root, ["rev-list", "--count", `${before}..HEAD`]).trim(), "2");
+    assert.equal(fs.readFileSync(path.join(root, "src/second.js"), "utf8"), "export const value = 29;\n");
+    assert.equal(run.repository.integrationHead, git(root, ["rev-parse", "HEAD"]).trim());
+    assert.equal(runCli(root, ["run", "resume", id, "--json"]).code, 0);
+  }
+});
+
 test("a conflicted integration rolls back without running a worker-changed fsmonitor", () => {
   const root = repo();
   // The repository runs a tracked script as its fsmonitor.
@@ -188,7 +271,12 @@ test("a conflicted integration rolls back without running a worker-changed fsmon
   run.repository.integrationHead = git(root, ["rev-parse", "HEAD"]).trim();
   const task = run.tasks.build;
   task.attempts.at(-1).worktree = worktree;
-  assert.throws(() => integrateTaskWorktree(root, run, task, task.attempts.at(-1)), /integration|cherry-pick|conflict/i);
+  fs.writeFileSync(runFile(root, "run-conflict"), `${JSON.stringify(run, null, 2)}\n`);
+  const result = runCli(root, ["run", "integrate", "run-conflict", "build"]);
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /integration|cherry-pick|conflict/i);
+  assert.equal(loadRun(root, "run-conflict").pendingIntegration, undefined);
+  assert.equal(loadRun(root, "run-conflict").tasks.build.status, "reported");
   assert.equal(fs.existsSync(marker) ? fs.readFileSync(marker, "utf8") : "", "", "the worker's fsmonitor did not run");
   assert.equal(fs.readFileSync(path.join(root, "src/mon.sh"), "utf8"), "#!/bin/sh\nexit 1\n", "rolled back");
   git(root, ["config", "--unset", "core.fsmonitor"]);

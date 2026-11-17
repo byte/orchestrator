@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import { after, test } from "node:test";
 
@@ -14,7 +15,8 @@ import {
   loadLocalState,
   threadsFile,
   updateLanesState,
-  updateLocalState
+  updateLocalState,
+  withFileLock
 } from "../plugins/orchestrator/scripts/lib/state.mjs";
 import { cleanup, makeRepo } from "./helpers.mjs";
 
@@ -35,6 +37,24 @@ after(() => {
   for (const root of repos) {
     cleanup(root);
   }
+});
+
+test("a live state lock cannot be stolen just because its operation is slow", () => {
+  const root = repo();
+  const target = `${root}/slow-operation`;
+  const moduleUrl = new URL("../plugins/orchestrator/scripts/lib/state.mjs", import.meta.url).href;
+  withFileLock(target, () => {
+    fs.utimesSync(`${target}.lock`, new Date(0), new Date(0));
+    const contender = spawnSync(process.execPath, ["--input-type=module", "-e",
+      `import { withFileLock } from ${JSON.stringify(moduleUrl)};
+       withFileLock(${JSON.stringify(target)}, () => { throw new Error("lock was stolen"); });`
+    ], { encoding: "utf8" });
+    assert.notEqual(contender.status, 0);
+    assert.match(contender.stderr, /Timed out waiting for state lock/);
+    assert.doesNotMatch(contender.stderr, /Error: lock was stolen/);
+    assert.equal(fs.readFileSync(`${target}.lock`, "utf8"), String(process.pid));
+  });
+  assert.equal(withFileLock(target, () => "released"), "released");
 });
 
 test("lane and thread files use schemas independent from run state", () => {
