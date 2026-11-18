@@ -586,7 +586,7 @@ The package has no runtime dependencies. Tests use throwaway Git repositories an
 processes to exercise concurrency, cancellation, structured collection, worktree integration,
 finalization, and cleanup without consuming model quota.
 
-GitHub Actions runs this suite on Linux and macOS with Node 18.18.2 and Node 22. These are protocol tests, not real-model sandbox certification. Before relying on a new Codex installation or upgrade, separately exercise a write task through integration/finalization, a read task that can write only its scratch directory, warm resume, and cancellation with the authenticated CLI; these opt-in checks consume model quota.
+Run this suite locally with `npm test`; there is no hosted CI. These are protocol tests, not real-model sandbox certification. Before relying on a new Codex installation or upgrade, separately exercise a write task through integration/finalization, a read task that can write only its scratch directory, warm resume, and cancellation with the authenticated CLI; these opt-in checks consume model quota.
 
 ## Operational limits
 
