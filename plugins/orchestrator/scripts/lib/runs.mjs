@@ -2694,22 +2694,56 @@ export function revertTaskAnswer(cwd, runId, taskId, { attemptId, round: answere
 
 /** Preserve the worktree and setup intent before a possibly long provisioning command. */
 export function prepareTaskAttempt(cwd, runId, taskId, attemptId, worktree, options = {}) {
-  return withFileLock(runFile(cwd, runId), () => {
+  // Save the worktree and the setup intent under the run lock, then release it:
+  // setup can run for many minutes, and every other command on the run (a
+  // background `run wait` included) needs the lock meanwhile.
+  const run = withFileLock(runFile(cwd, runId), () => {
     const run = loadRun(cwd, runId), task = requireTask(run, taskId), attempt = currentAttempt(task, attemptId);
     if (task.status !== "dispatching" || attempt.status !== "dispatching") {
       if (!attempt.worktree) { attempt.worktree = worktree; writeRun(cwd, run); }
       throw new AttachRefusedError("Task no longer dispatching; setup refused.");
     }
     attempt.worktree = worktree;
-    if (!run.contract?.setup) return;
-    worktree.setupPending = { startedAt: nowIso() };
-    writeRun(cwd, run);
-    try { prepareTaskWorktree(cwd, run, worktree, options); }
-    finally {
-      if (!worktree.setup?.terminationUncertain) delete worktree.setupPending;
+    if (!run.contract?.setup) return null;
+    if (worktree.setupPending || worktree.setup?.terminationUncertain) {
+      // Inherited from an attempt whose setup was interrupted: that command may
+      // still be writing this worktree, so never start another over it.
       writeRun(cwd, run);
+      throw Object.assign(new Error("An earlier setup in this worktree was interrupted and may still be running; " +
+        "preserve it and use `run retry --fresh`."), { kind: "failed", reasonCode: "setup_failed", signals: ["worker_launch_error"] });
+    }
+    // The launcher's identity lets a poll tell a setup still in progress from
+    // one whose launcher was killed (a Bash timeout, say).
+    worktree.setupPending = { startedAt: nowIso(), launcherPid: process.pid, launcherStartedAt: processStartIso() };
+    writeRun(cwd, run);
+    return run;
+  });
+  if (!run) return;
+  let failure = null;
+  try {
+    prepareTaskWorktree(cwd, run, worktree, options);
+  } catch (error) {
+    failure = error;
+  }
+  if (!worktree.setup?.terminationUncertain) delete worktree.setupPending;
+  withFileLock(runFile(cwd, runId), () => {
+    const current = loadRun(cwd, runId);
+    const attempt = currentAttempt(requireTask(current, taskId), attemptId);
+    if (attempt.worktree?.path === worktree.path) {
+      attempt.worktree = worktree;
+      writeRun(cwd, current);
+    }
+    const task = current.tasks[taskId];
+    if (!failure && (task?.status !== "dispatching" || attempt.status !== "dispatching")) {
+      failure = new AttachRefusedError("Task no longer dispatching after setup; no worker started.");
     }
   });
+  if (failure) throw failure;
+}
+
+/** This process's start time, for recognising it later by pid without mistaking a reused pid. */
+function processStartIso() {
+  return new Date(Date.now() - process.uptime() * 1000).toISOString();
 }
 
 export function attachExecution(cwd, runId, taskId, { attemptId, worktree, runner }) {
@@ -3183,30 +3217,39 @@ function requiredChecks(run, taskId) {
 }
 
 export function runChecks(cwd, runId, taskId = null, options = {}) {
-  return withFileLock(runFile(cwd, runId), () => {
+  // Validate and snapshot the target under the run lock, then release it while
+  // the checks execute (up to an hour each): other commands on the run, a
+  // background `run wait` included, must not time out waiting. Each receipt is
+  // bound to the attempt, plan revision, and content fingerprint it measured,
+  // so a change made meanwhile makes it stale at acceptance, never wrongly fresh.
+  const { run, target, definitions } = withFileLock(runFile(cwd, runId), () => {
     const run = loadRun(cwd, runId);
     assertNoPendingIntegration(run);
     const target = checkTarget(cwd, run, taskId);
     if (target.task && target.task.status !== "reported") throw new Error("Task checks require a reported result.");
     if (!target.task && run.status !== "finalizing") throw new Error("Final checks require a finalizing run.");
-    const receipts = [];
-    for (const definition of requiredChecks(run, taskId)) {
-      const before = checkoutFingerprint(target.cwd, { gitDir: target.gitDir });
-      const execution = executeCheck(target.cwd, definition, options);
-      const after = checkoutFingerprint(target.cwd, { gitDir: target.gitDir });
-      const receipt = {
-        id: randomUUID(), checkId: definition.id, definition,
-        taskId, attemptId: target.attempt?.id ?? null, planRevision: run.planRevision,
-        fingerprint: before, changedDuringCheck: before !== after,
-        ...execution, passed: execution.passed && before === after, provenance: "supervisor-executed"
-      };
-      (run.checkReceipts ??= []).push(receipt);
-      receipts.push(receipt);
-      writeRun(cwd, run);
-      appendEvent(cwd, run.id, { type: "check.executed", receiptId: receipt.id, taskId, checkId: definition.id, passed: receipt.passed });
-    }
-    return receipts;
+    return { run, target, definitions: requiredChecks(run, taskId) };
   });
+  const receipts = [];
+  for (const definition of definitions) {
+    const before = checkoutFingerprint(target.cwd, { gitDir: target.gitDir });
+    const execution = executeCheck(target.cwd, definition, options);
+    const after = checkoutFingerprint(target.cwd, { gitDir: target.gitDir });
+    const receipt = {
+      id: randomUUID(), checkId: definition.id, definition,
+      taskId, attemptId: target.attempt?.id ?? null, planRevision: run.planRevision,
+      fingerprint: before, changedDuringCheck: before !== after,
+      ...execution, passed: execution.passed && before === after, provenance: "supervisor-executed"
+    };
+    withFileLock(runFile(cwd, runId), () => {
+      const current = loadRun(cwd, runId);
+      (current.checkReceipts ??= []).push(receipt);
+      writeRun(cwd, current);
+      appendEvent(cwd, current.id, { type: "check.executed", receiptId: receipt.id, taskId, checkId: definition.id, passed: receipt.passed });
+    });
+    receipts.push(receipt);
+  }
+  return receipts;
 }
 
 function assertRequiredChecks(cwd, run, taskId = null) {
@@ -3225,7 +3268,13 @@ function assertRequiredChecks(cwd, run, taskId = null) {
 }
 
 export function previewRunTask(cwd, runId, taskId, options = {}) {
-  return withFileLock(path.join(localDir(cwd), "integration"), () =>
+  const integrationLock = path.join(localDir(cwd), "integration");
+  // Validate and record the intent under both locks, then release them: setup
+  // and checks can run for many minutes, and holding the run lock (or the
+  // checkout lock other runs integrate under) that long makes every concurrent
+  // command time out. The receipt binds the target head, candidate, attempt,
+  // and plan revision, so anything that moves meanwhile makes it stale.
+  const { run, task, attempt, receipt } = withFileLock(integrationLock, () =>
     withFileLock(runFile(cwd, runId), () => {
       const run = loadRun(cwd, runId);
       assertNoPendingIntegration(run);
@@ -3239,48 +3288,69 @@ export function previewRunTask(cwd, runId, taskId, options = {}) {
         id, taskId, attemptId: attempt.id, planRevision: run.planRevision,
         targetHead: run.repository.integrationHead, candidateHead: inspection.head, commits: inspection.commits,
         worktree: { path: path.join(localDir(cwd), "previews", run.id, id) },
+        owner: { pid: process.pid, startedAt: processStartIso() },
         startedAt: nowIso(), status: "preparing", passed: false, checks: []
       };
-      (run.previews ??= []).push(receipt);
+      (run.previews ??= []).push(structuredClone(receipt));
       writeRun(cwd, run);
-      try {
-        receipt.worktree = createPreviewWorktree(cwd, run, receipt.worktree.path);
-        prepareTaskWorktree(cwd, run, receipt.worktree, options);
-        writeRun(cwd, run);
-        const previewRun = { ...run, repository: { ...run.repository, branch: "HEAD" } };
-        const integrated = integrateTaskWorktree(receipt.worktree.path, previewRun, task, attempt, {
-          beforeApply(current) {
-            if (current.head !== receipt.candidateHead) throw new Error("Candidate changed while preparing preview; retry preview.");
-            receipt.status = "applying";
-            writeRun(cwd, run);
-          }
-        });
-        receipt.integrationHead = integrated.integrationHead;
-        receipt.status = "checking";
-        // Setup is provisioned from the trusted target, not candidate-modified scripts.
-        if (receipt.worktree.setup && checkoutFingerprint(receipt.worktree.path, { files: receipt.worktree.setup.definition.inputs }) !== receipt.worktree.setup.fingerprint) {
-          throw new Error("Candidate changes setup inputs; trusted target setup cannot certify its dependencies. Review the dependency change separately before preview.");
-        }
-        for (const definition of normalizeChecks(run.contract?.checks ?? [])) {
-          const before = checkoutFingerprint(receipt.worktree.path, { gitDir: receipt.worktree.gitDir });
-          const execution = executeCheck(receipt.worktree.path, definition, { codexCommand: options.codexCommand });
-          const after = checkoutFingerprint(receipt.worktree.path, { gitDir: receipt.worktree.gitDir });
-          receipt.checks.push({ ...execution, definition, fingerprint: before, changedDuringCheck: before !== after, passed: execution.passed && before === after });
-          receipt.mayBeRunning ||= Boolean(execution.terminationUncertain);
-          writeRun(cwd, run);
-        }
-        receipt.passed = receipt.checks.every((check) => check.passed);
-        receipt.status = receipt.passed ? "passed" : "failed";
-      } catch (error) {
-        receipt.status = "failed";
-        receipt.error = error.message;
-        receipt.mayBeRunning = Boolean(error.gitMayBeRunning || error.details?.terminationUncertain);
-      }
-      receipt.finishedAt = nowIso();
-      writeRun(cwd, run);
-      appendEvent(cwd, run.id, { type: "integration.previewed", receiptId: id, taskId, passed: receipt.passed });
-      return receipt;
+      return { run, task, attempt, receipt };
     }));
+  const save = (event = null) => withFileLock(runFile(cwd, runId), () => {
+    const current = loadRun(cwd, runId);
+    const index = (current.previews ?? []).findIndex((entry) => entry.id === receipt.id);
+    if (index < 0) return;
+    current.previews[index] = structuredClone(receipt);
+    writeRun(cwd, current);
+    if (event) appendEvent(cwd, runId, event);
+  });
+  try {
+    // `git worktree add` writes the shared repository; take the checkout lock
+    // for that step only, and require the target head the receipt names.
+    receipt.worktree = withFileLock(integrationLock, () => {
+      if (headSha(cwd) !== receipt.targetHead) throw new Error("The supervisor branch moved since the preview started; retry preview.");
+      return createPreviewWorktree(cwd, run, receipt.worktree.path);
+    });
+    save();
+    prepareTaskWorktree(cwd, run, receipt.worktree, options);
+    save();
+    const previewRun = { ...run, repository: { ...run.repository, branch: "HEAD" } };
+    const integrated = integrateTaskWorktree(receipt.worktree.path, previewRun, task, attempt, {
+      beforeApply(current) {
+        if (current.head !== receipt.candidateHead) throw new Error("Candidate changed while preparing preview; retry preview.");
+        receipt.status = "applying";
+        save();
+      }
+    });
+    receipt.integrationHead = integrated.integrationHead;
+    receipt.status = "checking";
+    save();
+    // Setup is provisioned from the trusted target, not candidate-modified scripts.
+    if (receipt.worktree.setup && checkoutFingerprint(receipt.worktree.path, { files: receipt.worktree.setup.definition.inputs }) !== receipt.worktree.setup.fingerprint) {
+      throw new Error("Candidate changes setup inputs; trusted target setup cannot certify its dependencies. Review the dependency change separately before preview.");
+    }
+    for (const definition of normalizeChecks(run.contract?.checks ?? [])) {
+      const before = checkoutFingerprint(receipt.worktree.path, { gitDir: receipt.worktree.gitDir });
+      const execution = executeCheck(receipt.worktree.path, definition, { codexCommand: options.codexCommand });
+      receipt.mayBeRunning ||= Boolean(execution.terminationUncertain);
+      const after = checkoutFingerprint(receipt.worktree.path, { gitDir: receipt.worktree.gitDir });
+      receipt.checks.push({ ...execution, definition, fingerprint: before, changedDuringCheck: before !== after, passed: execution.passed && before === after });
+      save();
+    }
+    receipt.passed = receipt.checks.every((check) => check.passed);
+    receipt.status = receipt.passed ? "passed" : "failed";
+  } catch (error) {
+    receipt.status = "failed";
+    receipt.error = error.message;
+    // Keep an uncertainty an earlier step recorded: a later failure must not
+    // let cleanup delete a checkout a check process may still be using.
+    receipt.mayBeRunning ||= Boolean(error.gitMayBeRunning || error.details?.terminationUncertain ||
+      receipt.worktree?.setup?.terminationUncertain);
+    // A Git child's group is not recorded, so only the user can settle it.
+    if (error.gitMayBeRunning) receipt.unknownProcess = true;
+  }
+  receipt.finishedAt = nowIso();
+  save({ type: "integration.previewed", receiptId: receipt.id, taskId, passed: receipt.passed });
+  return receipt;
 }
 
 function assertIntegrationPreview(run, task, inspection) {
@@ -3764,7 +3834,65 @@ const CLEANABLE_TASK_STATUSES = new Set(["completed", "failed", "blocked", "canc
  * half-handled. A task with a live worker (`live`) is left alone. The slow
  * deletion of what was taken happens outside the lock.
  */
-export function takeWorktreesForRemoval(cwd, runId, taskId, detach, live = () => false) {
+function pidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error.code === "EPERM";
+  }
+}
+
+// A group id is not reused while any member lives, so ESRCH proves every
+// process the uncertain command started has exited.
+function groupGone(pgid) {
+  if (!Number.isInteger(pgid) || pgid <= 0) return false;
+  try {
+    process.kill(-pgid, 0);
+    return false;
+  } catch (error) {
+    return error.code === "ESRCH";
+  }
+}
+
+const RELEASE_HINT = "Once you have confirmed nothing is still running there, `run cleanup <run-id> --release-uncertain` removes it.";
+
+/** Why a worktree's setup must be preserved, or null when it is settled. */
+function setupUncertainty(worktree, release) {
+  if (!worktree) return null;
+  const setup = worktree.setup;
+  if (setup?.terminationUncertain && !groupGone(setup.processGroup) && !release) {
+    return `Setup process group ${setup.processGroup ?? "(unknown)"} may still be running; its worktree and receipt are preserved. ${RELEASE_HINT}`;
+  }
+  const pending = worktree.setupPending;
+  if (pending) {
+    if (pidAlive(pending.launcherPid)) return "Setup is still in progress (its launch process is alive).";
+    if (!release) return `Setup was interrupted when its launch exited; the setup command may still be running. ${RELEASE_HINT}`;
+  }
+  return null;
+}
+
+/** Why a preview checkout must be preserved, or null when it is settled. */
+function previewUncertainty(preview, release) {
+  const settled = ["passed", "failed"].includes(preview.status);
+  if (!settled && pidAlive(preview.owner?.pid)) return "Preview is still in progress (its process is alive).";
+  const groups = [
+    ...(preview.checks ?? []).filter((check) => check.terminationUncertain).map((check) => check.processGroup),
+    ...(preview.worktree?.setup?.terminationUncertain ? [preview.worktree.setup.processGroup] : [])
+  ];
+  // Uncertainty with no recorded group (a Git child, or a preview whose process
+  // was killed mid-step) cannot be settled automatically.
+  const unknown = !settled || Boolean(preview.unknownProcess) ||
+    (preview.mayBeRunning && !groups.length);
+  const live = groups.some((group) => !groupGone(group));
+  if ((unknown || live) && !release) {
+    return `Preview ${preview.worktree?.path} may still have a running process; preserved for diagnosis. ${RELEASE_HINT}`;
+  }
+  return null;
+}
+
+export function takeWorktreesForRemoval(cwd, runId, taskId, detach, live = () => false, { releaseUncertain = false } = {}) {
   const id = assertId(runId, "run");
   const filePath = runFile(cwd, id);
   return withFileLock(filePath, () => {
@@ -3788,8 +3916,9 @@ export function takeWorktreesForRemoval(cwd, runId, taskId, detach, live = () =>
         continue;
       }
       for (const attempt of task.attempts) {
-        if (attempt.worktree?.setupPending || attempt.worktree?.setup?.terminationUncertain) {
-          refused.push({ taskId: task.id, attemptId: attempt.id, error: "Setup process termination is uncertain; preserve its worktree and receipt." });
+        const uncertain = setupUncertainty(attempt.worktree, releaseUncertain);
+        if (uncertain) {
+          refused.push({ taskId: task.id, attemptId: attempt.id, error: uncertain });
           continue;
         }
         try {
@@ -3801,8 +3930,9 @@ export function takeWorktreesForRemoval(cwd, runId, taskId, detach, live = () =>
     }
     for (const preview of run.previews ?? []) {
       if (taskId && preview.taskId !== taskId) continue;
-      if (preview.mayBeRunning || !["passed", "failed"].includes(preview.status)) {
-        refused.push({ taskId: preview.taskId, attemptId: preview.id, error: `Preview ${preview.worktree.path} has uncertain process termination; preserve it for manual diagnosis.` });
+      const uncertain = previewUncertainty(preview, releaseUncertain);
+      if (uncertain) {
+        refused.push({ taskId: preview.taskId, attemptId: preview.id, error: uncertain });
         continue;
       }
       const attempt = { id: preview.id, worktree: preview.worktree };

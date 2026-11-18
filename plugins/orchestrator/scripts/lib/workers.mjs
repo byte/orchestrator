@@ -741,6 +741,30 @@ export function pollRunWorkers(cwd, runId, { now = Date.now() } = {}) {
         finishedAt: new Date().toISOString()
       }, null, 2)}\n`);
     }
+    // A launch killed during worktree setup (a Bash timeout, say) leaves the
+    // attempt dispatching with no runner; nothing else would ever collect it.
+    // The setup command ran in its own process group and may still be running,
+    // so the worktree keeps its pending-setup mark and cleanup preserves it.
+    const pendingSetup = attempt.worktree?.setupPending;
+    if (!attempt.runner && pendingSetup?.launcherPid &&
+        !sameProcess(pendingSetup.launcherPid, pendingSetup.launcherStartedAt)) {
+      const error = "The launch exited during worktree setup, so no worker started. The setup command may still be " +
+        "running in that worktree: preserve it and use `run retry --fresh`.";
+      try {
+        const failed = failTaskAttempt(cwd, runId, task.id, {
+          attemptId: attempt.id,
+          error,
+          reasonCode: "setup_failed",
+          signals: ["worker_launch_error"],
+          launchFailed: true,
+          runnerStatusFile: null
+        });
+        updates.push({ taskId: task.id, attemptId: attempt.id, changed: true, status: failed.status, error });
+      } catch (failure) {
+        if (!(failure instanceof StaleRunnerError)) throw failure;
+      }
+      return;
+    }
     if (!statusFile || !fs.existsSync(statusFile)) {
       updates.push({
         taskId: task.id,

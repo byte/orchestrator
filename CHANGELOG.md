@@ -8,6 +8,8 @@
 - Read attempts bind their evidence to declared source contents and refuse stale passing verdicts. Compact show/ready/recover diagnostics explain next actions, setup failures, checkout gates, and preserved integration phases without mutating state; preflight identifies the executing plugin copy and setup configuration.
 - `run preview` provisions a detached integration candidate, applies guarded commits, and runs combined checks before the supervisor branch changes. Required-check runs reject missing, failed, or stale previews. Cleanup preserves dirty/uncertain scratch state, and setup intent is saved before provisioning begins.
 
+- `run check`, worktree setup, and `run preview` release the run lock (and the checkout lock) while their commands run; before, a check or setup longer than a few seconds made a concurrent `run wait`, launch, or cancellation fail with a lock timeout. A launch killed during setup is now collected by the next poll as `setup_failed` instead of staying `dispatching` forever, and a retry refuses to start a second setup over an interrupted one. `run cleanup` settles uncertain setup and preview checkouts once their recorded process group has exited, and `--release-uncertain` removes the rest after the user confirms. A preview no longer loses an earlier step's process uncertainty when a later step fails. `/orchestrator:run` runs long launches, checks, and previews as background commands.
+
 ## 0.6.7
 
 - `/orchestrator:resume` with no run id finds the open run itself, or asks which one when there are several, instead of requiring the user to look the id up.

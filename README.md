@@ -355,6 +355,17 @@ permissions. A candidate changing declared setup inputs is refused instead of be
 stale dependencies; review dependency/setup changes separately. This first version handles one
 candidate at a time, not a batch merge queue.
 
+Checks, setup, and previews do not hold the run's lock while their commands run, so other commands
+on the run (a background `run wait`, another launch, a cancellation) keep working. Each receipt is
+bound to the attempt, plan revision, and contents it measured, so anything that changes meanwhile
+makes it stale rather than wrongly fresh. These commands can run longer than a foreground Claude
+Code Bash call allows, so the supervisor runs them in the background. If a launch is killed during
+setup, the next poll records the attempt as `setup_failed`; the setup command may still be running
+in that worktree, so retry with `--fresh`. `run cleanup` keeps such worktrees and previews until the
+recorded process group has exited; when no group was recorded (a killed launch, a Git child), it
+keeps them until `run cleanup <run-id> --release-uncertain`, which you should pass only after
+confirming nothing is running there.
+
 ## Worktrees and your branch
 
 You do not need a branching workflow. Integrated work lands as ordinary commits on the branch the

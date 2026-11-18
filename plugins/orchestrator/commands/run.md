@@ -276,6 +276,17 @@ named; read its notice.
 
 When the frozen lane has setup, launch provisions the isolated worktree before starting Codex. Inspect a `setup_failed` attempt's worktree receipt, fix the external prerequisite, and use `run retry`; no model call is spent while setup fails. If setup inputs changed after coding, use `run retry --fresh` rather than running the worker's modified script outside its sandbox. Do not copy credentials or dependencies from the user's checkout.
 
+**Long commands run in the background.** A write launch on a lane with setup, `run check`, and
+`run preview` execute commands that can take longer than a foreground Bash call allows (10 minutes
+at most). Run each of them as a background Bash command (`run_in_background: true`) and read its
+output when the harness reports it finished; a Bash timeout would kill the command midway. None of
+them holds the run lock while its command runs, so a background `run wait` keeps working
+alongside. If a launch was killed during setup anyway, the next `run wait` or `run poll` records the
+attempt as `setup_failed`; the setup command may still be running in that worktree, so use
+`run retry --fresh`. `run cleanup` preserves such worktrees and previews until it can prove their
+processes have exited; `--release-uncertain` removes them, but only after the user confirms
+nothing is still running there.
+
 A write launch requires a clean checkout on the run's branch with no commits made outside the run.
 It checks before claiming the task, so a refusal leaves the task pending and spends no attempt.
 If the checkout has uncommitted work that is not the run's (`init` and preflight warn about it),

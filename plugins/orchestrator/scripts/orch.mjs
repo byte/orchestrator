@@ -135,7 +135,8 @@ Usage:
   orch run cost <run-id> [--json]
       worker tokens per attempt from Codex session logs, weekly Codex limit used, and the contribution tally
   orch run tally <run-id> --findings <n> --checked <n> --held <n> --corrected <n> --worker-only <n> --supervisor-only <n> [--note <text>] [--json]
-  orch run cleanup <run-id> [task-id] [--json]
+  orch run cleanup <run-id> [task-id] [--release-uncertain] [--json]
+      --release-uncertain: also remove setup/preview checkouts whose processes could not be confirmed stopped (only after you confirmed)
 `;
 
 function fail(message) {
@@ -684,7 +685,7 @@ function commandRun(argv, cwd) {
   }
 
   const { options, positionals } = parseArgs(rest, {
-    booleanOptions: ["json", "fresh", "deny", "user-approved", "no-watch"],
+    booleanOptions: ["json", "fresh", "deny", "user-approved", "no-watch", "release-uncertain"],
     repeatableOptions: ["decision", "risk", "next", "evidence", "grant-scope"],
     valueOptions: [
       "plan-file",
@@ -1068,7 +1069,8 @@ function commandRun(argv, cwd) {
     const taskId = positionals[1];
     const removed = [];
     const { taken, refused } = takeWorktreesForRemoval(
-      cwd, runId, taskId, (attempt) => detachTaskWorktree(cwd, attempt), attemptLive
+      cwd, runId, taskId, (attempt) => detachTaskWorktree(cwd, attempt), attemptLive,
+      { releaseUncertain: Boolean(options["release-uncertain"]) }
     );
     for (const { taskId: owner, attempt, trash } of taken) {
       if (trash) {
