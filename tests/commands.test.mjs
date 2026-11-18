@@ -73,7 +73,7 @@ test("the run command requires evidence gates and bounded retries", () => {
   assert.match(command, /bounded advisory block/);
   assert.match(command, /--mode off/);
   assert.match(command, /--rollback/);
-  assert.match(command, /Every task runs in its own isolated worktree/);
+  assert.match(command, /Every write task runs in its own isolated worktree/);
 });
 
 test("the resume command restores durable state and keeps Claude in authority", () => {

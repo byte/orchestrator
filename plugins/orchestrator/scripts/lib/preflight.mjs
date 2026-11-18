@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 
 import { isInitialized } from "./state.mjs";
+import { changedFiles } from "./git.mjs";
 import { isGitRepository, resolveWorkspaceRoot } from "./workspace.mjs";
 
 /**
@@ -57,6 +58,32 @@ function checkGit(cwd) {
   };
 }
 
+/**
+ * Not blocking: read and verify tasks run in the checkout as it is. A write task
+ * cannot launch until the checkout is clean, so say so before anyone plans one.
+ */
+function checkCleanCheckout(cwd) {
+  if (!isGitRepository(cwd)) {
+    return null;
+  }
+  let dirty;
+  try {
+    dirty = changedFiles(cwd);
+  } catch {
+    return null;
+  }
+  return {
+    id: "clean_checkout",
+    label: "Checkout clean",
+    ok: dirty.length === 0,
+    warning: true,
+    detail: dirty.length === 0
+      ? "write tasks can launch"
+      : `${dirty.length} uncommitted file${dirty.length === 1 ? "" : "s"}; read and verify tasks run as is, write tasks will not launch until it is committed or stashed`,
+    remedy: "git commit or git stash"
+  };
+}
+
 function checkInitialized(cwd) {
   const ok = isInitialized(cwd);
   return {
@@ -73,12 +100,13 @@ export function preflight(cwd = process.cwd()) {
     checkCodexBinary(),
     checkCodexAuth(),
     checkGit(cwd),
-    checkInitialized(cwd)
-  ];
+    checkInitialized(cwd),
+    checkCleanCheckout(cwd)
+  ].filter(Boolean);
 
   // Pool dispatch invokes Codex CLI directly; no Claude-side Codex plugin is needed.
   const blocking = checks.filter(
-    (check) => !check.ok && check.id !== "initialized" && !check.optional
+    (check) => !check.ok && check.id !== "initialized" && !check.optional && !check.warning
   );
 
   return { ok: blocking.length === 0, blocking, checks };

@@ -34,6 +34,7 @@ import {
 import {
   cleanupTaskWorktree,
   createTaskWorktree,
+  finishWorktreeRemoval,
   inspectTaskWorktree,
   integrateTaskWorktree
 } from "../plugins/orchestrator/scripts/lib/worktrees.mjs";
@@ -1046,11 +1047,9 @@ test("worker launch rejects supervisor branch drift outside the run", () => {
     }),
     /advanced outside run/
   );
-  assert.equal(loadRun(root, "run-drift").tasks.build.status, "failed");
-  assert.equal(
-    loadRun(root, "run-drift").tasks.build.attempts.at(-1).outcome.terminalOutcome,
-    "execution_failed"
-  );
+  // Refused before the claim: the task is still pending and no attempt was spent.
+  assert.equal(loadRun(root, "run-drift").tasks.build.status, "pending");
+  assert.equal(loadRun(root, "run-drift").tasks.build.attempts.length, 0);
 });
 
 test("detached workers persist status, thread id, and structured results", async () => {
@@ -1126,7 +1125,7 @@ test("worker collection distinguishes missing contracts from execution failures"
   );
 });
 
-test("the pool runs independent ready tasks in separate detached worktrees", async () => {
+test("the pool runs independent read tasks as separate detached workers in the checkout itself", async () => {
   const root = repo();
   createRun(root, {
     id: "run-pool-e2e",
@@ -1149,7 +1148,11 @@ test("the pool runs independent ready tasks in separate detached worktrees", asy
     codexCommand: [process.execPath, fixture]
   });
   assert.notEqual(first.runner.pid, second.runner.pid);
-  assert.notEqual(first.worktree.path, second.worktree.path);
+  // Read workers share the supervisor checkout instead of getting worktrees.
+  assert.equal(first.worktree.path, fs.realpathSync(root));
+  assert.equal(first.worktree.inPlace, true);
+  assert.equal(second.worktree.path, first.worktree.path);
+  assert.equal(git(root, ["worktree", "list"]).trim().split("\n").length, 1);
 
   for (let index = 0; index < 100; index += 1) {
     await new Promise((resolve) => setTimeout(resolve, 50));
@@ -1174,9 +1177,44 @@ test("the pool runs independent ready tasks in separate detached worktrees", asy
   }
   run = loadRun(root, "run-pool-e2e");
   assert.equal(run.status, "finalizing");
+  // Cleanup never touches the checkout a read worker ran in.
   for (const task of Object.values(run.tasks)) {
-    assert.equal(cleanupTaskWorktree(root, task.attempts.at(-1)), true);
+    assert.equal(cleanupTaskWorktree(root, task.attempts.at(-1)), false);
   }
+  assert.ok(fs.existsSync(path.join(root, ".git")));
+  assert.throws(
+    () => finishWorktreeRemoval(root, run.tasks["inspect-a"].attempts.at(-1), path.join(root, "nothing")),
+    /Refusing to remove the supervisor checkout/
+  );
+});
+
+test("a read task launches in a dirty checkout and sees its untracked files; a write task waits without spending an attempt", () => {
+  const root = repo();
+  createRun(root, { id: "run-dirty", lane: "api", objective: "Review a draft", workerModel: "sol", reasoningEffort: "high" });
+  replacePlan(root, "run-dirty", [
+    { id: "review", title: "Review", objective: "Review docs/draft.md", kind: "read" },
+    { id: "build", title: "Build", objective: "Build it", kind: "write", scope: ["src/**"] }
+  ]);
+  checkpointPlan(root, "run-dirty");
+  write(root, "docs/draft.md", "# Untracked draft\n");
+  write(root, "README.md", "edited but not committed\n");
+
+  assert.throws(
+    () => launchTaskWorker(root, "run-dirty", "build", { constraints: [] }, { codexCommand: [process.execPath, fixture] }),
+    /must be clean before launching a write worker: .*docs\/draft\.md.*Read and verify tasks run in the checkout/
+  );
+  const build = loadRun(root, "run-dirty").tasks.build;
+  assert.equal(build.status, "pending");
+  assert.equal(build.attempts.length, 0);
+
+  const launched = launchTaskWorker(root, "run-dirty", "review", { constraints: [] }, { codexCommand: [process.execPath, fixture] });
+  assert.equal(launched.worktree.inPlace, true);
+  assert.equal(launched.worktree.path, fs.realpathSync(root));
+  assert.ok(fs.existsSync(path.join(launched.worktree.path, "docs", "draft.md")));
+  assert.deepEqual(launched.worktree.dirtyFiles.sort(), ["README.md", "docs/draft.md"]);
+  assert.equal(launched.worktree.dirtyFileCount, 2);
+  assert.match(launched.briefing, /the repository's own checkout as it is now, including uncommitted and untracked files/);
+  stopTaskWorker(launched);
 });
 
 test("one worker that cannot be stopped does not leave the run's other workers running", async () => {

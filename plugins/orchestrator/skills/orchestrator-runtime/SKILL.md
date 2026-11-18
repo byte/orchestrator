@@ -18,8 +18,9 @@ All support `--json` where structured output is useful.
   supervisor, and the supervisor is whichever Claude model owns the session (Opus or Fable).
 - Use `run launch`; it starts detached Codex CLI workers on the task's saved `gpt-6-astra`,
   `gpt-6.1-sol`, `gpt-6.1-terra`, or `gpt-5.6-luna` route (or a 0.5.x run's persisted
-  `gpt-5.6-sol`/`gpt-5.6-terra` slug) with the saved effort, output schema, least sandbox, and
-  isolated worktree. Never substitute a route yourself during recovery or retry.
+  `gpt-5.6-sol`/`gpt-5.6-terra` slug) with the saved effort, output schema, and least sandbox; a
+  write task gets an isolated worktree and needs a clean checkout to launch, while read and verify
+  tasks run in the checkout as it is. Never substitute a route yourself during recovery or retry.
 - Read and verify workers cannot write the checkout, have no network, and may not request an
   unsandboxed command (`approval_policy="never"`, `--ignore-rules`), but can run commands and tests: each gets a
   private writable `TMPDIR` that is removed when it exits. A read task's acceptance criteria can

@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.6.3
+
+Fixes from a real review run in a repository with uncommitted work:
+
+- Read and verify tasks run in the supervisor checkout instead of a worktree. A worktree holds only committed files, so a reviewer could not see an uncommitted draft it was asked to review, and every launch was refused while the checkout had uncommitted files. A read worker now sees the checkout as it is, uncommitted and untracked files included, under the same sandbox (it cannot write the checkout, has no network, and gets a private `TMPDIR`). The attempt records the head, branch, and uncommitted files at launch. No worktree or branch is created for it, and `run cleanup` refuses to remove a checkout recorded as in place.
+- A write launch checks the clean checkout, branch, and integration head before it claims the task. A refusal leaves the task pending with no attempt spent and no failed run, and the message says to commit or stash and that read tasks can still launch.
+- Preflight (`/orchestrator:init`) warns, without blocking, when the checkout has uncommitted files.
+- `/orchestrator:run` tells the supervisor what to do about a refused write launch instead of running Codex outside the run.
+
 ## 0.6.2
 
 Fixes found by a real run on Codex CLI 0.169.0 (every tier, a warm retry, and a three-worker wave):

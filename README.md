@@ -22,7 +22,8 @@ what should happen, what is acceptable, what gets integrated, and when the whole
 - A task DAG planned and owned by the supervising Claude model
 - A supervisor-routed mixed pool of exact Astra, Sol, Terra, and Luna workers
 - Recorded, never-silent fallback down the model ladder when Codex rejects a model as unavailable
-- One detached `codex exec` process and isolated Git worktree per task
+- One detached `codex exec` process per task: write tasks in an isolated Git worktree, read and
+  verify tasks in your checkout as it is, uncommitted files included
 - Read-only sandboxes for analysis/review tasks and workspace-write sandboxes for implementation.
   A read-only worker can run tests that need only a private writable `TMPDIR`, not writes to its checkout.
 - JSON-schema-enforced worker reports with files, tests, decisions, assumptions, blockers, and
@@ -63,18 +64,17 @@ and records that it did; see the routing section below.
 
 ### Project dependencies and test setup
 
-Each task starts in a fresh Git worktree. Ignored files such as `node_modules`, virtual
-environments, and build products are not copied from the supervisor checkout. The runtime does
-not install dependencies or provision these worktrees automatically. A private `TMPDIR` does not
-make a read worker's checkout writable.
+Read and verify tasks run in your checkout, so they use the dependencies, virtual environments,
+and build products already there. They cannot write it; a private `TMPDIR` takes their temporary
+files, so tests that write only temporary output can run.
 
-For projects that need setup, first use a write task with explicit scope and acceptance criteria
-to install dependencies and run the checks in its own worktree; the supervisor can inspect and
-rerun checks there before integration. A separate read verifier gets a different worktree: use it
-only when the project can run checks with existing external tools/caches and temporary output,
-or arrange dependencies outside its checkout before launch. Do not assume an install in one
-task provisions another. This repository's dependency-free fixtures do not certify that workflow
-for dependency-heavy projects.
+Each write task starts in a fresh Git worktree that contains only committed files. Ignored files
+such as `node_modules` are not copied into it, and the runtime does not install dependencies or
+provision worktrees. For a project that needs setup, put the install in the write task's own
+objective and acceptance criteria, so it runs and is checked in that worktree; the supervisor can
+rerun the checks there before integration. Do not assume an install in one worktree provisions
+another. This repository's dependency-free fixtures do not certify that workflow for
+dependency-heavy projects.
 
 ## Install
 
@@ -247,8 +247,9 @@ replacement run or rely on conversational memory.
    any failure before dispatch. It then turns the objective into bounded `write`, `read`, and `verify` tasks with scope,
    dependencies, constraints, and checkable acceptance criteria, and routes each one using the
    lane's route evidence when there is enough of it.
-2. **Launch.** Ready tasks claim pool capacity. Each gets a fresh worktree (a warm retry reuses its
-   task's), exact model and effort,
+2. **Launch.** Ready tasks claim pool capacity. A write task gets a fresh worktree (a warm retry
+   reuses its task's) and needs a clean checkout; a read or verify task runs in the checkout as
+   it is. Each gets an exact model and effort,
    least-privilege sandbox, authoritative briefing, and required result schema.
 3. **Monitor.** Detached process IDs, status files, JSONL events, Codex thread IDs, outputs, and
    worktree paths are persisted under `.orchestrator/local/`. A worker that needs one adjacent
@@ -285,8 +286,7 @@ You do not need a branching workflow. Integrated work lands as ordinary commits 
 run started from, `main` included. The worktrees are scratch checkouts under
 `.orchestrator/local/worktrees/` that you never switch to, and `run cleanup` removes them.
 
-Every task gets its own worktree (read and verify tasks cannot write theirs). For write tasks this
-matters because:
+Every write task gets its own worktree, because:
 
 - **Workers run in parallel.** Several Codex processes in one folder would see each other's
   half-finished edits, their tests would fail on each other's changes, and each wrapper's commit
@@ -298,12 +298,19 @@ matters because:
 - **Retries build on them.** A warm retry continues in the same worktree; a retry after a
   conflict starts again from the integrated head.
 
-While a run is active, leave the checkout to it: launch, integration, and finalization require it
-to be clean, and a commit made outside the run is refused as branch drift until you reconcile it.
+Read and verify tasks get no worktree. They run in your checkout exactly as it is, uncommitted and
+untracked files included, under a sandbox that cannot write it, and several can share it at once.
+A review of a draft you have not committed sees the draft. Each launch records the commit and the
+uncommitted files the worker saw.
 
-The cost is setup: ignored files such as `node_modules` are not in a fresh worktree (see
-[Project dependencies and test setup](#project-dependencies-and-test-setup)). There is no mode
-that runs workers directly in your checkout yet.
+While a run has write tasks to launch or integrate, leave the checkout to it: those steps and
+finalization require it to be clean, and a commit made outside the run is refused as branch drift
+until you reconcile it. A refused write launch leaves the task pending and spends no attempt, and
+`/orchestrator:init` warns when the checkout has uncommitted files.
+
+The cost for write tasks is setup: ignored files such as `node_modules` are not in a fresh
+worktree (see [Project dependencies and test setup](#project-dependencies-and-test-setup)), and
+there is no mode yet that runs a write worker directly in your checkout.
 
 ## Commands
 
@@ -486,7 +493,8 @@ derive a purged sample again until the raw run itself is removed through a separ
 - A worker cannot widen its assigned scope or self-assign global work. It can only ask; a grant
   applies to that one task, never to the lane, and must not overlap another active task's write
   surface. Grants outside the lane require the user's approval.
-- The supervisor checkout must be clean for launch, integration, and finalization.
+- The supervisor checkout must be clean for a write launch, integration, and finalization. Read and
+  verify workers run in it as it is but cannot write it, and cleanup never removes it.
 - The supervisor branch and recorded integration head must not drift outside the run.
 - Write-task reports must match the actual committed file set exactly.
 - No worker can leave its sandbox: every launch pins `approval_policy="never"` and
@@ -524,8 +532,10 @@ GitHub Actions runs this suite on Linux and macOS with Node 18.18.2 and Node 22.
   can make supervisory decisions without Claude.
 - Run state is machine-local by design. Move stable knowledge to the ledger before changing
   machines.
-- Every write task runs in its own worktree; there is no in-place mode. Worktrees do not inherit
-  ignored files, so dependency-heavy projects need the setup described under requirements.
+- Every write task runs in its own worktree; there is no in-place write mode. Worktrees do not
+  inherit ignored files, so dependency-heavy projects need the setup described under requirements.
+  Read and verify tasks run in the checkout and see whatever is in it when they launch, including
+  edits made while they run.
 - Integration uses cherry-pick. Conflicts abort and require the supervisor to replan or request
   direction.
 - If integration is interrupted after Git has returned and its stopped phase is saved, `run resume` reconciles the saved intent and operation-specific receipts without replaying commits. An interruption while Git may still be running requires manual recovery, even if HEAD is unchanged or the expected commits are visible. Partial operations, missing receipts, unrelated commits, or manual edits also require manual recovery; the command preserves them rather than guessing or resetting the checkout. Acceptance-event publication failures are reported separately and retried by resume.

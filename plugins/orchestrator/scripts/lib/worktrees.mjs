@@ -86,7 +86,12 @@ function branchName(run, task, attempt) {
   return `orchestrator/${run.id}/${task.id}/${attempt.id}`;
 }
 
-function assertLaunchable(cwd, run) {
+/**
+ * The supervisor-side preconditions of a write launch: a committed base, the
+ * run's branch, a clean checkout, and no drift from the integration head. Exported
+ * so a launch can check them before it claims the task and spends an attempt.
+ */
+export function assertLaunchable(cwd, run) {
   if (!run.repository?.baseHead) {
     throw new WorktreeOperationError(
       "Worker isolation requires a repository with at least one commit.",
@@ -102,7 +107,9 @@ function assertLaunchable(cwd, run) {
   const dirt = changedFiles(cwd);
   if (dirt.length) {
     throw new WorktreeOperationError(
-      `The main checkout must be clean before launching isolated workers: ${dirt.join(", ")}.`,
+      `The main checkout must be clean before launching a write worker: ${summarizeFiles(dirt)}. ` +
+        "Commit or stash these changes first. Read and verify tasks run in the checkout as it is " +
+        "and do not need it clean.",
       { reasonCode: "dirty_checkout", kind: "failed", signals: ["dirty_checkout"] }
     );
   }
@@ -114,6 +121,56 @@ function assertLaunchable(cwd, run) {
     );
   }
   return baseHead;
+}
+
+function summarizeFiles(files, limit = 20) {
+  return files.length > limit
+    ? `${files.slice(0, limit).join(", ")}, and ${files.length - limit} more`
+    : files.join(", ");
+}
+
+/**
+ * Read and verify workers run in the supervisor checkout itself, as it is:
+ * uncommitted and untracked files included, so they review what the user sees.
+ * Their sandbox cannot write it. No worktree or branch is created, nothing needs
+ * cleaning up, and the head and uncommitted files at launch are recorded as
+ * evidence of what the worker saw.
+ */
+export function inPlaceCheckout(cwd, run) {
+  if (!run.repository?.baseHead) {
+    throw new WorktreeOperationError(
+      "Worker launch requires a repository with at least one commit.",
+      { reasonCode: "worker_launch_failed", kind: "failed", signals: ["worker_launch_error"] }
+    );
+  }
+  const dirty = changedFiles(cwd);
+  return {
+    path: fs.realpathSync(cwd),
+    inPlace: true,
+    branch: currentBranch(cwd),
+    baseHead: headSha(cwd),
+    dirtyFiles: dirty.slice(0, 200),
+    dirtyFileCount: dirty.length,
+    createdAt: new Date().toISOString()
+  };
+}
+
+/** Whether an attempt's recorded worktree is the supervisor checkout itself, never to be removed. */
+function isSupervisorCheckout(cwd, worktree) {
+  if (worktree?.inPlace) {
+    return true;
+  }
+  if (!worktree?.path) {
+    return false;
+  }
+  const real = (target) => {
+    try {
+      return fs.realpathSync(target);
+    } catch {
+      return path.resolve(target);
+    }
+  };
+  return real(worktree.path) === real(cwd);
 }
 
 export function createTaskWorktree(cwd, run, task, attempt) {
@@ -520,7 +577,7 @@ export function recoverTaskIntegration(cwd, run, pending) {
  */
 export function detachTaskWorktree(cwd, attempt) {
   const worktree = attempt.worktree;
-  if (!worktree?.path || !fs.existsSync(worktree.path)) {
+  if (!worktree?.path || !fs.existsSync(worktree.path) || isSupervisorCheckout(cwd, worktree)) {
     return null;
   }
   if (changedFiles(worktree.path, { gitDir: trustedGitDir(worktree, cwd) }).length) {
@@ -534,6 +591,9 @@ export function detachTaskWorktree(cwd, attempt) {
 }
 
 export function finishWorktreeRemoval(cwd, attempt, trash) {
+  if (isSupervisorCheckout(cwd, attempt.worktree)) {
+    throw new Error(`Refusing to remove the supervisor checkout ${attempt.worktree.path}.`);
+  }
   fs.rmSync(trash, { recursive: true, force: false });
   git(cwd, ["worktree", "prune"]);
   try {

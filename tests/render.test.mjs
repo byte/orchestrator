@@ -35,3 +35,20 @@ test("preflight distinguishes optional legacy integration from blocking failures
   assert.doesNotMatch(output, /MISSING  Legacy Codex bridge/);
   assert.match(output, /MISSING  Codex authenticated/);
 });
+
+test("preflight shows an uncommitted checkout as a warning, not a blocker", async () => {
+  const { preflight } = await import("../plugins/orchestrator/scripts/lib/preflight.mjs");
+  const { makeRepo, cleanup, write } = await import("./helpers.mjs");
+  const root = makeRepo();
+  try {
+    write(root, "notes.md", "draft\n");
+    const report = preflight(root);
+    const check = report.checks.find((entry) => entry.id === "clean_checkout");
+    assert.equal(check.ok, false);
+    assert.equal(check.warning, true);
+    assert.ok(!report.blocking.some((entry) => entry.id === "clean_checkout"));
+    assert.match(renderPreflight(report), /warn  Checkout clean — 1 uncommitted file; read and verify tasks run as is/);
+  } finally {
+    cleanup(root);
+  }
+});

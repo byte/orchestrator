@@ -29,7 +29,7 @@ import {
 } from "./runs.mjs";
 import { removeTree, SCRATCH_OWNER_FILE } from "./remove-tree.mjs";
 import { atomicWrite } from "./state.mjs";
-import { createTaskWorktree, reuseTaskWorktree, worktreeGitDir } from "./worktrees.mjs";
+import { assertLaunchable, createTaskWorktree, inPlaceCheckout, reuseTaskWorktree, worktreeGitDir } from "./worktrees.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const childScript = path.join(here, "..", "worker-child.mjs");
@@ -483,6 +483,14 @@ export function launchTaskWorker(
   lane,
   { codexCommand = ["codex"] } = {}
 ) {
+  // A write launch needs a clean checkout on the run's branch and head. Check
+  // before claiming, so a refusal leaves the task pending and spends no attempt;
+  // the launch checks again after the claim, in case the checkout changed.
+  const planned = loadRun(cwd, runId);
+  if (planned.tasks?.[taskId]?.kind === "write") {
+    assertLaunchable(cwd, planned);
+  }
+
   let dispatch;
   try {
     dispatch = claimTask(cwd, runId, taskId, lane);
@@ -507,13 +515,15 @@ export function launchTaskWorker(
     const task = run.tasks[taskId];
     const attempt = task.attempts.find((entry) => entry.id === dispatch.attemptId);
     const retry = attempt.retry ?? null;
-    worktree = retry?.worktree?.mode === "reuse"
-      ? reuseTaskWorktree(
-          cwd,
-          run,
-          task.attempts.find((entry) => entry.id === retry.worktree.attemptId)
-        )
-      : createTaskWorktree(cwd, run, task, attempt);
+    worktree = task.kind !== "write"
+      ? inPlaceCheckout(cwd, run)
+      : retry?.worktree?.mode === "reuse"
+        ? reuseTaskWorktree(
+            cwd,
+            run,
+            task.attempts.find((entry) => entry.id === retry.worktree.attemptId)
+          )
+        : createTaskWorktree(cwd, run, task, attempt);
     runner = spawnWorker(cwd, executionDir(cwd, runId, taskId, attempt.id), {
       prompt: dispatch.briefing,
       codexCommand,

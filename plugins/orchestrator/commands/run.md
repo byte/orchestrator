@@ -249,12 +249,23 @@ Select at most the run's remaining worker capacity. Launch each selected task:
 node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" run launch <run-id> <task-id> --json
 ```
 
-Each launch creates an isolated Git worktree and starts one detached `codex exec` process with the
+Each launch starts one detached `codex exec` process. A write task gets its own Git worktree; a
+read or verify task runs in the supervisor checkout itself, as it is, uncommitted and untracked
+files included, under a sandbox that cannot write it. Each process gets the
 authoritative briefing, an output schema, the task's exact resolved `--model`, its resolved effort,
 and the least sandbox needed for the task. The selected route, PID, files, worktree, and eventual
 Codex thread id are stored in run state. Launch independent ready tasks without waiting between
 them. A launch response whose `substitution` is not null ran on a different model than the plan
 named; read its notice.
+
+A write launch requires a clean checkout on the run's branch with no commits made outside the run.
+It checks before claiming the task, so a refusal leaves the task pending and spends no attempt.
+If the checkout has uncommitted work that is not the run's (`init` and preflight warn about it),
+tell the user and ask them to commit or stash it; read and verify tasks can still launch
+meanwhile. Never work around a refusal by running `codex exec` outside the run: the run then
+loses its waits, structured evidence, verdicts, and recovery. A file a worker must see has to be
+in the checkout for a read task, and committed for a write task, whose worktree contains only
+committed files.
 
 A `read` or `verify` worker cannot write the checkout, has no network, and may not ask to leave
 its sandbox (`approval_policy="never"`, and no saved "always allow" rules via `--ignore-rules`),
@@ -571,8 +582,9 @@ created, and any residual risk. Distinguish built, verified, and unverified work
 - Codex workers never self-assign global work or expand their scope. They may ask for a scope
   extension; only the supervisor (inside the lane) or the user (outside it) can grant one, and it
   is granted to that task alone.
-- Every task runs in its own isolated worktree; a warm retry continues in that task's previous
-  worktree unless integration failed on a conflict.
+- Every write task runs in its own isolated worktree; a warm retry continues in that task's
+  previous worktree unless integration failed on a conflict. Read and verify tasks run in the
+  supervisor checkout under a sandbox that cannot write it.
 - Never bypass the run state because the manual path seems faster.
 - Wait for workers with one background `run wait`, never with a loop of `run poll` calls or
   sleeps. A worker over its wall-clock limit is stopped only by your explicit `run cancel`.

@@ -353,9 +353,15 @@ Non-goals (decisions the supervisor or the user's own configuration owns, not de
 1. Lock and claim a ready task while enforcing `maxWorkers` (default 5), requiring a fully
    resolved exact model and effort, and requiring a checkpoint that covers the current plan and
    guidance revisions.
-2. Require a committed, clean supervisor checkout on the run's branch and integration head.
-3. Create `.orchestrator/local/worktrees/<run>/<task-attempt>` and a dedicated task branch, or,
-   for a warm retry, reuse the previous attempt's worktree and branch (see "Warm retries").
+2. For a write task, require a committed, clean supervisor checkout on the run's branch and
+   integration head. This is checked once before the claim, so a refusal leaves the task pending
+   with no attempt spent, and again after it.
+3. For a write task, create `.orchestrator/local/worktrees/<run>/<task-attempt>` and a dedicated
+   task branch, or, for a warm retry, reuse the previous attempt's worktree and branch (see "Warm
+   retries"). A read or verify task gets no worktree: it runs in the supervisor checkout as it is,
+   uncommitted and untracked files included, and the attempt records `inPlace`, the head, the
+   branch, and the uncommitted files at launch. Its sandbox cannot write the checkout, and
+   `run cleanup` never removes a checkout recorded as in place.
 4. Write the prompt, JSON schema, worker specification, output paths, and status path.
 5. Spawn a detached Node wrapper.
 6. The wrapper invokes:

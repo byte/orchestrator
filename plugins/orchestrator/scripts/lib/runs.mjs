@@ -1607,7 +1607,9 @@ function renderPreviousAttempt(task, attempt) {
     ? `You are continuing the Codex thread of ${previous.id}; your earlier turns are above. ` +
       "This briefing restates the assignment in full."
     : `This attempt starts a fresh Codex thread. Everything carried over from ${previous.id} is below.`;
-  const worktree = retry?.worktree?.mode === "reuse"
+  const worktree = retry?.worktree?.mode === "in_place"
+    ? "You are in the repository's checkout again; it may have changed since your earlier attempt."
+    : retry?.worktree?.mode === "reuse"
     ? "You are in the same worktree as before, with its commits and any uncommitted changes."
     : retry?.worktree?.reason === "integration_conflict"
       ? "Your previous worktree was set aside because its commits conflicted with the integrated " +
@@ -1737,7 +1739,7 @@ function renderRequiredBehavior(task) {
       : "- This task has used all its requests to the supervisor. If you cannot finish within the scope and the answers above, report a blocker.",
     "- Run the nearest meaningful checks for your assignment.",
     "- Do not claim success from inspection alone.",
-    `- ${task.kind === "write" ? "Leave your changes in your isolated worktree and do not run git commit, merge, or push: .git is read-only in your sandbox, and the orchestrator commits every change in the worktree when you finish. Report every file you changed in files_touched." : "Do not modify or commit files; this is a read-only assignment. The checkout is not writable, but you can run commands and tests: temporary files go under $TMPDIR, a private scratch directory removed when you finish."}`,
+    `- ${task.kind === "write" ? "Leave your changes in your isolated worktree and do not run git commit, merge, or push: .git is read-only in your sandbox, and the orchestrator commits every change in the worktree when you finish. Report every file you changed in files_touched." : "Do not modify or commit files; this is a read-only assignment. You are in the repository's own checkout as it is now, including uncommitted and untracked files. It is not writable, but you can run commands and tests: temporary files go under $TMPDIR, a private scratch directory removed when you finish."}`,
     "- Do not modify orchestration state. The supervisor owns integration."
   );
   return lines.join("\n");
@@ -1871,7 +1873,7 @@ You returned \`needs_input\`: ${describeInputRequest(request)}
 
 ${renderScope(task)}
 
-Continue the same assignment in the same worktree; your earlier turns are above and the assignment, constraints, and acceptance criteria are unchanged. ${remaining > 0 ? `You may ask ${remaining} more time${remaining === 1 ? "" : "s"}.` : "You have no requests left; report a blocker if you cannot finish."}
+Continue the same assignment in the same ${task.kind === "write" ? "worktree" : "checkout"}; your earlier turns are above and the assignment, constraints, and acceptance criteria are unchanged. ${remaining > 0 ? `You may ask ${remaining} more time${remaining === 1 ? "" : "s"}.` : "You have no requests left; report a blocker if you cannot finish."}
 
 ${REQUIRED_OUTPUT}`;
 }
@@ -1896,7 +1898,10 @@ function claimRetry(task) {
     reason = "the previous attempt's thread id is no longer recorded";
   }
   let worktree = { mode: "new", reason: mode === "warm" ? null : "fresh retry" };
-  if (mode === "warm") {
+  if (task.kind !== "write") {
+    // Read and verify workers run in the supervisor checkout, never a worktree.
+    worktree = { mode: "in_place", reason: null };
+  } else if (mode === "warm") {
     if (integrationConflict(previous)) {
       worktree = { mode: "new", reason: "integration_conflict" };
     } else if (previous.worktree?.path && fs.existsSync(previous.worktree.path)) {
