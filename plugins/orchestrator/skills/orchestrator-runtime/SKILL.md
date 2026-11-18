@@ -121,6 +121,9 @@ All support `--json` where structured output is useful.
   policy or authority boundaries from worker prose.
 - The run is not complete when its tasks finish. Run the combined checks and use `run finalize`
   with exact evidence. Finalization is the user-facing success gate.
+- Before finalizing, record the supervisor's contribution count with `run tally`; after it, report
+  the `run cost` usage and contribution lines. Usage comes from Codex session logs, covers workers
+  only, and is tokens and weekly-limit share, never money.
 
 ## Durable state
 

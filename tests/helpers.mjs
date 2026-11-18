@@ -11,6 +11,10 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 
 export const CLI = path.join(here, "..", "plugins", "orchestrator", "scripts", "orch.mjs");
 
+// The CLI reads worker usage from $CODEX_HOME; point it at a path that does not
+// exist unless a test sets its own, so tests never scan the developer's ~/.codex.
+const NO_CODEX_HOME = path.join(os.tmpdir(), "orch-test-no-codex-home");
+
 /** Create a throwaway git repository so tests never touch the developer's tree. */
 export function makeRepo() {
   // realpath the temp dir: on macOS /var is a symlink to /private/var, and git
@@ -55,6 +59,7 @@ export function runCli(root, args) {
   try {
     const stdout = execFileSync(process.execPath, [CLI, ...args], {
       cwd: root,
+      env: { ...process.env, CODEX_HOME: process.env.CODEX_HOME ?? NO_CODEX_HOME },
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"]
     });

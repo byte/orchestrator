@@ -3644,7 +3644,7 @@ export function recoveryReport(run) {
 export function finalizeRun(
   cwd,
   runId,
-  { verdict, summary, evidence = [] }
+  { verdict, summary, evidence = [], usage = null }
 ) {
   const id = assertId(runId, "run");
   const normalizedVerdict = String(verdict ?? "").trim().toLowerCase();
@@ -3679,8 +3679,14 @@ export function finalizeRun(
     if (branch !== run.repository.branch) {
       throw new Error(`Cannot finalize on branch ${branch}; expected ${run.repository.branch}.`);
     }
+    // A run with a write task finalizes the integrated, committed result, so
+    // uncommitted files would sit outside what its evidence covers. A run of
+    // only read and verify tasks never writes the checkout, and its workers
+    // already ran against it as it is, so the user's unrelated edits do not
+    // block it; the count is recorded instead. Branch and head drift still do.
     const dirt = changedFiles(cwd);
-    if (dirt.length) {
+    const wrote = tasks.some((task) => task.kind === "write");
+    if (dirt.length && wrote) {
       throw new Error(`The supervisor checkout must be clean before finalization: ${dirt.join(", ")}.`);
     }
     const supervisorHead = headSha(cwd);
@@ -3695,6 +3701,8 @@ export function finalizeRun(
       evidence: checks,
       planRevision: run.planRevision,
       supervisorHead,
+      ...(dirt.length ? { uncommittedFileCount: dirt.length } : {}),
+      ...(usage ? { usage } : {}),
       at: nowIso()
     };
     refreshRunStatus(run);
@@ -3734,6 +3742,48 @@ export function addCheckpoint(
     writeRun(cwd, run);
     appendEvent(cwd, id, { type: "run.checkpoint_added", checkpoint });
     return checkpoint;
+  });
+}
+
+const CONTRIBUTION_FIELDS = ["findings", "checked", "held", "corrected", "workerOnly", "supervisorOnly"];
+
+/**
+ * The supervisor's count of what the workers contributed and what it caught,
+ * replacing any earlier tally. The runtime cannot judge findings, so these are
+ * the supervisor's own counts, checked only for consistency: re-checked
+ * findings are a subset of all findings, and held plus corrected cannot exceed
+ * the re-checked ones.
+ */
+export function recordContribution(cwd, runId, values = {}) {
+  const id = assertId(runId, "run");
+  const tally = {};
+  for (const field of CONTRIBUTION_FIELDS) {
+    const raw = values[field] ?? 0;
+    const count = Number(raw);
+    if (!Number.isInteger(count) || count < 0 || String(raw).trim() === "") {
+      throw new Error(`Contribution ${field} must be a whole number of zero or more; got "${raw}".`);
+    }
+    tally[field] = count;
+  }
+  if (tally.checked > tally.findings) {
+    throw new Error(`Cannot re-check ${tally.checked} of ${tally.findings} worker findings.`);
+  }
+  if (tally.held + tally.corrected > tally.checked) {
+    throw new Error(
+      `Held (${tally.held}) plus corrected (${tally.corrected}) cannot exceed the ${tally.checked} re-checked findings.`
+    );
+  }
+  if (tally.workerOnly > tally.findings) {
+    throw new Error(`Worker-only findings (${tally.workerOnly}) cannot exceed all ${tally.findings} worker findings.`);
+  }
+  const note = String(values.note ?? "").trim();
+  const filePath = runFile(cwd, id);
+  return withFileLock(filePath, () => {
+    const run = loadRun(cwd, id);
+    run.contribution = { ...tally, ...(note ? { note } : {}), planRevision: run.planRevision, at: nowIso() };
+    writeRun(cwd, run);
+    appendEvent(cwd, id, { type: "run.contribution_recorded", contribution: run.contribution });
+    return run.contribution;
   });
 }
 

@@ -1626,14 +1626,6 @@ test("final verification refuses incomplete, dirty, and externally advanced runs
     /at least one evidence item/
   );
   write(root, "uncommitted.txt", "dirty\n");
-  assert.throws(
-    () => finalizeRun(root, "run-final-guard", {
-      verdict: "pass",
-      summary: "Dirty.",
-      evidence: ["test passed"]
-    }),
-    /must be clean/
-  );
   git(root, ["add", "uncommitted.txt"]);
   git(root, ["commit", "--quiet", "-m", "Advance outside run"]);
   assert.throws(
@@ -1644,6 +1636,36 @@ test("final verification refuses incomplete, dirty, and externally advanced runs
     }),
     /advanced outside run/
   );
+});
+
+test("a run of only read tasks finalizes on a dirty checkout and records it", () => {
+  const root = repo();
+  createRun(root, { id: "run-final-read", lane: "api", objective: "Review" });
+  replacePlan(root, "run-final-read", [
+    { id: "review", title: "Review", objective: "Inspect", kind: "read" },
+    { id: "check", title: "Check", objective: "Verify", kind: "verify" }
+  ]);
+  checkpointPlan(root, "run-final-read");
+  for (const id of ["review", "check"]) {
+    const dispatch = claimTask(root, "run-final-read", id, { constraints: [] });
+    recordTaskResult(root, "run-final-read", id, {
+      attemptId: dispatch.attemptId,
+      resultText: resultBlock({ files: "none" })
+    });
+    verifyTask(root, "run-final-read", id, { verdict: "pass", evidence: ["reviewed"] });
+  }
+  write(root, "uncommitted.txt", "the user's own work\n");
+  write(root, "seed.txt", "edited but not committed\n");
+
+  const finalized = finalizeRun(root, "run-final-read", {
+    verdict: "pass",
+    summary: "Review complete.",
+    evidence: ["findings verified"]
+  });
+  assert.equal(finalized.status, "completed");
+  assert.equal(finalized.finalization.uncommittedFileCount, 2);
+  // Finalizing touched nothing the user had not committed.
+  assert.equal(fs.readFileSync(`${root}/uncommitted.txt`, "utf8"), "the user's own work\n");
 });
 
 test("dispatch is gated on a checkpoint that covers the current plan revision", () => {

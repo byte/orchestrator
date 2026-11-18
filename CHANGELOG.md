@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.6
+
+- `run cost <run-id>` reports what a run's Codex workers used: tokens per attempt (fresh input, cached input, output) read from Codex's own session logs, and the weekly Codex limit before and after the run (account-wide). It works for both executors, and a resumed thread counts each attempt's share only. Nothing is converted to money. `run show` adds the one-line summary, and `run finalize` saves a snapshot in the finalization record.
+- `run tally <run-id>` records the supervisor's count of what the workers contributed (findings, re-checked, held, corrected, worker-only, supervisor-only); `run cost` prints it beside the automatic outcome counts. `/orchestrator:run` now records a tally before finalizing and ends its report with the usage and contribution lines.
+- A run of only read and verify tasks finalizes on a checkout with uncommitted files instead of staying in `finalizing` until the user commits or stashes unrelated work. Since 0.6.3 such a run could launch and complete on a dirty checkout but never close. Finalization records `uncommittedFileCount`; a run with a write task still requires a clean checkout, and branch and head drift are still refused.
+
 ## 0.6.5
 
 - `astra` and `sol` now route to `gpt-6.2-astra` and `gpt-6.2-sol` (both accepted at `low` and `ultra` by Codex CLI 0.169.1 on 2026-11-18). `terra` (`gpt-6.1-terra`) and `luna` (`gpt-5.6-luna`) are unchanged, as are the fallback order and the 120- and 90-minute limits.

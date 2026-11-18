@@ -530,6 +530,22 @@ function reportedBuild(root, id, extraTasks = []) {
   reportFiles(root, id, dispatch.attemptId, ["src/module.js"]);
 }
 
+test("a run with a write task still refuses to finalize on a dirty checkout", () => {
+  const root = repo();
+  const id = "run-final-write-dirty";
+  reportedBuild(root, id);
+  const integrated = runCli(root, ["run", "integrate", id, "build", "--json"]);
+  assert.equal(integrated.code, 0, integrated.stderr);
+  assert.equal(loadRun(root, id).status, "finalizing");
+  write(root, "uncommitted.txt", "dirty\n");
+  assert.throws(() => finalizeRun(root, id, { verdict: "pass", summary: "done", evidence: ["checked"] }),
+    /must be clean before finalization: uncommitted\.txt/);
+  fs.rmSync(path.join(root, "uncommitted.txt"));
+  const finalized = finalizeRun(root, id, { verdict: "pass", summary: "done", evidence: ["checked"] });
+  assert.equal(finalized.status, "completed");
+  assert.equal(finalized.finalization.uncommittedFileCount, undefined);
+});
+
 test("a pending audit event holds the run, and a torn log line does not block its publication", () => {
   const preload = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "interrupt-integration.mjs");
   const root = repo();

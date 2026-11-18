@@ -558,6 +558,20 @@ Before reporting success:
 - remove completed isolated worktrees with `run cleanup <run-id>`
 - update the ledger only with durable, confirmed facts and only when appropriate
 
+Before finalizing, record what the workers contributed. Count honestly from the reports and your
+own checks: `findings` is every distinct claim or finding the workers reported, `checked` how many
+you re-verified yourself, `held` how many of those stood, `corrected` how many you overturned or
+narrowed, `worker-only` the accepted findings you did not have from your own inspection, and
+`supervisor-only` the findings you added that no worker reported. For a write run, count review
+issues the same way. Never inflate a count to flatter the workers or yourself; a tally is replaced,
+not added to, so record it once with the final numbers:
+
+```bash
+node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" run tally <run-id> \
+  --findings <n> --checked <n> --held <n> --corrected <n> \
+  --worker-only <n> --supervisor-only <n> --note "<one line, optional>"
+```
+
 When every task is complete, the run enters `finalizing`. Record the combined supervisor gate:
 
 ```bash
@@ -568,7 +582,8 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" run finalize <run-id> \
   --json
 ```
 
-Finalization refuses a dirty checkout, the wrong branch, branch drift outside the run, incomplete
+Finalization refuses a dirty checkout when the plan has a write task (a run of only read and
+verify tasks finalizes on the user's uncommitted work without touching it), the wrong branch, branch drift outside the run, incomplete
 tasks, or missing evidence. Use `--verdict fail` when the combined checks fail, then replan or
 report the blocker. The runtime does not run the lane's definition of done for you: give `pass` only
 when it holds, and never when it fails for a reason you have not settled with the user. Only report
@@ -576,6 +591,13 @@ success after the run status is `completed`.
 
 Report the objective, task outcomes, important decisions, exact verification evidence, commits if
 created, and any residual risk. Distinguish built, verified, and unverified work.
+
+Then run `node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" run cost <run-id>` and end the report with
+its usage line and contribution lines, as printed. They are the user's answer to what the workers
+cost and what they added. Do not convert tokens to money: subscription plans are not billed per
+token, and the weekly-limit change is account-wide. Say that your own supervisor usage is not
+included. A tally is your own count, not a controlled comparison: do not claim the workers made
+the result some percentage better.
 
 ## Hard rules
 

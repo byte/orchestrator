@@ -771,11 +771,29 @@ Completing every task moves the run to `finalizing`, not `completed`. `run final
 - an explicit `pass` or `fail` verdict
 - a non-empty summary and concrete evidence
 - the original supervisor branch
-- a clean supervisor checkout
+- a clean supervisor checkout when the plan has a write task; a run of only read and verify
+  tasks finalizes on a dirty checkout and records `uncommittedFileCount`
 - the exact integration head recorded by the run
 
 A passing record is tied to the current plan revision and head. Replacing the unfinished plan
 clears prior finalization.
+
+The CLI's `run finalize` also stores a usage snapshot (`finalization.usage`) when Codex session
+logs can be read; a missing or unreadable log never blocks finalization.
+
+## Usage and contribution
+
+`lib/usage.mjs` reads worker usage from Codex's session logs
+(`$CODEX_HOME/sessions/YYYY/MM/DD/rollout-*-<thread>.jsonl`), which `codex exec` and the plugin's
+app-server both write. Each `token_count` event carries the thread's cumulative usage and the
+account's rate-limit windows. An attempt's usage is the cumulative total at its last event (up to a
+minute after it finished, never past the next attempt's start) minus the total before it started,
+so warm retries and answered questions on one thread are not double counted. It writes no run
+state; `run cost` computes it on demand. The weekly-limit change is account-wide.
+
+`run tally` stores `run.contribution`: the supervisor's own counts of worker findings, re-checked,
+held, corrected, worker-only, and supervisor-only, validated for consistency only. It is replaced,
+not accumulated, and is never a controlled comparison.
 
 ## Checkpoints
 

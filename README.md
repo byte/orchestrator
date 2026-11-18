@@ -394,6 +394,33 @@ attempts are left out unless `--include-legacy` is passed. Counts sit beside eve
 is printed for fewer than 5 samples. `run plan`, `run briefing`, and `run resume` show the table
 for the run's lane once it holds at least 5 counted attempts.
 
+### What a run cost and what the workers added
+
+```text
+orch run cost <run-id> [--json]
+orch run tally <run-id> --findings <n> --checked <n> --held <n> --corrected <n> \
+  --worker-only <n> --supervisor-only <n> [--note <text>]
+```
+
+`run cost` reads each worker's token usage from Codex's own session logs
+(`$CODEX_HOME/sessions`, default `~/.codex`), which both executors write, and prints it per
+attempt: fresh input, cached input, and output. A warm retry or answered question continues the
+same thread, so each attempt counts only the tokens used between its start and finish. When Codex
+reports the account's weekly window, it also shows the weekly Codex limit before and after the run.
+That figure is account-wide, so any other Codex use in the same window is included. Nothing is
+converted to money: subscription plans are not billed per token. An attempt whose log is missing
+is listed as not measured. The supervisor's own Claude usage is not visible to the runtime; see
+`/cost` in Claude Code. `run show` adds the same one-line summary, and `run finalize` saves a
+snapshot of it in the finalization record, so it survives if the logs are later pruned.
+
+`run tally` records the supervisor's count of what the workers contributed: worker findings, how
+many the supervisor re-checked, how many held or were corrected, findings only the workers
+produced, and findings only the supervisor added. The runtime checks only that the numbers are
+consistent. `run cost` prints them beside the automatic outcome counts (accepted first try,
+accepted after retry, failed or cancelled). A tally is the supervisor's own count, not a
+controlled comparison with Claude working alone, so it does not support a claim that the
+workers made the result some percentage better.
+
 Reject a reported write task that fails review. `--verdict pass` is refused on a write task,
 because it completes only by `run integrate`:
 
@@ -528,8 +555,9 @@ derive a purged sample again until the raw run itself is removed through a separ
 - A worker cannot widen its assigned scope or self-assign global work. It can only ask; a grant
   applies to that one task, never to the lane, and must not overlap another active task's write
   surface. Grants outside the lane require the user's approval.
-- The supervisor checkout must be clean for a write launch, integration, and finalization. Read and
-  verify workers run in it as it is but cannot write it, and cleanup never removes it.
+- The supervisor checkout must be clean for a write launch, integration, and finalizing a run that
+  has a write task. Read and verify workers run in it as it is but cannot write it, cleanup never
+  removes it, and a run of only read and verify tasks finalizes on it as it is.
 - The supervisor branch and recorded integration head must not drift outside the run.
 - Write-task reports must match the actual committed file set exactly.
 - No worker can leave its sandbox: every launch pins `approval_policy="never"` and

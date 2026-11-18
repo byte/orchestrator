@@ -20,6 +20,7 @@ import {
   purgeLearningExamples
 } from "./lib/learning.mjs";
 import { preflight } from "./lib/preflight.mjs";
+import { renderRunCost, runUsage, usageLine } from "./lib/usage.mjs";
 import { renderLanes, renderPreflight } from "./lib/render.mjs";
 import {
   addCheckpoint,
@@ -29,6 +30,7 @@ import {
   configureRunGuidance,
   createRun,
   finalizeRun,
+  recordContribution,
   integrateRunTask,
   listRuns,
   loadRun,
@@ -119,6 +121,9 @@ Usage:
   orch run inspect <run-id> <task-id> [--json]
   orch run integrate <run-id> <task-id> [--evidence <text>]... [--json]
   orch run finalize <run-id> --verdict <pass|fail> --summary <text> [--evidence <text>]... [--json]
+  orch run cost <run-id> [--json]
+      worker tokens per attempt from Codex session logs, weekly Codex limit used, and the contribution tally
+  orch run tally <run-id> --findings <n> --checked <n> --held <n> --corrected <n> --worker-only <n> --supervisor-only <n> [--note <text>] [--json]
   orch run cleanup <run-id> [task-id] [--json]
 `;
 
@@ -409,6 +414,27 @@ function renderPollUpdate(update) {
   return `${update.taskId}\t${update.status}`;
 }
 
+// Usage is read from Codex's session logs, which may be missing or unreadable;
+// that must never stop a command, so failures count as "not measured".
+function usageSnapshot(run) {
+  try {
+    const usage = runUsage(run);
+    if (!usage.measured) return null;
+    const { workers, measured, unmeasured, tokens, byModel, plan, weekly } = usage;
+    return { workers, measured, unmeasured, tokens, byModel, plan, weekly };
+  } catch {
+    return null;
+  }
+}
+
+function safeUsageLine(run) {
+  try {
+    return usageLine(runUsage(run));
+  } catch {
+    return null;
+  }
+}
+
 function renderRunSummary(run) {
   const taskCounts = Object.values(run.tasks).reduce((counts, task) => {
     counts[task.status] = (counts[task.status] ?? 0) + 1;
@@ -608,7 +634,13 @@ function commandRun(argv, cwd) {
       "note",
       "reply",
       "timeout",
-      "interval"
+      "interval",
+      "findings",
+      "checked",
+      "held",
+      "corrected",
+      "worker-only",
+      "supervisor-only"
     ]
   });
   const runId = positionals[0];
@@ -618,7 +650,41 @@ function commandRun(argv, cwd) {
 
   if (action === "show") {
     const run = loadRun(cwd, runId);
-    return options.json ? emitJson(run) : emit(renderRunSummary(run));
+    if (options.json) return emitJson(run);
+    const line = safeUsageLine(run);
+    return emit(renderRunSummary(run) + (line ? `\n- usage: ${line}` : ""));
+  }
+
+  if (action === "cost") {
+    const run = loadRun(cwd, runId);
+    const usage = runUsage(run);
+    return options.json
+      ? emitJson({ usage, contribution: run.contribution ?? null })
+      : emit(renderRunCost(run, usage));
+  }
+
+  if (action === "tally") {
+    const missing = ["findings", "checked", "held", "corrected", "worker-only", "supervisor-only"]
+      .filter((name) => options[name] === undefined);
+    if (missing.length) {
+      throw new Error(`\`orch run tally\` requires ${missing.map((name) => `--${name}`).join(", ")}; give 0 where none apply.`);
+    }
+    const contribution = recordContribution(cwd, runId, {
+      findings: options.findings,
+      checked: options.checked,
+      held: options.held,
+      corrected: options.corrected,
+      workerOnly: options["worker-only"],
+      supervisorOnly: options["supervisor-only"],
+      note: options.note
+    });
+    return options.json
+      ? emitJson(contribution)
+      : emit(
+        `Contribution recorded for ${runId}: ${contribution.findings} worker findings, ` +
+        `${contribution.checked} re-checked, ${contribution.held} held, ${contribution.corrected} corrected, ` +
+        `${contribution.workerOnly} only from workers, ${contribution.supervisorOnly} supervisor-only.`
+      );
   }
 
   if (action === "plan") {
@@ -888,7 +954,8 @@ function commandRun(argv, cwd) {
     const run = finalizeRun(cwd, runId, {
       verdict: options.verdict,
       summary: options.summary,
-      evidence: repeatedValues(options.evidence)
+      evidence: repeatedValues(options.evidence),
+      usage: usageSnapshot(loadRun(cwd, runId))
     });
     return options.json
       ? emitJson(run)
