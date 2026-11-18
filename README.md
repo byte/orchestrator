@@ -593,6 +593,14 @@ derive a purged sample again until the raw run itself is removed through a separ
 - Cancellation terminates the detached process and remains visible in durable state.
 - Dirty worktrees are never removed automatically.
 
+## Run contracts and plan checks
+
+New CLI runs freeze their lane's scope, constraints, and definition of done when created. Editing a lane later does not widen an existing run. Initial write scopes outside that boundary require the user's approval and `run plan --user-approved`; the approval is saved against the exact task scope, not the whole lane. Every task requires at least one acceptance criterion.
+
+Planning reports potentially overlapping writers. Writers with an identical positive scope pattern cannot hold that surface simultaneously: integrate the first or narrow the assignments. Approximate glob intersections remain warnings, so conservative matching does not unnecessarily serialize independent work. Read tasks can still run together.
+
+State version 7 prevents older releases from ignoring the new contract. Earlier runs retain their legacy behavior; the runtime does not manufacture historical approvals or change saved routes. The lower-level programmatic API can still create an unconfigured legacy run, but CLI creation always requires a lane.
+
 ## Development
 
 ```sh

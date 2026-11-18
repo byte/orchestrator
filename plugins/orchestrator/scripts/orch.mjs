@@ -41,6 +41,8 @@ import {
   readyTasks,
   effectiveTaskRoute,
   grantedSurfaceConflicts,
+  plannedSurfaceConflicts,
+  planWarnings,
   summarizeInputRequest,
   recordIntegrationDiagnostic,
   recordTaskResult,
@@ -103,7 +105,7 @@ Usage:
       per model and effort: attempts, first-attempt acceptance (rate only when n>=5), retries, median duration
   orch run create <lane> --objective <text> [--id <run-id>] [--max-workers <n>] [--model <auto|astra|sol|terra|luna>] [--effort <auto|level>] [--executor <cli|codex-plugin>] [--json]
   orch run show <run-id> [--json]
-  orch run plan <run-id> --plan-file <path> [--json]
+  orch run plan <run-id> --plan-file <path> [--user-approved] [--json]
   orch run ready <run-id> [--json]
   orch run briefing <run-id>
   orch run guidance <run-id> (--mode <provisional|off> [--policy-version <id>] | --rollback) [--json]
@@ -757,14 +759,15 @@ function commandRun(argv, cwd) {
     }
     const payload = JSON.parse(fs.readFileSync(options["plan-file"], "utf8"));
     const run = loadRun(cwd, runId);
-    const lane = requireLane(cwd, run.lane);
+    const lane = run.contract ?? requireLane(cwd, run.lane);
     const tasks = Array.isArray(payload) ? payload : payload.tasks;
-    const updated = replacePlan(cwd, runId, tasks, { defaultScope: lane.scope });
+    const updated = replacePlan(cwd, runId, tasks, { defaultScope: lane.scope, userApproved: Boolean(options["user-approved"]) });
+    const warnings = planWarnings(updated);
     if (options.json) {
-      return emitJson(updated);
+      return emitJson({ ...updated, warnings });
     }
     const routes = laneRouteEvidence(cwd, updated).text;
-    return emit(routes ? `${routes}\n\n${renderRunSummary(updated)}` : renderRunSummary(updated));
+    return emit([routes, renderRunSummary(updated), ...warnings.map((warning) => `Warning: ${warning}`)].filter(Boolean).join("\n\n"));
   }
 
   if (action === "ready") {
@@ -773,7 +776,7 @@ function commandRun(argv, cwd) {
     // `run launch`, so it is listed apart instead of offered for dispatch.
     const blocked = [];
     const tasks = readyTasks(run).filter((task) => {
-      const conflicts = grantedSurfaceConflicts(run, task);
+      const conflicts = [...grantedSurfaceConflicts(run, task), ...plannedSurfaceConflicts(run, task)];
       const route = effectiveTaskRoute(run, task);
       if (route.exhausted) {
         conflicts.push(`${route.model} was rejected as unavailable and no allowed model remains; re-route it`);

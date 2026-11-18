@@ -12,6 +12,7 @@ import {
 } from "./guidance.mjs";
 import { overlappingPatterns, scopeCovers } from "./glob.mjs";
 import { ledgerForBriefing } from "./ledger.mjs";
+import { getLane } from "./lanes.mjs";
 import {
   OUTCOME_SIGNALS,
   REASON_CODES,
@@ -443,6 +444,7 @@ function appendEvent(cwd, runId, event) {
 
 function writeRun(cwd, run) {
   run.version = RUN_STATE_VERSION;
+  run.contract ??= null;
   run.guidance ??= disabledGuidanceState();
   run.updatedAt = nowIso();
   atomicWrite(runFile(cwd, run.id), `${JSON.stringify(run, null, 2)}\n`);
@@ -758,6 +760,9 @@ export function createRun(
       version: RUN_STATE_VERSION,
       id: runId,
       lane: String(lane),
+      // The CLI requires a configured lane; null retains the unconfigured
+      // lower-level API used by older programmatic callers.
+      contract: getLane(cwd, lane),
       objective: body,
       status: "planning",
       workerPolicy: {
@@ -1164,7 +1169,7 @@ export function historicalTaskAssignment(run, task, attempt, claimedPlanRevision
     : null;
 }
 
-export function replacePlan(cwd, runId, rawTasks, { defaultScope = [] } = {}) {
+export function replacePlan(cwd, runId, rawTasks, { defaultScope = [], userApproved = false } = {}) {
   if (!Array.isArray(rawTasks) || !rawTasks.length) {
     throw new Error("A run plan requires a non-empty tasks array.");
   }
@@ -1186,7 +1191,7 @@ export function replacePlan(cwd, runId, rawTasks, { defaultScope = [] } = {}) {
       const persisted = raw && typeof raw === "object"
         ? run.tasks[String(raw.id ?? "").trim()]
         : null;
-      const task = normalizeTask(raw, defaultScope, run.workerPolicy, {
+      const task = normalizeTask(raw, run.contract?.scope ?? defaultScope, run.workerPolicy, {
         allowLegacy: legacySlugs(persisted?.model)
       });
       if (tasks[task.id]) {
@@ -1211,6 +1216,7 @@ export function replacePlan(cwd, runId, rawTasks, { defaultScope = [] } = {}) {
           // Scope the supervisor granted belongs to the task and survives a
           // revision of its route, like a pending retry.
           ...(existing.scopeGrants?.length ? { scopeGrants: existing.scopeGrants } : {}),
+          ...(existing.scopeApproval ? { scopeApproval: existing.scopeApproval } : {}),
           createdAt: existing.createdAt
         };
       } else {
@@ -1224,6 +1230,13 @@ export function replacePlan(cwd, runId, rawTasks, { defaultScope = [] } = {}) {
     }
     validateGraph(tasks);
     validateLunaLeaves(run, tasks);
+    for (const task of Object.values(tasks)) {
+      if (!run.contract || task.status === "completed") continue;
+      if (task.kind === "write" && !taskInsideLane(run, task) && userApproved) {
+        task.scopeApproval = { scope: [...task.scope], userApproved: true, at: nowIso() };
+      }
+      assertTaskAuthority(run, task);
+    }
     const retired = Object.values(run.tasks).filter((task) => !tasks[task.id]);
     if (retired.length) {
       run.retiredTasks = [
@@ -1265,6 +1278,47 @@ export function readyTasks(run) {
         task.dependsOn.every((dependency) => completed.has(dependency))
     )
     .sort((left, right) => left.id.localeCompare(right.id));
+}
+
+function taskInsideLane(run, task) {
+  return JSON.stringify(task.scope) === JSON.stringify(run.contract.scope) ||
+    task.scope.filter((pattern) => !pattern.startsWith("!"))
+      .every((pattern) => scopeCovers(run.contract.scope, pattern));
+}
+
+function assertTaskAuthority(run, task) {
+  if (!run.contract) return;
+  if (!task.acceptance.length) {
+    throw new Error(`Task "${task.id}" requires at least one acceptance criterion.`);
+  }
+  if (task.kind !== "write" || taskInsideLane(run, task)) return;
+  const approval = task.scopeApproval;
+  if (!approval?.userApproved || JSON.stringify(approval.scope) !== JSON.stringify(task.scope)) {
+    throw new Error(`Task "${task.id}" scope is outside lane "${run.lane}". Narrow it or ask the user, then repeat run plan with --user-approved.`);
+  }
+}
+
+/** Definite shared ownership is serialized; approximate glob intersections are warnings. */
+export function plannedSurfaceConflicts(run, task) {
+  if (task.kind !== "write") return [];
+  return Object.values(run.tasks).filter((other) =>
+    other.id !== task.id && other.kind === "write" && WRITE_SURFACE_TASK_STATUSES.has(other.status) &&
+    task.scope.some((pattern) => !pattern.startsWith("!") && other.scope.includes(pattern))
+  ).map((other) => `planned write scope is already owned by ${other.status} task "${other.id}"; wait for integration or narrow the scopes`);
+}
+
+export function planWarnings(run) {
+  const writers = Object.values(run.tasks).filter((task) => task.kind === "write");
+  const warnings = [];
+  for (let i = 0; i < writers.length; i += 1) {
+    for (const other of writers.slice(i + 1)) {
+      const task = writers[i];
+      if (task.scope.some((pattern) => !pattern.startsWith("!") && overlappingPatterns(pattern, other.scope).length)) {
+        warnings.push(`${task.id} and ${other.id} may share write paths; sequence them or narrow their scopes`);
+      }
+    }
+  }
+  return warnings;
 }
 
 function refreshRunStatus(run) {
@@ -1809,6 +1863,7 @@ Return one JSON object matching the supplied output schema:
 `;
 
 export function renderWorkerBriefing(cwd, run, task, lane, launchRoute = null) {
+  lane = run.contract ?? lane;
   // The header names the model the attempt actually launches on, which differs
   // from the saved route only after a recorded substitution.
   const route = launchRoute ?? resolveTaskWorker(run, task);
@@ -1990,6 +2045,7 @@ export function claimTask(cwd, runId, taskId, lane) {
   return withFileLock(filePath, () => {
     const run = loadRun(cwd, id);
     const task = requireTask(run, taskId);
+    assertTaskAuthority(run, task);
     const ready = new Set(readyTasks(run).map((entry) => entry.id));
     if (!ready.has(task.id)) {
       throw new Error(`Task "${task.id}" is not ready.`);
@@ -2006,7 +2062,7 @@ export function claimTask(cwd, runId, taskId, lane) {
           `  orch run checkpoint ${id} --summary "<plan and why>" --decision "<decision>" --risk "<risk>" --next "<next action>"`
       );
     }
-    const grantConflicts = grantedSurfaceConflicts(run, task);
+    const grantConflicts = [...grantedSurfaceConflicts(run, task), ...plannedSurfaceConflicts(run, task)];
     if (grantConflicts.length) {
       throw new Error(
         `Task "${task.id}" cannot launch yet: ${grantConflicts.join("; ")}. A scope granted through ` +
@@ -2493,7 +2549,7 @@ export function answerTask(
             "surface; deny the request, narrow the grant, or wait until that task is integrated or cancelled."
         );
       }
-      const laneScope = lane?.scope ?? [];
+      const laneScope = (run.contract ?? lane)?.scope ?? [];
       const outside = patterns.filter((pattern) => !scopeCovers(laneScope, pattern));
       insideLane = outside.length === 0;
       if (!insideLane && !userApproved) {
@@ -3930,6 +3986,7 @@ function renderList(items) {
  * this module never reads other runs.
  */
 export function renderSupervisorBriefing(cwd, run, lane, { routeEvidence = null } = {}) {
+  lane = run.contract ?? lane;
   const ledger = ledgerForBriefing(cwd);
   const checkpoint = checkpointStatus(run);
   const latest = checkpoint.latest;

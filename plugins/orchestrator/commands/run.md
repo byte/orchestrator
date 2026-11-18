@@ -219,6 +219,8 @@ This is not optional bookkeeping. The run record preserves what happened; only t
 preserves *why*, and it is what you get back after compaction. `run launch` refuses to dispatch
 until a checkpoint covers the current plan and provisional-guidance revisions.
 
+New runs use their frozen lane contract, not later edits to the lane. Every task needs acceptance criteria. If planning refuses an initial scope outside the lane, narrow the task or ask the user; only after approval repeat `run plan --user-approved`. Do not approve it yourself. Read plan warnings before dispatch: identical planned write surfaces are serialized, and approximate glob intersections require your judgment about ownership.
+
 ### Optional provisional guidance
 
 Guidance is off by default. If the local learning store contains a supervisor- or user-reviewed

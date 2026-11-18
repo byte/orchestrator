@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Freeze configured lane contracts on new runs. Initial out-of-lane tasks require recorded owner approval, acceptance criteria are required, and identical planned writer surfaces are serialized. Plan output diagnoses potential overlap. State version 7 keeps older releases from ignoring the new contract while preserving legacy runs.
+
 ## 0.6.7
 
 - `/orchestrator:resume` with no run id finds the open run itself, or asks which one when there are several, instead of requiring the user to look the id up.

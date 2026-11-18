@@ -73,7 +73,7 @@ test("new runs default to enforced supervisor routing and start in planning", ()
   assert.equal(run.workerPolicy.reasoningEffort, null);
   assert.equal(run.workerPolicy.routingMode, "auto");
   assert.equal(run.workerPolicy.maxWorkers, 5);
-  assert.equal(run.version, 6);
+  assert.equal(run.version, 7);
   assert.equal(run.guidance.mode, "disabled");
   assert.equal(run.guidance.revision, 0);
   assert.deepEqual(run.guidance.policies, []);
@@ -690,7 +690,7 @@ test("a version-5 run routed to gpt-5.6-sol loads, resumes, and retries on gpt-5
   assert.equal(first.model, "gpt-5.6-sol");
   assert.equal(first.substitution, null);
   assert.match(first.briefing, /You are one gpt-5\.6-sol worker/);
-  assert.equal(loadRun(root, "run-v5-legacy").version, 6);
+  assert.equal(loadRun(root, "run-v5-legacy").version, 7);
   assert.equal(recoveryReport(loadRun(root, "run-v5-legacy"))[0].model, "gpt-5.6-sol");
   assert.match(
     renderSupervisorBriefing(root, loadRun(root, "run-v5-legacy"), { constraints: [] }),
@@ -771,9 +771,9 @@ test("a run written by a newer orchestrator is refused", () => {
   createRun(root, { id: "run-future", lane: "api", objective: "Future" });
   const file = runFile(root, "run-future");
   const state = JSON.parse(fs.readFileSync(file, "utf8"));
-  state.version = 7;
+  state.version = 8;
   fs.writeFileSync(file, `${JSON.stringify(state, null, 2)}\n`);
-  assert.throws(() => loadRun(root, "run-future"), /state version 7, this build supports 6/);
+  assert.throws(() => loadRun(root, "run-future"), /state version 8, this build supports 7/);
 });
 
 test("automatic routing rejects unresolved tasks and explicit run pins reject conflicts", () => {
@@ -902,7 +902,7 @@ test("tasks from pre-routing state inherit the run default and can be replanned 
 
   const replanned = replacePlan(root, "run-legacy", [definition]);
   assert.equal(replanned.tasks.legacy.status, "completed");
-  assert.equal(replanned.version, 6);
+  assert.equal(replanned.version, 7);
   assert.equal(replanned.guidance.mode, "disabled");
 
   const terminalState = JSON.parse(fs.readFileSync(file, "utf8"));
@@ -948,7 +948,7 @@ test("version-4 runs without guidance remain readable and upgrade on mutation", 
   assert.equal(checkpointStatus({ ...loaded, guidance: { revision: 1 } }).current, false);
   addCheckpoint(root, "run-v4-guidance", { summary: "Upgrade safely" });
   const upgraded = loadRun(root, "run-v4-guidance");
-  assert.equal(upgraded.version, 6);
+  assert.equal(upgraded.version, 7);
   assert.equal(upgraded.guidance.mode, "disabled");
   const future = JSON.parse(fs.readFileSync(file, "utf8"));
   future.guidance.schemaVersion = 2;
