@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.5
+
+- `astra` and `sol` now route to `gpt-6.2-astra` and `gpt-6.2-sol` (both accepted at `low` and `ultra` by Codex CLI 0.169.1 on 2026-11-18). `terra` (`gpt-6.1-terra`) and `luna` (`gpt-5.6-luna`) are unchanged, as are the fallback order and the 120- and 90-minute limits.
+- `gpt-6-astra` and `gpt-6.1-sol` are retired like the 0.5.x slugs: runs that saved them keep them on resume and retry, new plans and pins cannot name them, they are off the fallback ladder, and `run routes` leaves their attempts out unless `--include-legacy`. The refusal message names the release that retired a slug and the model its tier runs now. `gpt-6.2` is rejected as a family name.
+
 ## 0.6.4
 
 - Workers can run through the OpenAI Codex plugin for Claude Code (`codex@openai-codex`) instead of the Codex CLI: `run create --executor codex-plugin` (or `/orchestrator:run ... --executor codex-plugin`). The wrapper uses only the plugin's public job commands (`task --background`, `status`, `result`, `cancel`), so a cancelled worker interrupts its turn rather than leaving it running in the plugin's shared broker, and the jobs show in `/codex:status`. Routing, worktrees, review, integration, and recovery are unchanged. The default stays `cli`.

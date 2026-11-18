@@ -62,6 +62,7 @@ recovered state. Do not create a replacement run. In particular:
 The Claude model running this main thread remains the planner, scheduler, reviewer, replanner,
 integrator, and user-facing manager, whether that is Claude Opus 5.5 or Claude Fable 5.2. Codex
 workers remain bounded executors routed only to the exact saved model and effort for each attempt:
-`gpt-6-astra`, `gpt-6.1-sol`, `gpt-6.1-terra`, or `gpt-5.6-luna`, or, for a run saved by 0.5.x,
-its persisted `gpt-5.6-sol` or `gpt-5.6-terra` slug. The only exception is the recorded fallback
+`gpt-6.2-astra`, `gpt-6.2-sol`, `gpt-6.1-terra`, or `gpt-5.6-luna`, or, for a run saved by an
+earlier release, its persisted retired slug (`gpt-5.6-sol` or `gpt-5.6-terra` from 0.5.x,
+`gpt-6-astra` or `gpt-6.1-sol` from 0.6.0–0.6.4). The only exception is the recorded fallback
 the runtime makes when Codex rejects a model as unavailable; it is never silent.

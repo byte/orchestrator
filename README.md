@@ -4,7 +4,7 @@ A Claude Code supervisor for a pool of Codex workers.
 
 `orchestrator` keeps Claude in the main thread as planner, scheduler, reviewer, replanner,
 integrator, and user-facing manager. Bounded execution tasks run in parallel through detached
-Codex CLI processes routed to `gpt-6-astra`, `gpt-6.1-sol`, `gpt-6.1-terra`, or `gpt-5.6-luna`.
+Codex CLI processes routed to `gpt-6.2-astra`, `gpt-6.2-sol`, `gpt-6.1-terra`, or `gpt-5.6-luna`.
 Durable run state, checkpoints, evidence, and project memory let the supervisor recover after
 context compaction, interruption, or a new Claude Code session.
 
@@ -167,8 +167,8 @@ route actually achieved in this repository:
 
 | Alias | Exact slug | Use it for |
 | --- | --- | --- |
-| `astra` | `gpt-6-astra` | Work where a wrong result is expensive or hard to catch, and deep verification |
-| `sol` | `gpt-6.1-sol` | The default for anything non-trivial: implementation, debugging, architecture |
+| `astra` | `gpt-6.2-astra` | Work where a wrong result is expensive or hard to catch, and deep verification |
+| `sol` | `gpt-6.2-sol` | The default for anything non-trivial: implementation, debugging, architecture |
 | `terra` | `gpt-6.1-terra` | Well-bounded everyday coding and review |
 | `luna` | `gpt-5.6-luna` | Last resort: mechanical work whose checks catch a bad result immediately |
 
@@ -224,10 +224,20 @@ Resume the same manager after interruption or compaction:
 This polls workers first and reconstructs the supervisor briefing from disk. It does not create a
 replacement run or rely on conversational memory.
 
+### Upgrading to 0.6.5
+
+- `astra` and `sol` now resolve to `gpt-6.2-astra` and `gpt-6.2-sol`; `terra` and `luna` are
+  unchanged. New plans and pins cannot name `gpt-6-astra` or `gpt-6.1-sol`.
+- Runs saved earlier, including in-flight ones, keep their persisted `gpt-6-astra` or
+  `gpt-6.1-sol` slugs on resume and retry, as 0.5.x runs keep theirs. Those slugs are off the
+  fallback ladder, so if Codex later rejects one, re-route the task with `run plan`.
+- `run routes` reports attempts on the retired slugs separately; pass `--include-legacy` to count
+  them.
+
 ### Upgrading from 0.5.x
 
-- The aliases `sol` and `terra` now resolve to `gpt-6.1-sol` and `gpt-6.1-terra`, not the GPT-5.6
-  models. `astra` (`gpt-6-astra`) is new. The bare `gpt-5.6` alias is gone, and family names such
+- The aliases `sol` and `terra` now resolve to `gpt-6.2-sol` and `gpt-6.1-terra`, not the GPT-5.6
+  models. `astra` (`gpt-6.2-astra`) is new. The bare `gpt-5.6` alias is gone, and family names such
   as `gpt-6` or `gpt-6.1` are rejected because they do not name a tier.
 - Runs saved by 0.5.x, including in-flight ones, keep their persisted `gpt-5.6-sol` or
   `gpt-5.6-terra` slugs on resume and retry. New plans cannot select those slugs. Any change to an
@@ -509,8 +519,9 @@ derive a purged sample again until the raw run itself is removed through a separ
 
 ## Safety invariants
 
-- Workers use only `gpt-6-astra`, `gpt-6.1-sol`, `gpt-6.1-terra`, or `gpt-5.6-luna` (plus the
-  persisted `gpt-5.6-sol` or `gpt-5.6-terra` slugs of runs saved by 0.5.x); each resolved model
+- Workers use only `gpt-6.2-astra`, `gpt-6.2-sol`, `gpt-6.1-terra`, or `gpt-5.6-luna` (plus the
+  persisted retired slugs of runs saved by an earlier release: `gpt-5.6-sol`, `gpt-5.6-terra`,
+  `gpt-6-astra`, `gpt-6.1-sol`); each resolved model
   and effort is persisted before launch, and substitution is never silent.
 - Automatic routing is a plan-time supervisor decision, not a hidden runtime fallback. Every
   unpinned task must include an exact model, effort, and routing reason before dispatch.

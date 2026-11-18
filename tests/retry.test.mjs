@@ -351,7 +351,7 @@ test("a warm retry resumes the thread with explicit model, effort, and sandbox i
   assert.ok(at("resume") > 0);
   assert.ok(at("-C") < at("resume") && argv[at("-C") + 1] === first.worktree.path);
   assert.ok(at("--sandbox") < at("resume") && argv[at("--sandbox") + 1] === "workspace-write");
-  assert.ok(at("--model") > at("resume") && argv[at("--model") + 1] === "gpt-6.1-sol");
+  assert.ok(at("--model") > at("resume") && argv[at("--model") + 1] === "gpt-6.2-sol");
   assert.equal(configValue(argv, "model_reasoning_effort"), 'model_reasoning_effort="high"');
   assertLockedDown(argv);
   assert.deepEqual(argv.slice(-2), [threadId, "-"]);
@@ -454,24 +454,24 @@ test("a warm retry rejected for an unavailable model relaunches warm on the fall
   verifyTask(root, "run-warm-substitute", "work", { verdict: "fail", evidence: ["missed a case"] });
   retryTask(root, "run-warm-substitute", "work", { note: "Cover the missing case." });
   launchTaskWorker(root, "run-warm-substitute", "work", lane, {
-    codexCommand: [process.execPath, unavailableFixture, "--unavailable=gpt-6-astra"]
+    codexCommand: [process.execPath, unavailableFixture, "--unavailable=gpt-6.2-astra"]
   });
   ({ task } = await settle(root, "run-warm-substitute"));
   assert.equal(task.status, "reported");
   const [, rejected, relaunched] = task.attempts;
-  assert.equal(rejected.model, "gpt-6-astra");
+  assert.equal(rejected.model, "gpt-6.2-astra");
   assert.equal(rejected.resumedFromAttemptId, "work-attempt-1");
   assert.ok(rejected.modelUnavailable);
-  assert.equal(relaunched.model, "gpt-6.1-sol");
-  assert.equal(relaunched.requestedModel, "gpt-6-astra");
+  assert.equal(relaunched.model, "gpt-6.2-sol");
+  assert.equal(relaunched.requestedModel, "gpt-6.2-astra");
   assert.equal(relaunched.resumedFromAttemptId, "work-attempt-1");
   assert.equal(relaunched.retry.resumeThreadId, threadId);
   assert.equal(relaunched.retry.note, "Cover the missing case.");
   const spec = JSON.parse(fs.readFileSync(relaunched.runner.specFile, "utf8"));
   assert.equal(spec.resumeThreadId, threadId);
-  assert.equal(spec.model, "gpt-6.1-sol");
+  assert.equal(spec.model, "gpt-6.2-sol");
   assert.equal(spec.reasoningEffort, "high");
-  assert.match(fs.readFileSync(relaunched.runner.promptFile, "utf8"), /You are one gpt-6\.1-sol worker/);
+  assert.match(fs.readFileSync(relaunched.runner.promptFile, "utf8"), /You are one gpt-6\.2-sol worker/);
 
   verifyTask(root, "run-warm-substitute", "work", { verdict: "pass", evidence: ["case covered"] });
   collectLearningExamples(root, { runIds: ["run-warm-substitute"] });

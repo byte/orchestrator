@@ -16,9 +16,9 @@ All support `--json` where structured output is useful.
 - Everything here runs **inline in the main thread**. Never fork a general-purpose subagent
   to plan, manage, or evaluate a pool run. The main thread's existing context is part of the
   supervisor, and the supervisor is whichever Claude model owns the session (Opus or Fable).
-- Use `run launch`; it starts detached Codex CLI workers on the task's saved `gpt-6-astra`,
-  `gpt-6.1-sol`, `gpt-6.1-terra`, or `gpt-5.6-luna` route (or a 0.5.x run's persisted
-  `gpt-5.6-sol`/`gpt-5.6-terra` slug) with the saved effort, output schema, and least sandbox; a
+- Use `run launch`; it starts detached Codex CLI workers on the task's saved `gpt-6.2-astra`,
+  `gpt-6.2-sol`, `gpt-6.1-terra`, or `gpt-5.6-luna` route (or an older run's persisted retired
+  slug: `gpt-5.6-sol`/`gpt-5.6-terra` from 0.5.x, `gpt-6-astra`/`gpt-6.1-sol` from 0.6.0–0.6.4) with the saved effort, output schema, and least sandbox; a
   write task gets an isolated worktree and needs a clean checkout to launch, while read and verify
   tasks run in the checkout as it is. Never substitute a route yourself during recovery or retry.
 - Read and verify workers cannot write the checkout, have no network, and may not request an
@@ -84,8 +84,8 @@ All support `--json` where structured output is useful.
   table over local run state of finished attempts per actual model and effort, with first-attempt
   acceptance, retries, substitutes, and median duration. Attempts count for the model they ran
   on; a launch Codex rejected as unavailable counts for neither model; answered `needs_input`
-  rounds are part of their attempt; retired `gpt-5.6-sol`/`gpt-5.6-terra` attempts are excluded
-  unless `--include-legacy`. No rate is printed below 5 samples. `run plan`, `run briefing`, and
+  rounds are part of their attempt; attempts on retired slugs are excluded unless
+  `--include-legacy`. No rate is printed below 5 samples. `run plan`, `run briefing`, and
   `run resume` show the lane's table once it has at least 5 counted attempts. It is evidence, not
   a rule; cite it in `routingReason` when it changed a route. It never reads the learning store.
 - New runs default to 5 concurrent workers (`run create --max-workers <n>`). Size tasks by

@@ -24,7 +24,7 @@ import { localDir } from "./state.mjs";
  * - "First attempt" is the first attempt of a task that reached a worker. Every
  *   later counted attempt of that task, warm or cold, is a retry. When that first
  *   attempt was cancelled or is still open, the task gives no first-attempt sample.
- * - Attempts on retired 0.5.x slugs are excluded unless `includeLegacy` is set.
+ * - Attempts on retired slugs (LEGACY_WORKER_MODELS) are excluded unless `includeLegacy` is set.
  */
 
 /** Below this many samples a rate is withheld; only the counts are shown. */
@@ -262,7 +262,7 @@ function excludedLines(evidence) {
   }
   if (evidence.excluded.legacy) {
     lines.push(
-      `attempts on retired gpt-5.6-sol / gpt-5.6-terra slugs: ${evidence.excluded.legacy} ` +
+      `attempts on retired slugs (${Object.keys(LEGACY_WORKER_MODELS).join(", ")}): ${evidence.excluded.legacy} ` +
         "(pass --include-legacy to count them)"
     );
   }

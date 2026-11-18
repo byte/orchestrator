@@ -32,7 +32,7 @@ test("release metadata stays synchronized", () => {
   const packageManifest = json("package.json");
   const pluginManifest = json("plugins/orchestrator/.claude-plugin/plugin.json");
   const marketplace = json(".claude-plugin/marketplace.json");
-  assert.equal(packageManifest.version, "0.6.4");
+  assert.equal(packageManifest.version, "0.6.5");
   assert.equal(pluginManifest.version, packageManifest.version);
   assert.equal(marketplace.metadata.version, packageManifest.version);
   assert.equal(marketplace.plugins[0].version, packageManifest.version);
@@ -42,7 +42,7 @@ test("release documentation describes the supervisor pool and recovery surface",
   const readme = fs.readFileSync(path.join(root, "README.md"), "utf8");
   assert.match(readme, /Claude Opus and Claude\s+Fable are both supported/);
   assert.match(readme, /Nothing in the plugin selects or switches the supervising model/);
-  for (const slug of ["gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-5.6-luna"]) {
+  for (const slug of ["gpt-6.2-astra", "gpt-6.2-sol", "gpt-6.1-terra", "gpt-5.6-luna"]) {
     assert.match(readme, new RegExp(slug.replaceAll(".", "\\.")));
   }
   assert.match(readme, /Claude Opus 5\.5 and Claude Fable 5\.2/);
@@ -61,8 +61,8 @@ test("the 0.6.0 release notes and README describe the migration and current retr
   const readme = fs.readFileSync(path.join(root, "README.md"), "utf8");
   const changelog = fs.readFileSync(path.join(root, "CHANGELOG.md"), "utf8");
   assert.match(readme, /### Upgrading from 0\.5\.x/);
-  assert.match(readme, /`sol` and `terra` now resolve to `gpt-6\.1-sol` and `gpt-6\.1-terra`/);
-  assert.match(readme, /`astra` \(`gpt-6-astra`\) is new/);
+  assert.match(readme, /`sol` and `terra` now resolve to `gpt-6\.2-sol` and `gpt-6\.1-terra`/);
+  assert.match(readme, /`astra` \(`gpt-6.2-astra`\) is new/);
   assert.match(readme, /Retries resume the previous attempt's Codex thread by default/);
   assert.doesNotMatch(readme, /retries currently start a fresh/);
   assert.match(readme, /orch run routes/);

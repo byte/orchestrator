@@ -8,7 +8,7 @@ import fs from "node:fs";
 // like the normal fake worker.
 const args = process.argv.slice(2);
 const unavailable = new Set(
-  (args.find((arg) => arg.startsWith("--unavailable="))?.split("=")[1] ?? "gpt-6-astra")
+  (args.find((arg) => arg.startsWith("--unavailable="))?.split("=")[1] ?? "gpt-6.2-astra")
     .split(",")
     .filter(Boolean)
 );

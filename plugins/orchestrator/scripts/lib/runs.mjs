@@ -33,18 +33,19 @@ export const DEFAULT_REASONING_EFFORT = null;
 export const DEFAULT_ROUTING_MODE = "auto";
 export const DEFAULT_MAX_WORKERS = 5;
 // Every effort below was accepted by every model in a real `codex exec` probe
-// against Codex CLI 0.169.0 on 2026-11-15; see docs/architecture.md.
+// against Codex CLI 0.169.0 on 2026-11-15, and by gpt-6.2-astra and gpt-6.2-sol
+// against Codex CLI 0.169.1 on 2026-11-18; see docs/architecture.md.
 const ALL_REASONING_EFFORTS = Object.freeze(["low", "medium", "high", "xhigh", "max", "ultra"]);
 
 // The current roster. Aliases are tier names only: a bare family name such as
 // `gpt-6` or `gpt-6.1` must never pick a tier on the supervisor's behalf.
 export const WORKER_MODELS = Object.freeze({
-  "gpt-6-astra": Object.freeze({
-    aliases: Object.freeze(["astra", "gpt-6-astra"]),
+  "gpt-6.2-astra": Object.freeze({
+    aliases: Object.freeze(["astra", "gpt-6.2-astra"]),
     efforts: ALL_REASONING_EFFORTS
   }),
-  "gpt-6.1-sol": Object.freeze({
-    aliases: Object.freeze(["sol", "gpt-6.1-sol"]),
+  "gpt-6.2-sol": Object.freeze({
+    aliases: Object.freeze(["sol", "gpt-6.2-sol"]),
     efforts: ALL_REASONING_EFFORTS
   }),
   "gpt-6.1-terra": Object.freeze({
@@ -57,20 +58,22 @@ export const WORKER_MODELS = Object.freeze({
   })
 });
 
-// Exact slugs that runs saved by 0.5.x may already route to. They stay valid for
-// loading, resuming, and retrying those runs on the slug they were saved with,
-// and are never accepted when a new plan or run pin is written.
+// Retired exact slugs that runs saved by an earlier release may already route to.
+// They stay valid for loading, resuming, and retrying those runs on the slug they
+// were saved with, and are never accepted when a new plan or run pin is written.
 export const LEGACY_WORKER_MODELS = Object.freeze({
-  "gpt-5.6-sol": Object.freeze({ efforts: ALL_REASONING_EFFORTS }),
-  "gpt-5.6-terra": Object.freeze({ efforts: ALL_REASONING_EFFORTS })
+  "gpt-5.6-sol": Object.freeze({ efforts: ALL_REASONING_EFFORTS, retiredIn: "0.6.0", tier: "sol" }),
+  "gpt-5.6-terra": Object.freeze({ efforts: ALL_REASONING_EFFORTS, retiredIn: "0.6.0", tier: "terra" }),
+  "gpt-6-astra": Object.freeze({ efforts: ALL_REASONING_EFFORTS, retiredIn: "0.6.5", tier: "astra" }),
+  "gpt-6.1-sol": Object.freeze({ efforts: ALL_REASONING_EFFORTS, retiredIn: "0.6.5", tier: "sol" })
 });
 
 // When Codex rejects a model as unavailable to the account, a launch walks down
-// this ladder keeping the effort. Legacy slugs are deliberately not on it: a
-// 0.5.x run keeps its exact saved slug rather than silently changing generation.
+// this ladder keeping the effort. Legacy slugs are deliberately not on it: a run
+// saved on a retired slug keeps it rather than silently changing generation.
 export const MODEL_FALLBACK_LADDER = Object.freeze([
-  "gpt-6-astra",
-  "gpt-6.1-sol",
+  "gpt-6.2-astra",
+  "gpt-6.2-sol",
   "gpt-6.1-terra",
   "gpt-5.6-luna"
 ]);
@@ -79,8 +82,10 @@ export const MODEL_FALLBACK_LADDER = Object.freeze([
 // runs on when the plan sets no `timeoutMinutes`. Higher tiers get longer: they
 // take the hardest work and the highest efforts. Exceeding a limit is reported by
 // `run poll` and `run wait`, never enforced; stopping a worker stays a supervisor
-// decision through `run cancel`. Legacy 0.5.x slugs take their tier's default.
+// decision through `run cancel`. Retired slugs take their tier's default.
 export const DEFAULT_TASK_TIMEOUT_MINUTES = Object.freeze({
+  "gpt-6.2-astra": 120,
+  "gpt-6.2-sol": 90,
   "gpt-6-astra": 120,
   "gpt-6.1-sol": 90,
   "gpt-6.1-terra": 60,
@@ -93,7 +98,7 @@ const MAX_TASK_TIMEOUT_MINUTES = 24 * 60;
 
 const WORKER_ALIASES = "astra, sol, terra, luna";
 const WORKER_SLUGS = Object.keys(WORKER_MODELS).join(", ");
-const FAMILY_NAMES = new Set(["gpt-6", "gpt-6.1", "gpt-5.6"]);
+const FAMILY_NAMES = new Set(["gpt-6", "gpt-6.1", "gpt-6.2", "gpt-5.6"]);
 const LUNA_MODEL = "gpt-5.6-luna";
 
 const RUN_ID_PATTERN = /^[a-z0-9][a-z0-9._-]*$/;
@@ -494,8 +499,8 @@ function positiveInteger(value, label, fallback) {
 /**
  * Resolve an alias or exact slug to an exact current-roster slug. `allowLegacy`
  * lists the legacy slugs this call may accept: only values already persisted by
- * a 0.5.x run, so legacy routes survive resume and retry but never enter a new
- * plan.
+ * a run saved before the slug was retired, so legacy routes survive resume and
+ * retry but never enter a new plan.
  */
 export function normalizeWorkerModel(value, { allowLegacy = [] } = {}) {
   const requested = String(value ?? "").trim().toLowerCase();
@@ -508,9 +513,11 @@ export function normalizeWorkerModel(value, { allowLegacy = [] } = {}) {
     if (allowLegacy.includes(requested)) {
       return requested;
     }
+    const legacy = LEGACY_WORKER_MODELS[requested];
+    const current = Object.keys(WORKER_MODELS).find((model) => WORKER_MODELS[model].aliases.includes(legacy.tier));
     throw new Error(
-      `Worker model "${value}" belongs to the retired GPT-5.6 Sol/Terra roster. It remains valid ` +
-        "only for runs saved by orchestrator 0.5.x, which keep their exact slug on resume and retry. " +
+      `Worker model "${value}" was retired in orchestrator ${legacy.retiredIn}; ${legacy.tier} now runs ${current}. ` +
+        "It remains valid only for runs saved before then, which keep their exact slug on resume and retry. " +
         `Route new work to one of: ${WORKER_ALIASES} (exact slugs: ${WORKER_SLUGS}).`
     );
   }
@@ -555,7 +562,7 @@ function validateWorkerRoute(model, reasoningEffort, label = "Worker") {
 
 /**
  * The route the supervisor saved (or the run pinned). This is persisted state, so
- * a legacy slug saved by 0.5.x resolves to itself.
+ * a retired slug saved by an earlier release resolves to itself.
  */
 export function resolveTaskWorker(run, task) {
   const selectedModel = task.model ?? run.workerPolicy.model;
@@ -609,7 +616,7 @@ export function effectiveTaskRoute(run, task) {
   }
   const start = MODEL_FALLBACK_LADDER.indexOf(requested.model);
   if (start === -1) {
-    // A model off the ladder (a 0.5.x run's legacy slug) has nothing below it to
+    // A model off the ladder (a retired slug an older run saved) has nothing below it to
     // fall back to, and launching the model Codex already rejected would only be
     // rejected again.
     return { ...requested, requestedModel: requested.model, substitution: null, exhausted: true, offLadder: true };
@@ -1135,7 +1142,7 @@ export function replacePlan(cwd, runId, rawTasks, { defaultScope = [] } = {}) {
     }
     const tasks = {};
     for (const raw of rawTasks) {
-      // A task persisted by 0.5.x on a legacy slug may be resubmitted on that
+      // A task persisted on a retired slug may be resubmitted on that
       // exact slug, so completed and in-flight legacy work survives a revision.
       const persisted = raw && typeof raw === "object"
         ? run.tasks[String(raw.id ?? "").trim()]

@@ -23,8 +23,8 @@ until the supervisor answers (see "Worker requests").
 
 New runs auto-route by default. During planning, the Claude supervisor assigns each task a model,
 effort, and routing reason. The aliases `astra`, `sol`, `terra`, and `luna` normalize to the exact
-slugs `gpt-6-astra`, `gpt-6.1-sol`, `gpt-6.1-terra`, and `gpt-5.6-luna`. Family names (`gpt-6`,
-`gpt-6.1`, `gpt-5.6`) are rejected because they do not name a tier. An unresolved automatic route is
+slugs `gpt-6.2-astra`, `gpt-6.2-sol`, `gpt-6.1-terra`, and `gpt-5.6-luna`. Family names (`gpt-6`,
+`gpt-6.1`, `gpt-6.2`, `gpt-5.6`) are rejected because they do not name a tier. An unresolved automatic route is
 rejected rather than falling back to a default model. A `luna` route on a task that other tasks
 depend on is rejected unless the user pinned the run to `luna`.
 
@@ -54,7 +54,7 @@ rather than failing the task, and never does so silently:
 2. The attempt closes as `execution_failed` / `model_unavailable` with signal `model_unavailable`,
    and the model is added to `run.unavailableModels` with the rejection message. Event:
    `task.model_unavailable`.
-3. If the ladder `gpt-6-astra` → `gpt-6.1-sol` → `gpt-6.1-terra` → `gpt-5.6-luna` has a model
+3. If the ladder `gpt-6.2-astra` → `gpt-6.2-sol` → `gpt-6.1-terra` → `gpt-5.6-luna` has a model
    below it that is not known unavailable and accepts the same effort, the task returns to
    `pending` and is relaunched immediately with the Codex command the rejected attempt used.
 4. Every claim computes the effective route: the saved route, or the first available rung below it.
@@ -229,6 +229,14 @@ Policies referenced by frozen selections remain archived in run state, and selec
 an entry in that retained policy. The emergency off and rollback paths discard malformed active or
 unrelated history entries while retaining every valid policy needed to replay prior attempts.
 Policy changes are refused while work is active or awaiting verification.
+
+## Verified against Codex CLI 0.169.1 (2026-11-18)
+
+`gpt-6.2-astra` and `gpt-6.2-sol` appear in Codex's model list and were each accepted by a real
+`codex exec` at `low` and at `ultra` on this account. They replace `gpt-6-astra` and `gpt-6.1-sol`
+as `astra` and `sol` in 0.6.5. The retired slugs stay valid only for runs that already saved them,
+are off the fallback ladder like the 0.5.x slugs, and are excluded from `run routes` unless
+`--include-legacy`.
 
 ## Verified against Codex CLI 0.169.0 (2026-11-15)
 
@@ -682,8 +690,9 @@ retried on the next trigger.
 
 **Wall-clock limits.** A plan task may set `timeoutMinutes` (a positive number up to 1440).
 Without it the limit is the default for the model the attempt actually runs on, so a substituted
-attempt gets its substitute's limit: `gpt-6-astra` 120, `gpt-6.1-sol` 90, `gpt-6.1-terra` 60,
-`gpt-5.6-luna` 30 minutes; legacy `gpt-5.6-sol` 90 and `gpt-5.6-terra` 60. The clock starts at the
+attempt gets its substitute's limit: `gpt-6.2-astra` 120, `gpt-6.2-sol` 90, `gpt-6.1-terra` 60,
+`gpt-5.6-luna` 30 minutes; retired `gpt-6-astra` 120, `gpt-6.1-sol` 90, `gpt-5.6-sol` 90, and
+`gpt-5.6-terra` 60. The clock starts at the
 current runner's `launchedAt`, so an answered `needs_input` round starts a new clock and time spent
 waiting for the supervisor never counts. When a running worker passes its limit, the poll records
 `attempt.overLimit` (limit, elapsed minutes, clock start, detection time) and a `task.over_limit`

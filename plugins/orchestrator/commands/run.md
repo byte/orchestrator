@@ -91,9 +91,9 @@ Produce a small task DAG. Each task must have:
 - `dependsOn`: task ids that must be supervisor-verified first
 - `constraints`
 - `acceptance`: evidence-based completion criteria
-- `model`: `astra`, `sol`, `terra`, `luna`, or an exact slug (`gpt-6-astra`, `gpt-6.1-sol`,
+- `model`: `astra`, `sol`, `terra`, `luna`, or an exact slug (`gpt-6.2-astra`, `gpt-6.2-sol`,
   `gpt-6.1-terra`, `gpt-5.6-luna`) unless the run pins a model. Family names such as `gpt-6` or
-  `gpt-6.1` are rejected because they do not name a tier.
+  `gpt-6.2` are rejected because they do not name a tier.
 - `effort`: the selected per-task reasoning effort unless the run pins an effort
 - `routingReason`: one concise explanation of why the selected route fits the task whenever either
   dimension is supervisor-routed
@@ -110,8 +110,8 @@ It is a read-only table over local run state: per actual model and effort, the f
 that reached a worker, first-attempt acceptance, retries, and median duration. A substituted
 attempt counts for the model that ran; a launch Codex rejected as unavailable counts for neither
 model; answered input requests are part of their attempt, but the time paused awaiting an answer
-is not counted in its duration; attempts on the retired `gpt-5.6-sol` and
-`gpt-5.6-terra` slugs are left out unless you pass `--include-legacy`. Every rate sits next to its counts,
+is not counted in its duration; attempts on retired slugs (`gpt-5.6-sol`,
+`gpt-5.6-terra`, `gpt-6-astra`, `gpt-6.1-sol`) are left out unless you pass `--include-legacy`. Every rate sits next to its counts,
 and no rate is printed below 5 samples, so a cell with two attempts is an anecdote, not a trend.
 `run plan`, `run briefing`, and `run resume` print the same table for the run's lane once it holds
 at least 5 counted attempts. Treat it as evidence, not a rule: it says nothing about tasks unlike
@@ -181,7 +181,9 @@ Only a rejection before the worker did anything counts: an error naming the mode
 began, or on a resume after `run answer`, is an ordinary failure, and so is one worded as an outage
 ("currently unavailable", "try again", "overloaded", a 5xx); retry those rather than re-route.
 That split is inferred from wording: only the ChatGPT-account rejection has been observed. Runs saved by
-0.5.x that route to `gpt-5.6-sol` or `gpt-5.6-terra` keep those exact slugs and are not substituted.
+0.5.x that route to `gpt-5.6-sol` or `gpt-5.6-terra`, or by 0.6.0–0.6.4 to `gpt-6-astra` or
+`gpt-6.1-sol`, keep those exact slugs and are not substituted; if Codex rejects one, re-route the
+task with `run plan`.
 
 Size tasks by write-surface independence, not to a target count. Split work into separate tasks
 where the pieces own disjoint paths and can be verified on their own; keep it as one task where the
@@ -581,9 +583,10 @@ created, and any residual risk. Distinguish built, verified, and unverified work
   and integrator. Claude Opus 5.5 and Claude Fable 5.2 are the supported supervisors; the
   supervisor is whichever model owns this Claude Code session, the plugin never selects it, and
   supervisory authority never moves to a subagent or to a worker.
-- Execution workers use only `gpt-6-astra`, `gpt-6.1-sol`, `gpt-6.1-terra`, or `gpt-5.6-luna`,
+- Execution workers use only `gpt-6.2-astra`, `gpt-6.2-sol`, `gpt-6.1-terra`, or `gpt-5.6-luna`,
   exactly as resolved and persisted by the run plan. Runs saved by 0.5.x keep their persisted
-  `gpt-5.6-sol` or `gpt-5.6-terra` slugs. Never substitute a model or effort silently: the only
+  `gpt-5.6-sol` or `gpt-5.6-terra` slugs, and runs saved by 0.6.0–0.6.4 keep `gpt-6-astra` or
+  `gpt-6.1-sol`. Never substitute a model or effort silently: the only
   substitution is the runtime's recorded fallback when Codex rejects a model as unavailable.
 - Model and effort selection are the supervisor's planning responsibility unless the user
   explicitly pins either dimension. Automatic routing must never mean a hidden runtime fallback.

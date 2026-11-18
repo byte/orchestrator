@@ -275,12 +275,12 @@ test("an over-limit worker is reported once and left running", async () => {
 
 test("limits default per model tier and plans validate timeoutMinutes", () => {
   assert.deepEqual(
-    ["gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-5.6-luna"].map((model) => DEFAULT_TASK_TIMEOUT_MINUTES[model]),
+    ["gpt-6.2-astra", "gpt-6.2-sol", "gpt-6.1-terra", "gpt-5.6-luna"].map((model) => DEFAULT_TASK_TIMEOUT_MINUTES[model]),
     [120, 90, 60, 30]
   );
   // The limit follows the model the attempt actually runs on.
-  assert.equal(taskTimeoutMinutes({ model: "gpt-6-astra" }, { model: "gpt-6.1-sol" }), 90);
-  assert.equal(taskTimeoutMinutes({ model: "gpt-6-astra", timeoutMinutes: 15 }, { model: "gpt-6.1-sol" }), 15);
+  assert.equal(taskTimeoutMinutes({ model: "gpt-6.2-astra" }, { model: "gpt-6.2-sol" }), 90);
+  assert.equal(taskTimeoutMinutes({ model: "gpt-6.2-astra", timeoutMinutes: 15 }, { model: "gpt-6.2-sol" }), 15);
   assert.equal(taskTimeoutMinutes({ model: "gpt-5.6-terra" }), 60);
 
   const root = repo();
@@ -331,13 +331,13 @@ test("a paused worker wakes the wait, and a wait with only paused workers return
 test("a model substitution wakes the wait", async () => {
   const root = repo();
   plan(root, "run-sub", [{ id: "work" }], { model: "astra" });
-  launch(root, "run-sub", "work", [process.execPath, unavailableFixture, "--unavailable=gpt-6-astra"]);
+  launch(root, "run-sub", "work", [process.execPath, unavailableFixture, "--unavailable=gpt-6.2-astra"]);
   const result = await waitForRunChange(root, "run-sub", { timeoutMs: 15000, intervalMs: NO_FALLBACK_MS });
   assert.equal(result.outcome, "changed");
   const [update] = result.updates;
   assert.equal(update.status, "substituted");
   assert.equal(update.changed, true);
-  assert.equal(update.model, "gpt-6.1-sol");
+  assert.equal(update.model, "gpt-6.2-sol");
   assert.match(update.notice, /USER-PINNED MODEL SUBSTITUTED/);
 });
 

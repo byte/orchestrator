@@ -653,3 +653,16 @@ been run from a user session.
 6. **Still open:** running `/orchestrator:run` from a session in a user project;
    model-unavailable detection on an API-key login (Open decision 4); any time
    or cost comparison against a single agent doing the same job.
+
+## 0.6.5 roster update (2026-11-18)
+
+`astra` and `sol` now resolve to `gpt-6.2-astra` and `gpt-6.2-sol`. `gpt-6-astra` and
+`gpt-6.1-sol` became retired slugs, handled the way the 0.5.x slugs are. Codex CLI 0.169.1
+listed both new models. A real `codex exec` accepted each one at `low` and at `ultra`. On real
+Codex, one run used the CLI executor and another used the plugin executor. Each ran an `astra`
+read and a `sol` write, and Codex's own session logs recorded `gpt-6.2-astra` and `gpt-6.2-sol`.
+The CLI run integrated and finalized. In the plugin run, the worker committed a correct change in
+its worktree, but integrating it was refused by the branch-drift guard as intended, because the
+CLI run had just moved the same branch; that run was cancelled. A new plan that names
+`gpt-6.1-sol` is refused with a message naming its replacement. In this repository, `run routes`
+now reports 35 attempts on retired slugs and leaves them out unless `--include-legacy` is given.

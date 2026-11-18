@@ -88,7 +88,7 @@ test("a read task runs through the plugin's job commands in the checkout and its
   const [queued] = calls("task").filter((entry) => entry.args.includes(fs.realpathSync(root)));
   assert.ok(queued.args.includes("--background"));
   assert.equal(queued.args[queued.args.indexOf("--effort") + 1], "xhigh");
-  assert.equal(queued.args[queued.args.indexOf("--model") + 1], "gpt-6.1-sol");
+  assert.equal(queued.args[queued.args.indexOf("--model") + 1], "gpt-6.2-sol");
   assert.ok(!queued.args.includes("--write"));
   const prompt = fs.readFileSync(queued.args[queued.args.indexOf("--prompt-file") + 1], "utf8");
   assert.match(prompt, /## Output contract/);

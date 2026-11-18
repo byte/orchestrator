@@ -36,7 +36,7 @@ test("the run command keeps Claude in authority and routes only within the worke
   assert.doesNotMatch(command, /When flags are present: the first positional token is the lane/);
   assert.match(
     command,
-    /only `gpt-6-astra`, `gpt-6\.1-sol`, `gpt-6\.1-terra`, or `gpt-5\.6-luna`/
+    /only `gpt-6.2-astra`, `gpt-6\.2-sol`, `gpt-6\.1-terra`, or `gpt-5\.6-luna`/
   );
   assert.match(command, /Never substitute a model or effort silently/);
   assert.match(command, /`astra` → `sol` → `terra` → `luna`/);
@@ -90,10 +90,10 @@ test("the resume command restores durable state and keeps Claude in authority", 
     /The Claude model running this main thread remains the planner, scheduler, reviewer, replanner,\s+integrator/
   );
   assert.match(command, /whether that is Claude Opus 5\.5 or Claude Fable 5\.2/);
-  for (const slug of ["gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-5.6-luna"]) {
+  for (const slug of ["gpt-6.2-astra", "gpt-6.2-sol", "gpt-6.1-terra", "gpt-5.6-luna"]) {
     assert.match(command, new RegExp(slug.replaceAll(".", "\\.")));
   }
-  assert.match(command, /persisted `gpt-5\.6-sol` or `gpt-5\.6-terra` slug/);
+  assert.match(command, /persisted retired slug \(`gpt-5\.6-sol` or `gpt-5\.6-terra` from 0\.5\.x,\s+`gpt-6-astra` or `gpt-6\.1-sol` from 0\.6\.0–0\.6\.4\)/);
   assert.match(command, /Model availability and substitutions/);
 });
 

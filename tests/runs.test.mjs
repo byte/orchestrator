@@ -309,7 +309,7 @@ test("the supervisor briefing reconstructs authority, graph, checkpoint, and led
     done: "All tests pass."
   });
   assert.match(briefing, /You are the Claude model running the Claude Code main thread, and you are the supervisor/);
-  assert.match(briefing, /gpt-6\.1-sol/);
+  assert.match(briefing, /gpt-6\.2-sol/);
   assert.match(briefing, /implementation — Implement pagination/);
   assert.match(briefing, /Planning complete/);
   assert.match(briefing, /Public IDs remain opaque/);
@@ -341,13 +341,13 @@ test("task claims enforce pool capacity and route explicitly to Sol", () => {
   ]);
   checkpointPlan(root, "run-pool");
   const dispatch = claimTask(root, "run-pool", "a", { constraints: [] });
-  assert.equal(dispatch.model, "gpt-6.1-sol");
+  assert.equal(dispatch.model, "gpt-6.2-sol");
   assert.equal(dispatch.reasoningEffort, "xhigh");
   assert.equal(dispatch.substitution, null);
   assert.deepEqual(dispatch.routingFlags, [
     "--fresh",
     "--model",
-    "gpt-6.1-sol",
+    "gpt-6.2-sol",
     "--effort",
     "xhigh"
   ]);
@@ -390,9 +390,9 @@ test("worker binding, reporting, supervisor verification, and dependencies form 
       agentId: "agent-1",
       jobId: "job-1",
       threadId: "thread-1",
-      model: "gpt-6.1-sol",
+      model: "gpt-6.2-sol",
       reasoningEffort: "high",
-      requestedModel: "gpt-6.1-sol",
+      requestedModel: "gpt-6.2-sol",
       substitution: null,
       resumedFromAttemptId: null,
       resumeFallback: null,
@@ -479,9 +479,9 @@ test("runs and tasks route across the roster with exact persisted audit data", (
     model: "gpt-6.1-terra",
     reasoningEffort: "medium"
   });
-  assert.equal(planned.tasks.frontier.model, "gpt-6.1-sol");
+  assert.equal(planned.tasks.frontier.model, "gpt-6.2-sol");
   assert.equal(planned.tasks.volume.model, "gpt-5.6-luna");
-  assert.equal(planned.tasks.hardest.model, "gpt-6-astra");
+  assert.equal(planned.tasks.hardest.model, "gpt-6.2-astra");
   assert.equal(planned.tasks.hardest.reasoningEffort, "ultra");
   assert.match(planned.tasks.volume.routingReason, /efficient throughput/);
 
@@ -497,12 +497,12 @@ test("runs and tasks route across the roster with exact persisted audit data", (
     ]),
     [
       ["gpt-6.1-terra", "medium"],
-      ["gpt-6.1-sol", "high"],
+      ["gpt-6.2-sol", "high"],
       ["gpt-5.6-luna", "low"],
-      ["gpt-6-astra", "ultra"]
+      ["gpt-6.2-astra", "ultra"]
     ]
   );
-  assert.match(hardest.briefing, /You are one gpt-6-astra worker in a Codex worker pool/);
+  assert.match(hardest.briefing, /You are one gpt-6.2-astra worker in a Codex worker pool/);
   assert.doesNotMatch(hardest.briefing, /GPT-5\.6/);
   assert.match(volume.briefing, /You are one gpt-5\.6-luna worker/);
   assert.match(volume.briefing, /reasoning effort: low/);
@@ -515,9 +515,9 @@ test("runs and tasks route across the roster with exact persisted audit data", (
     }),
     [
       ["gpt-6.1-terra", "medium"],
-      ["gpt-6.1-sol", "high"],
+      ["gpt-6.2-sol", "high"],
       ["gpt-5.6-luna", "low"],
-      ["gpt-6-astra", "ultra"]
+      ["gpt-6.2-astra", "ultra"]
     ]
   );
 });
@@ -532,7 +532,7 @@ test("worker routing rejects unsupported models and invalid model-effort combina
         objective: "Reject unknown routing",
         workerModel: "gpt-5.6-mars"
       }),
-    /Unsupported worker model "gpt-5\.6-mars"\. Use one of: astra, sol, terra, luna \(exact slugs: gpt-6-astra, gpt-6\.1-sol, gpt-6\.1-terra, gpt-5\.6-luna\)/
+    /Unsupported worker model "gpt-5\.6-mars"\. Use one of: astra, sol, terra, luna \(exact slugs: gpt-6.2-astra, gpt-6\.2-sol, gpt-6\.1-terra, gpt-5\.6-luna\)/
   );
 
   // Every model accepted every effort from low to ultra in the M0 probes, so the
@@ -582,10 +582,15 @@ test("worker routing rejects unsupported models and invalid model-effort combina
 
 test("new plans and pins reject legacy slugs and bare family names with a specific message", () => {
   const root = repo();
-  for (const value of ["gpt-5.6-sol", "gpt-5.6-terra"]) {
+  for (const [value, release, current] of [
+    ["gpt-5.6-sol", "0\\.6\\.0", "sol now runs gpt-6\\.2-sol"],
+    ["gpt-5.6-terra", "0\\.6\\.0", "terra now runs gpt-6\\.1-terra"],
+    ["gpt-6-astra", "0\\.6\\.5", "astra now runs gpt-6\\.2-astra"],
+    ["gpt-6.1-sol", "0\\.6\\.5", "sol now runs gpt-6\\.2-sol"]
+  ]) {
     assert.throws(
       () => createRun(root, { id: `run-pin-${value}`, lane: "api", objective: "x", workerModel: value }),
-      /belongs to the retired GPT-5\.6 Sol\/Terra roster.*only for runs saved by orchestrator 0\.5\.x/
+      new RegExp(`retired in orchestrator ${release}; ${current}.*only for runs saved before then`)
     );
   }
   createRunState(root, { id: "run-new-plan", lane: "api", objective: "Route new work" });
@@ -601,11 +606,12 @@ test("new plans and pins reject legacy slugs and bare family names with a specif
         routingReason: "Exercise model validation."
       }
     ]);
-  assert.throws(planWith("gpt-5.6-sol"), /retired GPT-5\.6 Sol\/Terra roster/);
-  for (const family of ["gpt-5.6", "gpt-6", "gpt-6.1"]) {
+  assert.throws(planWith("gpt-5.6-sol"), /retired in orchestrator 0\.6\.0/);
+  assert.throws(planWith("gpt-6.1-sol"), /retired in orchestrator 0\.6\.5/);
+  for (const family of ["gpt-5.6", "gpt-6", "gpt-6.1", "gpt-6.2"]) {
     assert.throws(planWith(family), new RegExp(`"${family.replace(".", "\\.")}" is a model family, not a tier`));
   }
-  assert.equal(planWith("gpt-6.1-sol")().tasks.task.model, "gpt-6.1-sol");
+  assert.equal(planWith("gpt-6.2-sol")().tasks.task.model, "gpt-6.2-sol");
 });
 
 test("luna routes must be leaves unless the run pins luna", () => {
@@ -722,7 +728,7 @@ test("a version-5 run routed to gpt-5.6-sol loads, resumes, and retries on gpt-5
           routingReason: "Try the legacy slug."
         }
       ]),
-    /retired GPT-5\.6 Sol\/Terra roster/
+    /retired in orchestrator 0\.6\.0/
   );
   addCheckpoint(root, "run-v5-legacy", { summary: "Retry the legacy task" });
   const second = claimTask(root, "run-v5-legacy", "legacy", { constraints: [] });

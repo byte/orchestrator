@@ -206,7 +206,7 @@ test("a granted scope extension resumes the same attempt and integrates with the
   assert.ok(at("resume") > 0);
   assert.ok(at("-C") < at("resume") && argv[at("-C") + 1] === launched.worktree.path);
   assert.ok(at("--sandbox") < at("resume") && argv[at("--sandbox") + 1] === "workspace-write");
-  assert.ok(at("--model") > at("resume") && argv[at("--model") + 1] === "gpt-6.1-sol");
+  assert.ok(at("--model") > at("resume") && argv[at("--model") + 1] === "gpt-6.2-sol");
   assert.equal(configValue(argv, "model_reasoning_effort"), 'model_reasoning_effort="high"');
   assertLockedDown(argv);
   assert.deepEqual(argv.slice(-2), [threadId, "-"]);
@@ -276,7 +276,7 @@ test("a denied request resumes with the denial and the worker stays in scope", a
     "run", "answer", "run-deny", "work", "--deny", "--reply", "Duplicate the helper locally instead."
   ]);
   assert.equal(answered.code, 0, answered.stderr);
-  assert.match(answered.stdout, /Answered request 1 of work: denied\. Resumed thread thread-ask-\d+ on gpt-6\.1-sol \(high\)/);
+  assert.match(answered.stdout, /Answered request 1 of work: denied\. Resumed thread thread-ask-\d+ on gpt-6\.2-sol \(high\)/);
   const { task } = await settle(root, "run-deny");
   assert.equal(task.status, "reported");
   assert.match(task.result.structured.summary, /granted=false/);
@@ -490,26 +490,26 @@ test("an answered task continues on the substituted model its attempt is using",
   const calls = logFile();
   launchTaskWorker(root, "run-answer-substituted", "work", lane(root), {
     codexCommand: [
-      process.execPath, askFixture, `--log=${calls}`, "--unavailable=gpt-6-astra",
+      process.execPath, askFixture, `--log=${calls}`, "--unavailable=gpt-6.2-astra",
       "--ask=scope:lib/helper.js", "--granted=lib/helper.js"
     ]
   });
   let { task } = await settle(root, "run-answer-substituted");
   assert.equal(task.status, "needs_input");
   assert.equal(task.attempts.length, 2);
-  assert.equal(task.attempts[1].model, "gpt-6.1-sol");
-  assert.equal(task.attempts[1].substitution.requestedModel, "gpt-6-astra");
+  assert.equal(task.attempts[1].model, "gpt-6.2-sol");
+  assert.equal(task.attempts[1].substitution.requestedModel, "gpt-6.2-astra");
   const answered = answerTaskWorker(root, "run-answer-substituted", "work", lane(root), {
     grantScope: ["lib/helper.js"]
   });
-  assert.equal(answered.model, "gpt-6.1-sol");
+  assert.equal(answered.model, "gpt-6.2-sol");
   assert.equal(answered.attemptId, "work-attempt-2");
   ({ task } = await settle(root, "run-answer-substituted"));
   assert.equal(task.status, "reported");
   assert.equal(task.attempts.length, 2);
   const resumed = readLog(calls).at(-1);
   assert.ok(resumed.argv.includes("resume"));
-  assert.equal(resumed.argv[resumed.argv.indexOf("--model") + 1], "gpt-6.1-sol");
+  assert.equal(resumed.argv[resumed.argv.indexOf("--model") + 1], "gpt-6.2-sol");
   assert.equal(configValue(resumed.argv, "model_reasoning_effort"), 'model_reasoning_effort="high"');
   assert.equal(resumed.argv[resumed.argv.indexOf("--sandbox") + 1], "workspace-write");
 });
@@ -615,7 +615,7 @@ test("a model rejection on an answered resume fails the attempt instead of subst
   await settle(root, "run-answer-rejected");
   answerTaskWorker(root, "run-answer-rejected", "work", lane(root), {
     grantScope: ["lib/helper.js"],
-    codexCommand: [process.execPath, askFixture, "--ask=scope:lib/helper.js", "--partial", "--unavailable=gpt-6.1-sol"]
+    codexCommand: [process.execPath, askFixture, "--ask=scope:lib/helper.js", "--partial", "--unavailable=gpt-6.2-sol"]
   });
   const { task } = await settle(root, "run-answer-rejected");
   // The attempt worked before it paused; it is not "never reached a worker".

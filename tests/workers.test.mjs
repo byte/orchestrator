@@ -1953,20 +1953,20 @@ test("model unavailability is read only from top-level rejections that name the 
     { type: "thread.started", thread_id: "t" },
     {
       type: "item.completed",
-      item: { type: "error", message: "Model metadata for `gpt-6-astra` not found. Defaulting to fallback metadata." }
+      item: { type: "error", message: "Model metadata for `gpt-6.2-astra` not found. Defaulting to fallback metadata." }
     }
   ]);
-  assert.equal(modelUnavailableError(file, "gpt-6-astra"), null);
+  assert.equal(modelUnavailableError(file, "gpt-6.2-astra"), null);
 
-  writeEvents([{ type: "error", message: "The 'gpt-6-astra' model is not supported when using Codex with a ChatGPT account." }]);
-  assert.match(modelUnavailableError(file, "gpt-6-astra"), /not supported/);
-  assert.equal(modelUnavailableError(file, "gpt-6.1-sol"), null);
+  writeEvents([{ type: "error", message: "The 'gpt-6.2-astra' model is not supported when using Codex with a ChatGPT account." }]);
+  assert.match(modelUnavailableError(file, "gpt-6.2-astra"), /not supported/);
+  assert.equal(modelUnavailableError(file, "gpt-6.2-sol"), null);
 
   writeEvents([{ type: "error", error: { message: "Invalid schema for response_format 'codex_output_schema'." } }]);
-  assert.equal(modelUnavailableError(file, "gpt-6-astra"), null);
+  assert.equal(modelUnavailableError(file, "gpt-6.2-astra"), null);
 
-  writeEvents([{ type: "turn.failed", error: { code: "model_not_found", message: "The model `gpt-6-astra` does not exist or you do not have access to it." } }]);
-  assert.match(modelUnavailableError(file, "gpt-6-astra"), /do not have access/);
+  writeEvents([{ type: "turn.failed", error: { code: "model_not_found", message: "The model `gpt-6.2-astra` does not exist or you do not have access to it." } }]);
+  assert.match(modelUnavailableError(file, "gpt-6.2-astra"), /do not have access/);
 
   // After the worker has done anything, an error naming the model is a mid-run
   // failure, not a launch rejection.
@@ -1974,37 +1974,37 @@ test("model unavailability is read only from top-level rejections that name the 
     { type: "thread.started", thread_id: "t" },
     { type: "turn.started" },
     { type: "item.completed", item: { type: "command_execution", command: "git commit -m work" } },
-    { type: "error", message: "The model gpt-6-astra is currently unavailable. Please try again later." },
-    { type: "turn.failed", error: { message: "The model gpt-6-astra is currently unavailable." } }
+    { type: "error", message: "The model gpt-6.2-astra is currently unavailable. Please try again later." },
+    { type: "turn.failed", error: { message: "The model gpt-6.2-astra is currently unavailable." } }
   ]);
-  assert.equal(modelUnavailableError(file, "gpt-6-astra"), null);
+  assert.equal(modelUnavailableError(file, "gpt-6.2-astra"), null);
   writeEvents([
     { type: "turn.completed" },
-    { type: "error", message: "The 'gpt-6-astra' model is not supported when using Codex with a ChatGPT account." }
+    { type: "error", message: "The 'gpt-6.2-astra' model is not supported when using Codex with a ChatGPT account." }
   ]);
-  assert.equal(modelUnavailableError(file, "gpt-6-astra"), null);
+  assert.equal(modelUnavailableError(file, "gpt-6.2-astra"), null);
 
   // An outage before any work is still not an entitlement rejection.
   for (const message of [
-    "The model gpt-6-astra is currently unavailable. Please try again later.",
-    "gpt-6-astra model is temporarily unavailable (503).",
-    "The model gpt-6-astra is overloaded; not available right now due to capacity."
+    "The model gpt-6.2-astra is currently unavailable. Please try again later.",
+    "gpt-6.2-astra model is temporarily unavailable (503).",
+    "The model gpt-6.2-astra is overloaded; not available right now due to capacity."
   ]) {
     writeEvents([{ type: "thread.started", thread_id: "t" }, { type: "turn.started" }, { type: "error", message }]);
-    assert.equal(modelUnavailableError(file, "gpt-6-astra"), null, message);
+    assert.equal(modelUnavailableError(file, "gpt-6.2-astra"), null, message);
   }
   // Work that has scrolled out of the read tail still rules out a rejection.
   writeEvents([
     { type: "thread.started", thread_id: "t" },
     { type: "item.completed", item: { type: "command_execution", command: "git commit -m work" } },
     { type: "item.completed", item: { type: "agent_message", text: "x".repeat(70000) } },
-    { type: "error", message: "The 'gpt-6-astra' model is not supported when using Codex with a ChatGPT account." }
+    { type: "error", message: "The 'gpt-6.2-astra' model is not supported when using Codex with a ChatGPT account." }
   ]);
-  assert.equal(modelUnavailableError(file, "gpt-6-astra"), null);
+  assert.equal(modelUnavailableError(file, "gpt-6.2-astra"), null);
 
   // Entitlement wording that happens to say "currently" is still a rejection.
-  writeEvents([{ type: "error", message: "The model gpt-6-astra is currently not supported on your plan." }]);
-  assert.match(modelUnavailableError(file, "gpt-6-astra"), /not supported on your plan/);
+  writeEvents([{ type: "error", message: "The model gpt-6.2-astra is currently not supported on your plan." }]);
+  assert.match(modelUnavailableError(file, "gpt-6.2-astra"), /not supported on your plan/);
 });
 
 test("an unavailable supervisor-routed model is substituted down the ladder and recorded", async () => {
@@ -2012,9 +2012,9 @@ test("an unavailable supervisor-routed model is substituted down the ladder and 
   plan(root, "run-substitute", { taskModel: "astra", taskEffort: "xhigh" });
   checkpointPlan(root, "run-substitute");
   const launched = launchTaskWorker(root, "run-substitute", "build", { constraints: [] }, {
-    codexCommand: [process.execPath, unavailableFixture, "--unavailable=gpt-6-astra"]
+    codexCommand: [process.execPath, unavailableFixture, "--unavailable=gpt-6.2-astra"]
   });
-  assert.equal(launched.model, "gpt-6-astra");
+  assert.equal(launched.model, "gpt-6.2-astra");
 
   const updates = await pollUntil(
     root,
@@ -2022,41 +2022,41 @@ test("an unavailable supervisor-routed model is substituted down the ladder and 
     (run) => run.tasks.build.status === "reported"
   );
   const substituted = updates.find((update) => update.status === "substituted");
-  assert.equal(substituted.unavailableModel, "gpt-6-astra");
-  assert.equal(substituted.requestedModel, "gpt-6-astra");
-  assert.equal(substituted.model, "gpt-6.1-sol");
+  assert.equal(substituted.unavailableModel, "gpt-6.2-astra");
+  assert.equal(substituted.requestedModel, "gpt-6.2-astra");
+  assert.equal(substituted.model, "gpt-6.2-sol");
   assert.equal(substituted.reasoningEffort, "xhigh");
   assert.equal(substituted.pinned, false);
-  assert.match(substituted.notice, /^Model substituted: the supervisor routed gpt-6-astra/);
+  assert.match(substituted.notice, /^Model substituted: the supervisor routed gpt-6.2-astra/);
 
   const run = loadRun(root, "run-substitute");
-  assert.equal(run.tasks.build.model, "gpt-6-astra", "the saved route is never rewritten");
+  assert.equal(run.tasks.build.model, "gpt-6.2-astra", "the saved route is never rewritten");
   const [rejected, replacement] = run.tasks.build.attempts;
-  assert.equal(rejected.model, "gpt-6-astra");
+  assert.equal(rejected.model, "gpt-6.2-astra");
   assert.deepEqual(
     [rejected.outcome.terminalOutcome, rejected.outcome.action, rejected.outcome.reasonCode],
     ["execution_failed", "execute", "model_unavailable"]
   );
-  assert.equal(replacement.model, "gpt-6.1-sol");
-  assert.equal(replacement.requestedModel, "gpt-6-astra");
+  assert.equal(replacement.model, "gpt-6.2-sol");
+  assert.equal(replacement.requestedModel, "gpt-6.2-astra");
   assert.equal(replacement.reasoningEffort, "xhigh");
   assert.equal(replacement.substitution.pinned, false);
-  assert.equal(run.tasks.build.result.structured.summary, "Fake worker completed on gpt-6.1-sol.");
-  assert.deepEqual(run.unavailableModels.map((entry) => entry.model), ["gpt-6-astra"]);
+  assert.equal(run.tasks.build.result.structured.summary, "Fake worker completed on gpt-6.2-sol.");
+  assert.deepEqual(run.unavailableModels.map((entry) => entry.model), ["gpt-6.2-astra"]);
   const spec = JSON.parse(fs.readFileSync(replacement.runner.specFile, "utf8"));
-  assert.equal(spec.model, "gpt-6.1-sol");
+  assert.equal(spec.model, "gpt-6.2-sol");
 
   const types = runEvents(root, "run-substitute").map((event) => event.type);
   assert.ok(types.includes("task.model_unavailable"));
   assert.ok(types.includes("task.model_substituted"));
 
   const briefing = renderSupervisorBriefing(root, run, { constraints: [] });
-  assert.match(briefing, /worker route: gpt-6\.1-sol \(xhigh\) — SUBSTITUTED for gpt-6-astra/);
-  assert.match(briefing, /unavailable: gpt-6-astra/);
+  assert.match(briefing, /worker route: gpt-6\.2-sol \(xhigh\) — SUBSTITUTED for gpt-6.2-astra/);
+  assert.match(briefing, /unavailable: gpt-6.2-astra/);
   assert.doesNotMatch(briefing, /Tell the user which model actually ran/);
   const resumed = runCli(root, ["run", "resume", "run-substitute"]);
   assert.equal(resumed.code, 0);
-  assert.match(resumed.stdout, /Model substituted: the supervisor routed gpt-6-astra/);
+  assert.match(resumed.stdout, /Model substituted: the supervisor routed gpt-6.2-astra/);
 });
 
 test("a user-pinned model is substituted too, but flagged prominently", async () => {
@@ -2074,7 +2074,7 @@ test("a user-pinned model is substituted too, but flagged prominently", async ()
     { id: "second", title: "Second", objective: "Inspect two", kind: "read" }
   ]);
   checkpointPlan(root, "run-pinned-substitute");
-  const codexCommand = [process.execPath, unavailableFixture, "--unavailable=gpt-6-astra,gpt-6.1-sol"];
+  const codexCommand = [process.execPath, unavailableFixture, "--unavailable=gpt-6.2-astra,gpt-6.2-sol"];
   launchTaskWorker(root, "run-pinned-substitute", "first", { constraints: [] }, { codexCommand });
   await pollUntil(
     root,
@@ -2084,12 +2084,12 @@ test("a user-pinned model is substituted too, but flagged prominently", async ()
   let run = loadRun(root, "run-pinned-substitute");
   assert.deepEqual(
     run.tasks.first.attempts.map((attempt) => attempt.model),
-    ["gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-terra"]
+    ["gpt-6.2-astra", "gpt-6.2-sol", "gpt-6.1-terra"]
   );
   const final = run.tasks.first.attempts.at(-1);
-  assert.equal(final.requestedModel, "gpt-6-astra");
+  assert.equal(final.requestedModel, "gpt-6.2-astra");
   assert.equal(final.substitution.pinned, true);
-  assert.deepEqual(final.substitution.unavailableModels, ["gpt-6-astra", "gpt-6.1-sol"]);
+  assert.deepEqual(final.substitution.unavailableModels, ["gpt-6.2-astra", "gpt-6.2-sol"]);
 
   // Later launches in the same run go straight to the substitute without
   // burning another rejected attempt, and still record the substitution.
@@ -2109,8 +2109,8 @@ test("a user-pinned model is substituted too, but flagged prominently", async ()
 
   const briefing = renderSupervisorBriefing(root, run, { constraints: [] });
   assert.match(briefing, /A user-pinned model was substituted\. Tell the user/);
-  assert.match(briefing, /USER-PINNED MODEL SUBSTITUTED: the run pinned gpt-6-astra/);
-  assert.match(briefing, /SUBSTITUTED for gpt-6-astra \(user pin overridden\)/);
+  assert.match(briefing, /USER-PINNED MODEL SUBSTITUTED: the run pinned gpt-6.2-astra/);
+  assert.match(briefing, /SUBSTITUTED for gpt-6.2-astra \(user pin overridden\)/);
 });
 
 test("an unavailable model with no rung left fails the task for escalation", async () => {

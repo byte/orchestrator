@@ -78,19 +78,19 @@ function savedRun(root, id, lane, tasks, version = 6) {
 }
 
 const SUBSTITUTION = {
-  requestedModel: "gpt-6-astra",
-  model: "gpt-6.1-sol",
+  requestedModel: "gpt-6.2-astra",
+  model: "gpt-6.2-sol",
   reasoningEffort: "high",
   reason: "model_unavailable",
   pinned: false,
-  unavailableModels: ["gpt-6-astra"],
+  unavailableModels: ["gpt-6.2-astra"],
   at: "2026-11-15T09:59:59.000Z"
 };
 
 /**
  * The hand-counted fixture. Lane `api`, current roster, by actual model:
  *
- * gpt-6.1-sol/high: t1a1 accepted 10m; t2a1 failed 5m; t2a2 warm retry accepted
+ * gpt-6.2-sol/high: t1a1 accepted 10m; t2a1 failed 5m; t2a2 warm retry accepted
  *   3m (two answered input rounds, same attempt); t3a2 substitute for astra,
  *   accepted 20m; t7a1 accepted 6m; t8a1 malformed 1m.
  *   => 6 attempts; first attempts t1,t2a1,t3a2,t7,t8 = 5, accepted t1,t3,t7 = 3
@@ -104,10 +104,10 @@ const SUBSTITUTION = {
  */
 function writeFixture(root) {
   savedRun(root, "run-a", "api", [
-    task("t1", [attempt("t1-attempt-1", "gpt-6.1-sol", "high", ACCEPTED, 10)]),
+    task("t1", [attempt("t1-attempt-1", "gpt-6.2-sol", "high", ACCEPTED, 10)]),
     task("t2", [
-      attempt("t2-attempt-1", "gpt-6.1-sol", "high", VERIFY_FAILED, 5, { threadId: "thread-t2" }),
-      attempt("t2-attempt-2", "gpt-6.1-sol", "high", ACCEPTED, 3, {
+      attempt("t2-attempt-1", "gpt-6.2-sol", "high", VERIFY_FAILED, 5, { threadId: "thread-t2" }),
+      attempt("t2-attempt-2", "gpt-6.2-sol", "high", ACCEPTED, 3, {
         resumedFromAttemptId: "t2-attempt-1",
         retry: { previousAttemptId: "t2-attempt-1", mode: "warm", reason: "verification failed", note: "fix it" },
         inputRequests: [
@@ -117,11 +117,11 @@ function writeFixture(root) {
       })
     ]),
     task("t3", [
-      attempt("t3-attempt-1", "gpt-6-astra", "high", UNAVAILABLE, 0, {
-        modelUnavailable: { model: "gpt-6-astra", fallbackModel: "gpt-6.1-sol" }
+      attempt("t3-attempt-1", "gpt-6.2-astra", "high", UNAVAILABLE, 0, {
+        modelUnavailable: { model: "gpt-6.2-astra", fallbackModel: "gpt-6.2-sol" }
       }),
-      attempt("t3-attempt-2", "gpt-6.1-sol", "high", ACCEPTED, 20, {
-        requestedModel: "gpt-6-astra",
+      attempt("t3-attempt-2", "gpt-6.2-sol", "high", ACCEPTED, 20, {
+        requestedModel: "gpt-6.2-astra",
         substitution: SUBSTITUTION
       })
     ]),
@@ -133,10 +133,10 @@ function writeFixture(root) {
       { ...attempt("t5-attempt-1", "gpt-6.1-terra", "medium", CANCELLED, 7), status: "cancelled" },
       attempt("t5-attempt-2", "gpt-6.1-terra", "medium", BLOCKED, 2)
     ]),
-    task("t6", [attempt("t6-attempt-1", "gpt-6.1-sol", "high", null, 0)]),
-    task("t7", [attempt("t7-attempt-1", "gpt-6.1-sol", "high", ACCEPTED, 6)]),
-    task("t8", [attempt("t8-attempt-1", "gpt-6.1-sol", "high", MALFORMED, 1)]),
-    task("t9", [{ ...attempt("t9-attempt-1", "gpt-6.1-sol", "medium", null, 0), status: "needs_input" }])
+    task("t6", [attempt("t6-attempt-1", "gpt-6.2-sol", "high", null, 0)]),
+    task("t7", [attempt("t7-attempt-1", "gpt-6.2-sol", "high", ACCEPTED, 6)]),
+    task("t8", [attempt("t8-attempt-1", "gpt-6.2-sol", "high", MALFORMED, 1)]),
+    task("t9", [{ ...attempt("t9-attempt-1", "gpt-6.2-sol", "medium", null, 0), status: "needs_input" }])
   ]);
   // A run saved by 0.5.x: its attempt predates `reasoningEffort` on attempts, so
   // the effort comes from the saved task route.
@@ -169,11 +169,11 @@ test("run routes matches a hand count on a fixture of saved runs", () => {
   assert.equal(evidence.attempts, 8);
   assert.equal(evidence.minSample, 5);
   assert.deepEqual(evidence.rows.map((entry) => `${entry.model}/${entry.reasoningEffort}`), [
-    "gpt-6.1-sol/high",
+    "gpt-6.2-sol/high",
     "gpt-6.1-terra/medium"
   ]);
-  assert.deepEqual(row(evidence, "gpt-6.1-sol", "high"), {
-    model: "gpt-6.1-sol",
+  assert.deepEqual(row(evidence, "gpt-6.2-sol", "high"), {
+    model: "gpt-6.2-sol",
     reasoningEffort: "high",
     attempts: 6,
     accepted: 4,
@@ -199,7 +199,7 @@ test("run routes matches a hand count on a fixture of saved runs", () => {
     durationSamples: 2
   });
   assert.deepEqual(evidence.excluded, {
-    modelUnavailable: { "gpt-6-astra": 1 },
+    modelUnavailable: { "gpt-6.2-astra": 1 },
     launchFailed: 1,
     cancelled: 1,
     inProgress: 2,
@@ -213,11 +213,11 @@ test("rejected launches never count for either model and substitutes count for t
   writeFixture(root);
   const evidence = routeEvidence(root, { lane: "api" });
   // The astra launch Codex rejected is neither an astra failure nor a sol attempt.
-  assert.equal(row(evidence, "gpt-6-astra", "high"), undefined);
-  assert.equal(evidence.excluded.modelUnavailable["gpt-6-astra"], 1);
+  assert.equal(row(evidence, "gpt-6.2-astra", "high"), undefined);
+  assert.equal(evidence.excluded.modelUnavailable["gpt-6.2-astra"], 1);
   // The substitute launch is sol's, and it is the task's first real attempt.
-  assert.equal(row(evidence, "gpt-6.1-sol", "high").substituted, 1);
-  assert.equal(row(evidence, "gpt-6.1-sol", "high").firstAccepted, 3);
+  assert.equal(row(evidence, "gpt-6.2-sol", "high").substituted, 1);
+  assert.equal(row(evidence, "gpt-6.2-sol", "high").firstAccepted, 3);
 });
 
 test("the text table shows counts beside every rate and withholds rates below the minimum", () => {
@@ -229,18 +229,18 @@ test("the text table shows counts beside every rate and withholds rates below th
   assert.match(result.stdout, /at least 5/);
   assert.match(
     result.stdout,
-    /\| gpt-6\.1-sol \| high \| 6 \| 3\/5 = 60% \| 1 \| 1 \| 5m 30s \(n=6\) \|/
+    /\| gpt-6\.2-sol \| high \| 6 \| 3\/5 = 60% \| 1 \| 1 \| 5m 30s \(n=6\) \|/
   );
   assert.match(
     result.stdout,
     /\| gpt-6\.1-terra \| medium \| 2 \| 1\/1 \(n<5, no rate\) \| 1 \| 0 \| 3m 00s \(n=2\) \|/
   );
   assert.doesNotMatch(result.stdout, /100%/);
-  assert.match(result.stdout, /model-unavailable \(never reached a worker\): gpt-6-astra ×1/);
+  assert.match(result.stdout, /model-unavailable \(never reached a worker\): gpt-6.2-astra ×1/);
   assert.match(result.stdout, /failed before Codex started: 1/);
   assert.match(result.stdout, /cancelled attempts: 1/);
   assert.match(result.stdout, /still running or paused on a request: 2/);
-  assert.match(result.stdout, /retired gpt-5\.6-sol \/ gpt-5\.6-terra slugs: 1 \(pass --include-legacy/);
+  assert.match(result.stdout, /retired slugs \(gpt-5\.6-sol, gpt-5\.6-terra, gpt-6-astra, gpt-6\.1-sol\): 1 \(pass --include-legacy/);
 });
 
 test("legacy-slug attempts are excluded by default and counted with --include-legacy", () => {
@@ -288,14 +288,14 @@ test("run routes is read-only and survives a run it cannot load", () => {
 });
 
 test("legacy route gaps stay unknown across replans while saved assignment facts retain attribution", () => {
-  const old = attempt("work-attempt-1", "gpt-6.1-sol", undefined, VERIFY_FAILED, 2);
+  const old = attempt("work-attempt-1", "gpt-6.2-sol", undefined, VERIFY_FAILED, 2);
   const snapshotted = attempt("work-attempt-2", "gpt-6.1-terra", undefined, ACCEPTED, 3, {
-    assignmentSnapshot: { version: 1, model: "gpt-6.1-sol", reasoningEffort: "high" }
+    assignmentSnapshot: { version: 1, model: "gpt-6.2-sol", reasoningEffort: "high" }
   });
-  const run = { lane: "api", workerPolicy: { model: "gpt-6.1-sol", reasoningEffort: "high" },
-    tasks: { work: task("work", [old, snapshotted], { model: "gpt-6.1-sol", reasoningEffort: "high" }) } };
+  const run = { lane: "api", workerPolicy: { model: "gpt-6.2-sol", reasoningEffort: "high" },
+    tasks: { work: task("work", [old, snapshotted], { model: "gpt-6.2-sol", reasoningEffort: "high" }) } };
   const before = aggregateRoutes([run]);
-  assert.equal(row(before, "gpt-6.1-sol", "unknown").attempts, 1);
+  assert.equal(row(before, "gpt-6.2-sol", "unknown").attempts, 1);
   assert.equal(row(before, "gpt-6.1-terra", "high").attempts, 1);
   run.tasks.work.reasoningEffort = "low";
   run.workerPolicy.reasoningEffort = "low";
@@ -334,7 +334,7 @@ test("run plan, run briefing, and run resume show the lane table only from five 
 
   // Four counted attempts in the lane: below the threshold, so nothing is shown.
   savedRun(root, "run-four", "api", [1, 2, 3, 4].map((n) =>
-    task(`f${n}`, [attempt(`f${n}-attempt-1`, "gpt-6.1-sol", "high", ACCEPTED, n)])
+    task(`f${n}`, [attempt(`f${n}-attempt-1`, "gpt-6.2-sol", "high", ACCEPTED, n)])
   ));
   const quiet = runCli(root, ["run", "plan", "run-live", "--plan-file", plan]);
   assert.equal(quiet.code, 0, quiet.stderr);
@@ -343,15 +343,15 @@ test("run plan, run briefing, and run resume show the lane table only from five 
   assert.equal(JSON.parse(runCli(root, ["run", "resume", "run-live", "--json"]).stdout).routes, null);
 
   // A fifth attempt in another lane does not count toward this lane.
-  savedRun(root, "run-other", "web", [task("w", [attempt("w-attempt-1", "gpt-6.1-sol", "high", ACCEPTED, 1)])]);
+  savedRun(root, "run-other", "web", [task("w", [attempt("w-attempt-1", "gpt-6.2-sol", "high", ACCEPTED, 1)])]);
   assert.doesNotMatch(runCli(root, ["run", "plan", "run-live", "--plan-file", plan]).stdout, /Route evidence/);
 
   // A fifth in this lane crosses it.
-  savedRun(root, "run-five", "api", [task("g", [attempt("g-attempt-1", "gpt-6.1-sol", "high", ACCEPTED, 5)])]);
+  savedRun(root, "run-five", "api", [task("g", [attempt("g-attempt-1", "gpt-6.2-sol", "high", ACCEPTED, 5)])]);
   const shown = runCli(root, ["run", "plan", "run-live", "--plan-file", plan]);
   assert.equal(shown.code, 0, shown.stderr);
   assert.match(shown.stdout, /^## Route evidence — lane api, 3 local runs/);
-  assert.match(shown.stdout, /\| gpt-6\.1-sol \| high \| 5 \| 5\/5 = 100% \|/);
+  assert.match(shown.stdout, /\| gpt-6\.2-sol \| high \| 5 \| 5\/5 = 100% \|/);
   assert.match(shown.stdout, /# Run run-live/);
 
   const briefing = runCli(root, ["run", "briefing", "run-live"]).stdout;
@@ -374,17 +374,17 @@ test("time paused on a needs_input request is not counted as model runtime", () 
   const root = repo();
   const at = (minutes) => new Date(Date.parse("2026-11-15T10:00:00.000Z") + minutes * 60_000).toISOString();
   savedRun(root, "run-paused", "api", [
-    task("answered", [attempt("answered-attempt-1", "gpt-6.1-sol", "high", ACCEPTED, 195, {
+    task("answered", [attempt("answered-attempt-1", "gpt-6.2-sol", "high", ACCEPTED, 195, {
       // Worked 10 minutes, waited 3 hours for the answer, then finished in 5.
       inputRequests: [{ round: 1, requestedAt: at(10), answer: { answeredAt: at(190) } }]
     })]),
-    task("cancelled-while-paused", [attempt("cancelled-while-paused-attempt-1", "gpt-6.1-sol", "high", BLOCKED, 70, {
+    task("cancelled-while-paused", [attempt("cancelled-while-paused-attempt-1", "gpt-6.2-sol", "high", BLOCKED, 70, {
       // Worked 10 minutes, then sat unanswered until it ended.
       inputRequests: [{ round: 1, requestedAt: at(10), answer: null }]
     })])
   ]);
   const evidence = routeEvidence(root, { lane: "api" });
-  const sol = row(evidence, "gpt-6.1-sol", "high");
+  const sol = row(evidence, "gpt-6.2-sol", "high");
   assert.equal(sol.durationSamples, 2);
   assert.equal(sol.medianDurationMs, 12.5 * 60_000);
 });
