@@ -10,7 +10,7 @@ import {
   validateGuidancePolicy,
   validateGuidanceSelection
 } from "./guidance.mjs";
-import { overlappingPatterns, scopeCovers } from "./glob.mjs";
+import { overlappingPatterns, patternsMayOverlap, scopeCovers } from "./glob.mjs";
 import { ledgerForBriefing } from "./ledger.mjs";
 import { getLane } from "./lanes.mjs";
 import { checkoutFingerprint, executeCheck, normalizeChecks, reviewFingerprint } from "./checks.mjs";
@@ -496,6 +496,8 @@ export function isOpenRun(run) {
  * match exactly one run. An ambiguous or unknown fragment is refused with the
  * candidates rather than guessed.
  */
+const MIN_RUN_ID_FRAGMENT = 6;
+
 export function resolveRunId(cwd, value) {
   const token = String(value ?? "").trim();
   if (!token) {
@@ -508,6 +510,14 @@ export function resolveRunId(cwd, value) {
   if (token === "latest") {
     if (!runs.length) throw new Error("There are no orchestration runs in this repository yet.");
     return runs[0].id;
+  }
+  // A fragment this short could select a run by accident, and commands such as
+  // cancel and finalize cannot be undone.
+  if (token.length < MIN_RUN_ID_FRAGMENT) {
+    throw new Error(
+      `"${token}" is too short to pick a run; use at least ${MIN_RUN_ID_FRAGMENT} characters of the id ` +
+        "(its last 8 are unique), `latest`, or the full id. `orch run list` shows them."
+    );
   }
   const matches = runs.filter((run) => run.id.includes(token));
   if (matches.length === 1) {
@@ -1170,7 +1180,11 @@ export function historicalTaskAssignment(run, task, attempt, claimedPlanRevision
     : null;
 }
 
-export function replacePlan(cwd, runId, rawTasks, { defaultScope = [], userApproved = false } = {}) {
+export function replacePlan(cwd, runId, rawTasks, { defaultScope = [], approvedTasks = [] } = {}) {
+  if (!Array.isArray(approvedTasks)) {
+    throw new Error("Scope approval names the tasks the user approved: pass their ids, one per --user-approved-task.");
+  }
+  const approved = new Set(approvedTasks.map((entry) => String(entry).trim()).filter(Boolean));
   if (!Array.isArray(rawTasks) || !rawTasks.length) {
     throw new Error("A run plan requires a non-empty tasks array.");
   }
@@ -1231,9 +1245,18 @@ export function replacePlan(cwd, runId, rawTasks, { defaultScope = [], userAppro
     }
     validateGraph(tasks);
     validateLunaLeaves(run, tasks);
+    // An approval names one task: approving one out-of-lane scope must never
+    // carry another task's out-of-lane scope through with it.
+    for (const taskId of approved) {
+      const task = tasks[taskId];
+      if (!task) throw new Error(`--user-approved-task names "${taskId}", which is not in the plan.`);
+      if (!run.contract || task.kind !== "write" || taskInsideLane(run, task)) {
+        throw new Error(`Task "${taskId}" does not need scope approval: it is not a write task outside lane "${run.lane}".`);
+      }
+    }
     for (const task of Object.values(tasks)) {
       if (!run.contract || task.status === "completed") continue;
-      if (task.kind === "write" && !taskInsideLane(run, task) && userApproved) {
+      if (approved.has(task.id)) {
         task.scopeApproval = { scope: [...task.scope], userApproved: true, at: nowIso() };
       }
       assertTaskAuthority(run, task);
@@ -1283,8 +1306,24 @@ export function readyTasks(run) {
 
 function taskInsideLane(run, task) {
   return JSON.stringify(task.scope) === JSON.stringify(run.contract.scope) ||
-    task.scope.filter((pattern) => !pattern.startsWith("!"))
-      .every((pattern) => scopeCovers(run.contract.scope, pattern));
+    task.scope.every((pattern, index) => pattern.startsWith("!") || patternInsideLane(run.contract.scope, task.scope, pattern, index));
+}
+
+/**
+ * Whether one positive task pattern stays inside the lane. Either the lane
+ * covers it outright, or the lane's positives cover it and every lane
+ * exclusion that could touch it is excluded by the task itself too (a task
+ * exclusion after the pattern that covers the lane's), so a task narrower than
+ * the lane by extra exclusions is not mistaken for one outside it.
+ */
+function patternInsideLane(laneScope, taskScope, pattern, index) {
+  if (scopeCovers(laneScope, pattern)) return true;
+  const positives = laneScope.filter((entry) => !entry.startsWith("!"));
+  if (!scopeCovers(positives, pattern)) return false;
+  const taskExclusions = taskScope.slice(index + 1).filter((entry) => entry.startsWith("!")).map((entry) => entry.slice(1));
+  return laneScope.filter((entry) => entry.startsWith("!")).map((entry) => entry.slice(1))
+    .filter((excluded) => patternsMayOverlap(excluded, pattern))
+    .every((excluded) => taskExclusions.some((own) => scopeCovers([own], excluded)));
 }
 
 function assertTaskAuthority(run, task) {
@@ -1295,7 +1334,7 @@ function assertTaskAuthority(run, task) {
   if (task.kind !== "write" || taskInsideLane(run, task)) return;
   const approval = task.scopeApproval;
   if (!approval?.userApproved || JSON.stringify(approval.scope) !== JSON.stringify(task.scope)) {
-    throw new Error(`Task "${task.id}" scope is outside lane "${run.lane}". Narrow it or ask the user, then repeat run plan with --user-approved.`);
+    throw new Error(`Task "${task.id}" scope is outside lane "${run.lane}". Narrow it or ask the user, then repeat run plan with --user-approved-task ${task.id}.`);
   }
 }
 

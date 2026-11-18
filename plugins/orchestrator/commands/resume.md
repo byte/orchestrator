@@ -22,7 +22,7 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" run list --open --json
 - None: say there is no open run, show `run list` (the most recent runs) so the user can see what
   finished, and stop.
 
-Any run command accepts the full id, `latest`, or a unique fragment such as the id's last 8
+Any run command accepts the full id, `latest`, or a unique fragment of at least 6 characters such as the id's last 8
 characters; a fragment that matches several runs is refused with the candidates.
 
 First recover authoritative state:

@@ -238,7 +238,7 @@ Resume the same manager after interruption or compaction:
 ```
 
 With no argument it finds the open run itself, or asks which one when there are several. Every run
-command also takes the full id, `latest`, or a unique fragment such as the id's last 8 characters.
+command also takes the full id, `latest`, or a unique fragment of at least 6 characters such as the id's last 8.
 To see the runs, newest first with status, age, and progress:
 
 ```text
@@ -679,7 +679,7 @@ derive a purged sample again until the raw run itself is removed through a separ
 
 ## Run contracts and plan checks
 
-New CLI runs freeze their lane's scope, constraints, and definition of done when created. Editing a lane later does not widen an existing run. Initial write scopes outside that boundary require the user's approval and `run plan --user-approved`; the approval is saved against the exact task scope, not the whole lane. Every task requires at least one acceptance criterion.
+New CLI runs freeze their lane's scope, constraints, and definition of done when created. Editing a lane later does not widen an existing run. Initial write scopes outside that boundary require the user's approval and `run plan --user-approved-task <task-id>` for each approved task; the approval is saved against that task's exact scope, never the whole plan or lane. A task that is narrower than the lane only by its own extra exclusions counts as inside it. Every task requires at least one acceptance criterion.
 
 Planning reports potentially overlapping writers. Writers with an identical positive scope pattern cannot hold that surface simultaneously: integrate the first or narrow the assignments. Approximate glob intersections remain warnings, so conservative matching does not unnecessarily serialize independent work. Read tasks can still run together.
 

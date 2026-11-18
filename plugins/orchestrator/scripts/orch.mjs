@@ -108,7 +108,7 @@ Usage:
       per model and effort: attempts, first-attempt acceptance (rate only when n>=5), retries, median duration
   orch run create <lane> --objective <text> [--id <run-id>] [--max-workers <n>] [--model <auto|astra|sol|terra|luna>] [--effort <auto|level>] [--executor <cli|codex-plugin>] [--json]
   orch run show <run-id> [--json]
-  orch run plan <run-id> --plan-file <path> [--user-approved] [--json]
+  orch run plan <run-id> --plan-file <path> [--user-approved-task <task-id>]... [--json]
   orch run ready <run-id> [--json]
   orch run briefing <run-id>
   orch run guidance <run-id> (--mode <provisional|off> [--policy-version <id>] | --rollback) [--json]
@@ -686,7 +686,7 @@ function commandRun(argv, cwd) {
 
   const { options, positionals } = parseArgs(rest, {
     booleanOptions: ["json", "fresh", "deny", "user-approved", "no-watch", "release-uncertain"],
-    repeatableOptions: ["decision", "risk", "next", "evidence", "grant-scope"],
+    repeatableOptions: ["decision", "risk", "next", "evidence", "grant-scope", "user-approved-task"],
     valueOptions: [
       "plan-file",
       "summary",
@@ -779,7 +779,10 @@ function commandRun(argv, cwd) {
     const run = loadRun(cwd, runId);
     const lane = run.contract ?? requireLane(cwd, run.lane);
     const tasks = Array.isArray(payload) ? payload : payload.tasks;
-    const updated = replacePlan(cwd, runId, tasks, { defaultScope: lane.scope, userApproved: Boolean(options["user-approved"]) });
+    if (options["user-approved"]) {
+      throw new Error("`run plan` approves out-of-lane scope per task: pass --user-approved-task <task-id> for each task the user approved.");
+    }
+    const updated = replacePlan(cwd, runId, tasks, { defaultScope: lane.scope, approvedTasks: repeatedValues(options["user-approved-task"]) });
     const warnings = planWarnings(updated);
     if (options.json) {
       return emitJson({ ...updated, warnings });

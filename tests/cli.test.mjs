@@ -819,7 +819,8 @@ test("run list is one line per run, --open hides closed runs, and short ids reso
   const ambiguous = runCli(root, ["run", "show", "run-2026110"]);
   assert.equal(ambiguous.code, 1);
   assert.match(ambiguous.stderr, /matches 2 runs; use more of the id:\n- run-20261102000000-bbbb2222 \(planning\)\n- run-20261101000000-aaaa1111 \(cancelled\)/);
-  assert.match(runCli(root, ["run", "show", "nope"]).stderr, /No run matches "nope"/);
+  assert.match(runCli(root, ["run", "show", "nopenope"]).stderr, /No run matches "nopenope"/);
+  assert.match(runCli(root, ["run", "show", "bbbb"]).stderr, /too short to pick a run/);
   assert.match(runCli(root, ["run", "show"]).stderr, /requires a run id; `orch run list --open`/);
 });
 

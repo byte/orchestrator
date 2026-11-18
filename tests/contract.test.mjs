@@ -54,7 +54,7 @@ test("initial scope and acceptance are enforced against the frozen lane", () => 
 
 test("out-of-lane approval is explicit and bound to the exact task scope", () => {
   const root = repo();
-  assert.equal(plan(root, [task("billing", ["billing/a.js"])], ["--user-approved"]).code, 0);
+  assert.equal(plan(root, [task("billing", ["billing/a.js"])], ["--user-approved-task", "billing"]).code, 0);
   assert.equal(plan(root, [task("billing", ["billing/a.js"])]).code, 0, "approved scope survives replan");
   assert.match(plan(root, [task("billing", ["billing/b.js"])]).stderr, /outside lane/);
   checkpoint(root);
@@ -132,4 +132,23 @@ test("blocked diagnostics name dependencies, stale checkpoints, and ambiguous in
   run.pendingIntegration = null;
   run.pendingIntegrationEvent = { eventId: "accepted-but-unpublished" };
   assert.match(runDiagnostics(root, run).alerts[0].reason, /accepted; audit publication pending/);
+});
+
+test("approval names tasks: approving one out-of-lane task never carries another through", () => {
+  const root = repo();
+  const stray = plan(root, [task("billing", ["billing/a.js"]), task("deploy", ["deploy/x.sh"])], ["--user-approved-task", "billing"]);
+  assert.match(stray.stderr, /"deploy" scope is outside lane .*--user-approved-task deploy/);
+  assert.match(plan(root, [task("billing", ["billing/a.js"])], ["--user-approved"]).stderr, /--user-approved-task <task-id>/);
+  assert.match(plan(root, [task("safe")], ["--user-approved-task", "safe"]).stderr, /does not need scope approval/);
+  assert.match(plan(root, [task("safe")], ["--user-approved-task", "ghost"]).stderr, /"ghost", which is not in the plan/);
+  assert.equal(plan(root, [task("billing", ["billing/a.js"]), task("deploy", ["deploy/x.sh"])],
+    ["--user-approved-task", "billing", "--user-approved-task", "deploy"]).code, 0);
+});
+
+test("a task narrower than the lane only by its own extra exclusions is inside it", () => {
+  const root = repo();
+  // Lane: src/** except src/private/**.
+  assert.equal(plan(root, [task("narrow", ["src/**", "!src/private/**", "!src/generated/**"])]).code, 0);
+  assert.equal(plan(root, [task("wider", ["src/**", "!src/private/a.js"])]).code === 0, false, "excluding less than the lane is still outside");
+  assert.match(plan(root, [task("order", ["!src/private/**", "src/**"])]).stderr, /outside lane/, "an exclusion before the pattern does not carve it");
 });
