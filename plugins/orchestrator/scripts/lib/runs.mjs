@@ -26,6 +26,7 @@ import {
   withFileLock
 } from "./state.mjs";
 import { integrateTaskWorktree, recoverTaskIntegration } from "./worktrees.mjs";
+import { DEFAULT_EXECUTOR, normalizeExecutor } from "./codex-plugin.mjs";
 
 export const DEFAULT_WORKER_MODEL = null;
 export const DEFAULT_REASONING_EFFORT = null;
@@ -686,10 +687,12 @@ export function createRun(
     objective,
     maxWorkers = DEFAULT_MAX_WORKERS,
     workerModel = DEFAULT_WORKER_MODEL,
-    reasoningEffort = DEFAULT_REASONING_EFFORT
+    reasoningEffort = DEFAULT_REASONING_EFFORT,
+    executor = DEFAULT_EXECUTOR
   }
 ) {
   const runId = assertId(id, "run");
+  const selectedExecutor = normalizeExecutor(executor);
   const body = String(objective ?? "").trim();
   if (!body) {
     throw new Error("A run objective is required.");
@@ -715,7 +718,8 @@ export function createRun(
         routingMode: model ? "pinned" : DEFAULT_ROUTING_MODE,
         model,
         reasoningEffort: effort,
-        maxWorkers: positiveInteger(maxWorkers, "max-workers", DEFAULT_MAX_WORKERS)
+        maxWorkers: positiveInteger(maxWorkers, "max-workers", DEFAULT_MAX_WORKERS),
+        executor: selectedExecutor
       },
       repository: {
         baseHead: headSha(cwd),

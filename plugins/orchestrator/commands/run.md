@@ -1,6 +1,6 @@
 ---
 description: Automatically route and manage a Codex worker pool from the Claude Code main thread
-argument-hint: "<what you want done> [lane] [--max-workers <n>] [--model <auto|astra|sol|terra|luna>] [--effort <auto|level>]"
+argument-hint: "<what you want done> [lane] [--max-workers <n>] [--model <auto|astra|sol|terra|luna>] [--effort <auto|level>] [--executor <cli|codex-plugin>]"
 allowed-tools: Read, Grep, Glob, Write, Bash(node:*), AskUserQuestion
 ---
 
@@ -19,7 +19,7 @@ Expect plain language, not flags. Most invocations are a sentence describing an 
 user may not name a lane, a worker count, or a route at all. Extract what was given and derive the
 rest; never answer a conversational request with flag syntax the user must retype.
 
-Parse `--max-workers`, `--model`, and `--effort` with their values independently from the
+Parse `--max-workers`, `--model`, `--effort`, and `--executor` with their values independently from the
 remaining text. Flags never make the first positional token a lane. Treat the remaining text as
 the objective unless the user unambiguously named a lane under the resolution rules below. For
 example, in `/orchestrator:run --max-workers 3 add cursor pagination`, the objective is `add cursor
@@ -68,6 +68,16 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" run create <lane> \
 Pass `--max-workers` only when the user gave a worker count; the default pool is 5 concurrent
 workers. Append `--model <astra|sol|terra|luna>` or `--effort <level>` only when the user explicitly
 supplied that override. Omitted dimensions remain supervisor-routed. Keep the returned run id.
+
+Append `--executor codex-plugin` only when the user asks for workers to run through the OpenAI
+Codex plugin for Claude Code (`codex@openai-codex`) rather than the Codex CLI directly; the default
+is `cli`. The plugin path is weaker, and every attempt records how: Codex does not enforce the
+output schema (the report is parsed from the final message, and a malformed one is a contract
+failure), saved Codex approval rules are not ignored, a read worker has no private writable
+`TMPDIR` (recorded as a sandbox fallback, so rerun tests it reports failing), `max` and `ultra`
+effort run at `xhigh` (recorded as `effortStepped`), a read task's retry starts a fresh thread, and a cancel interrupts the turn but cannot stop a
+command already running in the plugin's shared app-server.
+Its jobs also appear in `/codex:status`. A run's executor is fixed when it is created.
 
 ## 3. Plan
 

@@ -30,6 +30,7 @@ import {
 import { removeTree, SCRATCH_OWNER_FILE } from "./remove-tree.mjs";
 import { atomicWrite } from "./state.mjs";
 import { assertLaunchable, createTaskWorktree, inPlaceCheckout, reuseTaskWorktree, worktreeGitDir } from "./worktrees.mjs";
+import { DEFAULT_EXECUTOR, findCodexCompanion, pluginEffort, pluginLimitations } from "./codex-plugin.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const childScript = path.join(here, "..", "worker-child.mjs");
@@ -414,7 +415,10 @@ function tail(filePath, bytes = 8000) {
 function spawnWorker(
   cwd,
   directory,
-  { prompt, fallbackPrompt = null, codexCommand, worktreePath, model, reasoningEffort, kind, resumeThreadId = null, commitMessage = null }
+  {
+    prompt, fallbackPrompt = null, codexCommand, worktreePath, model, reasoningEffort, kind,
+    resumeThreadId = null, commitMessage = null, executor = DEFAULT_EXECUTOR, companionScript = null
+  }
 ) {
   fs.mkdirSync(directory, { recursive: true });
   const files = {
@@ -444,7 +448,10 @@ function spawnWorker(
     ...(kind === "write"
       ? { commitMessage, gitDir: worktreeGitDir(cwd, worktreePath) }
       : {}),
-    ...(resumeThreadId ? { resumeThreadId } : {})
+    ...(resumeThreadId ? { resumeThreadId } : {}),
+    ...(executor === "codex-plugin"
+      ? { executor, companionScript, pluginEffort: pluginEffort(reasoningEffort).effort }
+      : {})
   };
   atomicWrite(files.specFile, `${JSON.stringify(spec, null, 2)}\n`);
   const child = spawn(process.execPath, [childScript, files.specFile], {
@@ -453,12 +460,38 @@ function spawnWorker(
     stdio: "ignore"
   });
   child.unref();
+  const stepped = pluginEffort(reasoningEffort);
   return {
     pid: child.pid,
     status: "starting",
     ...files,
+    ...(executor === "codex-plugin"
+      ? {
+          executor,
+          executorLimitations: pluginLimitations(kind),
+          ...(stepped.stepped ? { effortStepped: { requested: stepped.requested, ran: stepped.effort } } : {})
+        }
+      : {}),
     launchedAt: new Date().toISOString()
   };
+}
+
+/**
+ * The executor a launch uses and, for the plugin path, its companion script.
+ * Resolved before the claim, so a missing plugin spends no attempt.
+ */
+function resolveExecutor(executor) {
+  if (executor !== "codex-plugin") {
+    return { executor: DEFAULT_EXECUTOR, companionScript: null };
+  }
+  const companionScript = findCodexCompanion();
+  if (!companionScript) {
+    throw new Error(
+      "This run uses the Codex plugin executor, but the codex@openai-codex plugin is not installed. " +
+      "Install it (`/plugin install codex@openai-codex`) or create the run with --executor cli."
+    );
+  }
+  return { executor, companionScript };
 }
 
 /** The message the wrapper commits a write worker's changes under. */
@@ -490,7 +523,7 @@ export function launchTaskWorker(
   if (planned.tasks?.[taskId]?.kind === "write") {
     assertLaunchable(cwd, planned);
   }
-
+  const execution = resolveExecutor(planned.workerPolicy?.executor);
   let dispatch;
   try {
     dispatch = claimTask(cwd, runId, taskId, lane);
@@ -532,7 +565,8 @@ export function launchTaskWorker(
       reasoningEffort: dispatch.reasoningEffort,
       kind: task.kind,
       commitMessage: workerCommitMessage(task, attempt.id),
-      resumeThreadId: attempt.resumedFromAttemptId ? retry?.resumeThreadId ?? null : null
+      resumeThreadId: attempt.resumedFromAttemptId ? retry?.resumeThreadId ?? null : null,
+      ...execution
     });
     attachExecution(cwd, runId, taskId, {
       attemptId: attempt.id,
@@ -919,6 +953,8 @@ export function answerTaskWorker(
     const run = loadRun(cwd, runId);
     const task = run.tasks[taskId];
     const previousRunner = answered.round.answer.previousRunner;
+    // An answered attempt continues on the executor it started on.
+    const execution = resolveExecutor(previousRunner?.executor ?? run.workerPolicy?.executor);
     // Each try at answering a round gets its own directory: a failed try leaves a
     // cancelled status file behind, which a poll must never read for the next.
     const tries = answered.round.failedAnswers?.length ?? 0;
@@ -937,7 +973,8 @@ export function answerTaskWorker(
         reasoningEffort: answered.reasoningEffort,
         kind: task.kind,
         commitMessage: workerCommitMessage(task, answered.attemptId),
-        resumeThreadId: answered.resumeThreadId
+        resumeThreadId: answered.resumeThreadId,
+        ...execution
       }
     );
     runner.inputRound = answered.round.round;

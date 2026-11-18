@@ -50,6 +50,8 @@ process.on("exit", () => {
 let resumeFallback = null;
 let sandboxFallback = null;
 let groupCleanupPending = false;
+// The Codex plugin's job id, when the plugin executor runs this worker.
+let pluginJobId = null;
 
 // Every status write is numbered, so a poll that read an older snapshot cannot
 // save it over a newer one another poll already synchronized.
@@ -71,6 +73,7 @@ function writeStatus(fields) {
     ...(sandboxFallback ? { sandboxFallback } : {}),
     ...(scratchDir ? { scratchDir } : {}),
     ...(groupCleanupPending ? { groupCleanupPending: true } : {}),
+    ...(pluginJobId ? { pluginJobId } : {}),
     ...fields
   });
 }
@@ -91,7 +94,10 @@ function writeStatus(fields) {
 // already gives a profile of that name, and the probe below could not see them.
 const READ_PROFILE = `orchestrator-read-${crypto.randomBytes(8).toString("hex")}`;
 const [command, ...prefixArgs] = spec.codexCommand;
-const scratchDir = spec.sandbox === "read-only"
+const viaPlugin = spec.executor === "codex-plugin";
+// The plugin's read-only sandbox takes no permission profile, so there is no
+// scratch directory to provide; the attempt records that as a sandbox fallback.
+const scratchDir = spec.sandbox === "read-only" && !viaPlugin
   ? fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "orch-worker-")))
   : null;
 // `run cleanup` removes a scratch directory a hard-killed wrapper left behind
@@ -498,6 +504,190 @@ function runCodex(resumeThreadId, input = prompt) {
   });
 }
 
+// ---- Codex plugin executor -------------------------------------------------
+//
+// The plugin runs Codex through its app-server, usually in a shared broker, so
+// killing a `task` command would not stop the turn. Only its public job commands
+// are used: `task --background` returns a job id, `status` is polled, `result`
+// collects the final message, and a stop runs `cancel`, which interrupts the turn
+// and ends the job's processes.
+
+const PLUGIN_POLL_MS = Number(process.env.ORCHESTRATOR_PLUGIN_POLL_MS) || 3000;
+const PLUGIN_TERMINAL = new Set(["completed", "failed", "cancelled"]);
+
+function companion(args) {
+  return new Promise((resolveRun) => {
+    const child = spawn(process.execPath, [spec.companionScript, ...args], {
+      cwd: spec.worktreePath,
+      env: process.env,
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8").on("data", (chunk) => { stdout += chunk; });
+    child.stderr.setEncoding("utf8").on("data", (chunk) => { stderr += chunk; });
+    child.on("error", (error) => resolveRun({ code: null, stdout, stderr: `${stderr}${error.message}` }));
+    child.on("close", (code) => resolveRun({ code, stdout, stderr }));
+  });
+}
+
+function parseJson(text) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The worker's report from a final message the plugin did not constrain: the
+ * whole message, a fenced json block, or the last parseable object that looks
+ * like a report. Null when none is found, so collection reports a contract failure.
+ */
+function extractReport(raw) {
+  const text = String(raw ?? "").trim();
+  const whole = parseJson(text);
+  if (whole && typeof whole === "object" && !Array.isArray(whole)) {
+    return whole;
+  }
+  const fences = [...text.matchAll(/```(?:json)?\s*\n([\s\S]*?)```/g)].map((match) => match[1]);
+  for (const block of fences.reverse()) {
+    const parsed = parseJson(block.trim());
+    if (parsed && typeof parsed === "object" && "summary" in parsed) {
+      return parsed;
+    }
+  }
+  const end = text.lastIndexOf("}");
+  for (let start = text.indexOf("{"); start !== -1 && start < end; start = text.indexOf("{", start + 1)) {
+    const parsed = parseJson(text.slice(start, end + 1));
+    if (parsed && typeof parsed === "object" && "summary" in parsed) {
+      return parsed;
+    }
+  }
+  return null;
+}
+
+
+async function runPlugin() {
+  const write = spec.sandbox === "workspace-write";
+  // The plugin resumes only the most recent thread of a workspace. A write task's
+  // worktree is its own, so that is its thread; a read task shares the checkout
+  // with other workers, so it starts fresh with the full briefing instead.
+  const resume = Boolean(spec.resumeThreadId) && write;
+  if (spec.resumeThreadId && !resume) {
+    resumeFallback = {
+      reason: "executor_cannot_resume",
+      message: "The Codex plugin cannot resume a chosen thread in a shared checkout; started a fresh thread with the full briefing."
+    };
+  }
+  const schema = fs.readFileSync(spec.schemaFile, "utf8");
+  const promptFile = path.join(path.dirname(spec.statusFile), "plugin-prompt.md");
+  // Always the full briefing: a resumed thread may not be the one expected.
+  fs.writeFileSync(promptFile, `${fallbackPrompt}\n\n## Output contract\n\n` +
+    "Codex is not enforcing an output schema for this task. Your final message must be exactly one " +
+    "JSON object, with no prose before or after it, that matches this JSON schema:\n\n" +
+    `\`\`\`json\n${schema.trim()}\n\`\`\`\n`, { mode: 0o600 });
+
+  const queued = await companion([
+    "task", "--background", "--json", "--cwd", spec.worktreePath,
+    "--model", spec.model,
+    ...(spec.pluginEffort ? ["--effort", spec.pluginEffort] : []),
+    "--prompt-file", promptFile,
+    ...(write ? ["--write"] : []),
+    ...(resume ? ["--resume"] : [])
+  ]);
+  pluginJobId = parseJson(queued.stdout)?.jobId ?? null;
+  if (!pluginJobId) {
+    const message = (queued.stderr || queued.stdout || "the Codex plugin did not return a job id").trim();
+    errors.write(`${message}\n`);
+    output.write(`${JSON.stringify({ type: "turn.failed", error: { message } })}\n`);
+    return { code: queued.code || 1, signal: null, sawThread: false, stderrText: message };
+  }
+  writeStatus({ status: currentStatus });
+
+  let cancelRequested = false;
+  current = {
+    kill: () => {
+      if (!cancelRequested) {
+        cancelRequested = true;
+        companion(["cancel", pluginJobId, "--json", "--cwd", spec.worktreePath]).then((outcome) => {
+          if (outcome.code !== 0) {
+            errors.write(`[orchestrator] plugin cancel failed: ${(outcome.stderr || outcome.stdout).trim()}\n`);
+          }
+        });
+      }
+    }
+  };
+  if (stopping) {
+    current.kill();
+  }
+
+  let job = null;
+  let misses = 0;
+  for (;;) {
+    await new Promise((resolveWait) => setTimeout(resolveWait, PLUGIN_POLL_MS));
+    const snapshot = await companion(["status", pluginJobId, "--json", "--cwd", spec.worktreePath]);
+    const parsed = parseJson(snapshot.stdout);
+    job = parsed?.job ?? null;
+    if (!job) {
+      misses += 1;
+      if (misses >= 20) {
+        const message = `lost track of Codex plugin job ${pluginJobId}: ${(snapshot.stderr || snapshot.stdout).trim()}`;
+        errors.write(`${message}\n`);
+        return { error: new Error(message) };
+      }
+      continue;
+    }
+    misses = 0;
+    if (job.threadId && job.threadId !== threadId) {
+      threadId = job.threadId;
+      writeStatus({ status: "running" });
+    }
+    if (PLUGIN_TERMINAL.has(job.status)) {
+      break;
+    }
+  }
+
+  const collected = parseJson((await companion(["result", pluginJobId, "--json", "--cwd", spec.worktreePath])).stdout);
+  const stored = collected?.storedJob ?? {};
+  threadId = stored.threadId ?? job.threadId ?? threadId;
+  if (threadId) {
+    output.write(`${JSON.stringify({ type: "thread.started", thread_id: threadId })}\n`);
+  }
+  if (resume && threadId && threadId !== spec.resumeThreadId && !resumeFallback) {
+    resumeFallback = {
+      reason: "thread_replaced",
+      message: `The Codex plugin continued thread ${threadId} instead of ${spec.resumeThreadId}; it had the full briefing.`
+    };
+  }
+  const status = stored.status ?? job.status;
+  const raw = stored.result?.rawOutput ?? "";
+  const failure = String(stored.errorMessage ?? (status === "completed" ? "" : stored.rendered ?? "")).trim();
+  if (failure) {
+    errors.write(`${failure}\n`);
+    output.write(`${JSON.stringify({ type: "turn.failed", error: { message: failure } })}\n`);
+  } else {
+    output.write(`${JSON.stringify({ type: "turn.completed" })}\n`);
+  }
+  if (status === "completed") {
+    const report = extractReport(raw);
+    fs.writeFileSync(spec.lastMessageFile, report ? `${JSON.stringify(report)}\n` : raw, { mode: 0o600 });
+  }
+  return {
+    code: status === "completed" ? 0 : 1,
+    signal: null,
+    sawThread: Boolean(threadId),
+    stderrText: failure
+  };
+}
+
+if (viaPlugin && spec.sandbox === "read-only") {
+  sandboxFallback = {
+    reason: "codex_plugin_executor",
+    message: "The Codex plugin runs read tasks under plain --sandbox read-only, with no writable TMPDIR."
+  };
+}
+
 function finishScratch() {
   if (!scratchDir) {
     return;
@@ -527,8 +717,9 @@ if (scratchDir) {
   }
 }
 
-let result = await runCodex(spec.resumeThreadId ?? null);
+let result = viaPlugin ? await runPlugin() : await runCodex(spec.resumeThreadId ?? null);
 if (
+  !viaPlugin &&
   spec.resumeThreadId &&
   !stopping &&
   !result.error &&
@@ -549,7 +740,7 @@ if (
   result = await runCodex(null, fallbackPrompt);
 }
 
-if (result.replacedWithoutBriefing && !stopping) {
+if (!viaPlugin && result.replacedWithoutBriefing && !stopping) {
   errors.write("\n[orchestrator] resume started a new thread; relaunching it with the full briefing.\n");
   // The stopped thread may have written a result before it was stopped; the
   // relaunch must stand on its own result or report none.

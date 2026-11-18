@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.4
+
+- Workers can run through the OpenAI Codex plugin for Claude Code (`codex@openai-codex`) instead of the Codex CLI: `run create --executor codex-plugin` (or `/orchestrator:run ... --executor codex-plugin`). The wrapper uses only the plugin's public job commands (`task --background`, `status`, `result`, `cancel`), so a cancelled worker interrupts its turn rather than leaving it running in the plugin's shared broker, and the jobs show in `/codex:status`. Routing, worktrees, review, integration, and recovery are unchanged. The default stays `cli`.
+- The plugin path records what it does not guarantee on every attempt (`executor`, `executorLimitations`): Codex does not enforce the output schema, so the report is parsed from the final message; saved approval rules are not ignored; read workers have no private `TMPDIR` (recorded as a `codex_plugin_executor` sandbox fallback); `max` and `ultra` run at `xhigh` (`effortStepped`); a read task's retry starts a fresh thread (`executor_cannot_resume`); a cancel interrupts the turn, but a command already running in the plugin's shared app-server keeps running until it ends (observed with openai-codex 1.0.6).
+- A run on the plugin executor refuses to launch without the plugin before claiming the task.
+
 ## 0.6.3
 
 Fixes from a real review run in a repository with uncommitted work:

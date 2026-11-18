@@ -484,6 +484,25 @@ The wrapper owns signal forwarding and atomic status updates. Claude never needs
 worker process; it blocks only on `run wait`, run as a background command (see "Waiting for
 workers").
 
+## Codex plugin executor
+
+A run created with `--executor codex-plugin` keeps the same wrapper, status files, waits, and
+cancellation, but the wrapper drives the OpenAI Codex plugin's `codex-companion.mjs` instead of
+`codex exec`. The plugin runs Codex through its app-server, normally in a shared broker, so killing
+a `task` command would not stop the turn. The wrapper therefore uses only the public job commands:
+`task --background --json` returns a job id (saved in the status file as `pluginJobId`), `status`
+is polled, `result` collects the final message, and a stop runs `cancel`, which interrupts the turn
+and ends the job's processes. Observed with openai-codex 1.0.6 and Codex CLI 0.169.0: a shell
+command the turn had already started is a child of the plugin's shared `codex app-server`, not of
+the job, and keeps running after the cancel until it ends; the orchestrator cannot stop it without
+reaching into that shared server. The briefing is always sent in full with an output contract carrying
+the result schema; the report is taken from the final message (whole, a fenced block, or the last
+parseable object with a `summary`). Failures are written to the event stream as `turn.failed`, so
+model-unavailable detection still applies. The plugin resumes only a workspace's most recent
+thread: a write task's worktree is its own, so its warm retry passes `--resume`; a read task shares
+the checkout, so its retry starts fresh and records `executor_cannot_resume`. The plugin's effort
+ceiling is `xhigh`, and a higher route is stepped down and recorded on the runner.
+
 ## Warm retries
 
 `run retry <run-id> <task-id> [--note <text>] [--fresh]` first copies the task-level result,

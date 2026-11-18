@@ -112,6 +112,10 @@ All support `--json` where structured output is useful.
   Reject a write task that fails review with `run verify --verdict fail --evidence ...`, then
   `run retry --note`; it resumes in the same worktree. `--verdict pass` is refused on write tasks.
 - Every text or glob option value is one entry, commas included; repeat a flag for several.
+- A run created with `--executor codex-plugin` runs workers through the OpenAI Codex plugin's job
+  commands instead of `codex exec`. Its attempts record `executor`, `executorLimitations`, any
+  `effortStepped`, and, for read tasks, a `codex_plugin_executor` sandbox fallback. Treat its
+  reports and test claims with the same care as any sandbox fallback.
 - Newly terminal attempts carry a versioned outcome separate from lifecycle state. Use `run decide`
   for explicit policy refusal, authority escalation, or a terminal integration failure; never infer
   policy or authority boundaries from worker prose.

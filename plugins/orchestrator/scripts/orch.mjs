@@ -95,7 +95,7 @@ Usage:
   orch run list [--json]
   orch run routes [--lane <lane>] [--include-legacy] [--json]
       per model and effort: attempts, first-attempt acceptance (rate only when n>=5), retries, median duration
-  orch run create <lane> --objective <text> [--id <run-id>] [--max-workers <n>] [--model <auto|astra|sol|terra|luna>] [--effort <auto|level>] [--json]
+  orch run create <lane> --objective <text> [--id <run-id>] [--max-workers <n>] [--model <auto|astra|sol|terra|luna>] [--effort <auto|level>] [--executor <cli|codex-plugin>] [--json]
   orch run show <run-id> [--json]
   orch run plan <run-id> --plan-file <path> [--json]
   orch run ready <run-id> [--json]
@@ -513,7 +513,7 @@ function commandRun(argv, cwd) {
   if (action === "create") {
     const { options, positionals } = parseArgs(rest, {
       booleanOptions: ["json"],
-      valueOptions: ["objective", "id", "max-workers", "model", "effort"]
+      valueOptions: ["objective", "id", "max-workers", "model", "effort", "executor"]
     });
     const laneName = positionals[0];
     if (!laneName) {
@@ -526,7 +526,8 @@ function commandRun(argv, cwd) {
       objective: options.objective,
       maxWorkers: options["max-workers"],
       workerModel: options.model,
-      reasoningEffort: options.effort
+      reasoningEffort: options.effort,
+      executor: options.executor
     });
     return options.json ? emitJson(run) : emit(renderRunSummary(run));
   }

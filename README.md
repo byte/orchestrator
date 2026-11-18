@@ -312,6 +312,30 @@ The cost for write tasks is setup: ignored files such as `node_modules` are not 
 worktree (see [Project dependencies and test setup](#project-dependencies-and-test-setup)), and
 there is no mode yet that runs a write worker directly in your checkout.
 
+## Executors
+
+Workers run through the Codex CLI by default (`cli`). A run created with
+`/orchestrator:run ... --executor codex-plugin` runs them through the
+OpenAI Codex plugin for Claude Code (`codex@openai-codex`)
+instead, using its job commands (`task --background`, `status`, `result`, `cancel`), so the jobs
+also show in `/codex:status`. Everything else is unchanged: routing, worktrees, review,
+integration, and recovery. The plugin must be installed; a launch without it is refused before
+the task is claimed.
+
+The plugin path gives weaker guarantees, and each attempt records them:
+
+| | `cli` | `codex-plugin` |
+| --- | --- | --- |
+| Output schema | Enforced by Codex | Asked for in the briefing; parsed from the final message |
+| Saved approval rules | Ignored (`--ignore-rules`) | Not ignored |
+| Read worker temp files | Private writable `TMPDIR` | None (recorded as a sandbox fallback) |
+| Effort | `low` to `ultra` | Up to `xhigh`; higher routes run at `xhigh`, recorded |
+| Warm retry | Resumes the exact thread | Write tasks resume the worktree's latest thread; read tasks start fresh |
+| Cancel | Stops the worker's whole process group | Interrupts the turn; a command already running in the plugin's shared app-server keeps running until it ends |
+
+Use `cli` unless you specifically want the plugin's job tracking. Set `ORCHESTRATOR_CODEX_COMPANION`
+to point at a `codex-companion.mjs` outside the installed plugin.
+
 ## Commands
 
 | Command | Purpose |
