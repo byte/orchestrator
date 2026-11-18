@@ -98,26 +98,34 @@ export function executeCheck(cwd, definition, { codexCommand = ["codex"], writab
   const filesystem = { [scratch]: "write", ...(writable ? { [fs.realpathSync(cwd)]: "write" } : {}) };
   const descriptors = [fs.openSync(stdout, "wx", 0o600), fs.openSync(stderr, "wx", 0o600)];
   const startedAt = new Date().toISOString();
+  let terminationUncertain = false;
   try {
     let result;
-    try { result = spawnSync(resolveExecutable(codexCommand[0]), [
-      ...codexCommand.slice(1), "sandbox",
-      "-c", `default_permissions="${profile}"`,
-      "-c", `permissions.${profile}.extends=":read-only"`,
-      "-c", `permissions.${profile}.filesystem={${Object.entries(filesystem).map(([key, value]) => `${JSON.stringify(key)}=${JSON.stringify(value)}`).join(",")}}`,
-      "-c", `permissions.${profile}.network.enabled=${Boolean(network)}`,
-      "--", resolveExecutable(command.argv[0], cwd), ...command.argv.slice(1)
-    ], {
-      cwd, env: { ...process.env, TMPDIR: scratch }, detached: true,
-      timeout: command.timeoutSeconds * 1000, killSignal: "SIGKILL", stdio: ["ignore", ...descriptors]
-    }); } catch (error) { result = { status: null, signal: null, error }; }
+    try {
+      result = spawnSync(resolveExecutable(codexCommand[0]), [
+        ...codexCommand.slice(1), "sandbox",
+        "-c", `default_permissions="${profile}"`,
+        "-c", `permissions.${profile}.extends=":read-only"`,
+        "-c", `permissions.${profile}.filesystem={${Object.entries(filesystem).map(([key, value]) => `${JSON.stringify(key)}=${JSON.stringify(value)}`).join(",")}}`,
+        "-c", `permissions.${profile}.network.enabled=${Boolean(network)}`,
+        "--", resolveExecutable(command.argv[0], cwd), ...command.argv.slice(1)
+      ], {
+        cwd, env: { ...process.env, TMPDIR: scratch }, detached: true,
+        timeout: command.timeoutSeconds * 1000, killSignal: "SIGKILL", stdio: ["ignore", ...descriptors]
+      });
+    } catch (error) { result = { status: null, signal: null, error }; }
     if (result.pid) {
-      let reused = false;
-      try { process.kill(result.pid, 0); reused = true; } catch (error) {
-        if (error.code !== "ESRCH") throw error;
+      try {
+        let reused = false;
+        try { process.kill(result.pid, 0); reused = true; } catch (error) {
+          if (error.code !== "ESRCH") throw error;
+        }
+        if (reused) throw new Error("Cannot establish check process-group identity; preserve the checkout for diagnosis.");
+        signalProcessGroup(result.pid, "SIGKILL");
+      } catch (error) {
+        terminationUncertain = true;
+        result.error = error;
       }
-      if (reused) throw new Error("Cannot establish check process-group identity; preserve the checkout for diagnosis.");
-      signalProcessGroup(result.pid, "SIGKILL");
     }
     const tail = (file) => {
       const size = fs.statSync(file).size;
@@ -133,10 +141,11 @@ export function executeCheck(cwd, definition, { codexCommand = ["codex"], writab
       timeoutSeconds: command.timeoutSeconds, exitCode: result.status,
       signal: result.signal, error: result.error?.message ?? null,
       passed: !result.error && result.status === 0,
+      ...(terminationUncertain ? { terminationUncertain: true, processGroup: result.pid, captureDirectory: directory } : {}),
       sandbox: { writable, network }, stdout: tail(stdout), stderr: tail(stderr)
     };
   } finally {
     descriptors.forEach((fd) => fs.closeSync(fd));
-    fs.rmSync(directory, { recursive: true, force: true });
+    if (!terminationUncertain) fs.rmSync(directory, { recursive: true, force: true });
   }
 }

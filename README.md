@@ -335,6 +335,26 @@ waiver. Manual supervisor evidence remains required for acceptance on contracted
 criteria that cannot be established by a passing command. Lanes without checks retain manual
 verification, and existing runs do not acquire checks retroactively.
 
+### Combined candidate preview
+
+After review and isolated task checks, run `orch run preview <run-id> <task-id> --json`. It creates
+a detached scratch worktree at the recorded integration head, provisions its trusted setup,
+applies the inspected candidate with the same guarded Git path, and executes every configured
+check on that combination. It never advances the supervisor branch. A preview failure returns a
+nonzero exit and preserves its receipt, output tails, and scratch checkout for diagnosis.
+
+Runs with configured checks require a passing preview before write integration; invoking preview
+also opts that candidate into the gate when no checks are configured. Receipts bind to the exact
+target head, candidate commits, attempt, plan revision, and check definitions. Integrating another
+task or changing the candidate requires a new preview. Passing it does not skip supervisor review
+or the existing crash-safe integration protocol. `run cleanup` removes settled clean previews,
+but preserves dirty scratch work and uncertain process-termination obligations.
+
+Setup runs before candidate application, so candidate-modified scripts never gain setup's
+permissions. A candidate changing declared setup inputs is refused instead of being tested with
+stale dependencies; review dependency/setup changes separately. This first version handles one
+candidate at a time, not a batch merge queue.
+
 ## Worktrees and your branch
 
 You do not need a branching workflow. Integrated work lands as ordinary commits on the branch the

@@ -183,10 +183,18 @@ export function createTaskWorktree(cwd, run, task, attempt) {
   return { path: target, gitDir: worktreeGitDir(cwd, target), branch, baseHead, createdAt: new Date().toISOString() };
 }
 
+export function createPreviewWorktree(cwd, run, target) {
+  const baseHead = assertLaunchable(cwd, run);
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  git(cwd, ["worktree", "add", "--detach", target, baseHead], null, process.env, GIT_MUTATION_TIMEOUT_MS);
+  return { path: target, gitDir: worktreeGitDir(cwd, target), branch: "HEAD", baseHead, createdAt: new Date().toISOString() };
+}
+
 /** Setup runs only in an isolated, pristine tree, never over worker-modified scripts. */
 export function prepareTaskWorktree(cwd, run, worktree, options = {}) {
   const definition = normalizeSetup(run.contract?.setup ?? null);
   if (!definition) return null;
+  if (worktree.setup?.terminationUncertain) throw new Error("Previous setup process termination is uncertain; preserve this worktree and retry --fresh.");
   if (isSupervisorCheckout(cwd, worktree)) throw new Error("Setup cannot run in the supervisor checkout.");
   const gitDir = trustedGitDir(worktree, cwd);
   const fingerprint = checkoutFingerprint(worktree.path, { files: definition.inputs });
@@ -237,6 +245,7 @@ export function reuseTaskWorktree(cwd, run, previousAttempt) {
     // after it are this attempt's. Inspection carries declarations only for the former.
     reusedHead: headSha(source.path, { gitDir }),
     ...(source.setup ? { setup: source.setup } : {}),
+    ...(source.setupPending ? { setupPending: source.setupPending } : {}),
     reusedAt: new Date().toISOString()
   };
 }

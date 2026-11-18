@@ -6,7 +6,7 @@ import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { createRun, loadRun, replacePlan, retryTask, verifyTask } from "../plugins/orchestrator/scripts/lib/runs.mjs";
-import { cancelWorkers, launchTaskWorker, pollRunWorkers } from "../plugins/orchestrator/scripts/lib/workers.mjs";
+import { cancelWorkers, launchTaskWorker, pollRunWorkers, stopTaskWorker } from "../plugins/orchestrator/scripts/lib/workers.mjs";
 import { inspectTaskWorktree } from "../plugins/orchestrator/scripts/lib/worktrees.mjs";
 import { normalizeExecutor, pluginEffort } from "../plugins/orchestrator/scripts/lib/codex-plugin.mjs";
 import { checkpointPlan, cleanup, makeRepo, runCli } from "./helpers.mjs";
@@ -122,14 +122,20 @@ test("a write task runs through the plugin in its worktree, is committed, and a 
 
 test("a stopped plugin worker cancels its plugin job", async () => {
   process.env.FAKE_COMPANION_MS = "60000";
+  let launched;
   try {
     const root = repo("run-plugin-cancel", [{ id: "review", title: "Review", objective: "Review", kind: "read", acceptance: ["Report reviewed findings"] }]);
-    launchTaskWorker(root, "run-plugin-cancel", "review", lane);
+    launched = launchTaskWorker(root, "run-plugin-cancel", "review", lane);
     let jobId = null;
     for (let index = 0; index < 100 && !jobId; index += 1) {
       await new Promise((resolve) => setTimeout(resolve, 40));
       const runner = loadRun(root, "run-plugin-cancel").tasks.review.attempts.at(-1).runner;
-      jobId = JSON.parse(fs.readFileSync(runner.statusFile, "utf8")).pluginJobId ?? null;
+      try {
+        jobId = JSON.parse(fs.readFileSync(runner.statusFile, "utf8")).pluginJobId ?? null;
+      } catch (error) {
+        // Launch returns before the wrapper's first atomic status publication.
+        if (error.code !== "ENOENT") throw error;
+      }
     }
     assert.ok(jobId, "the wrapper records the plugin job id");
     cancelWorkers(root, "run-plugin-cancel", "review", "stop");
@@ -138,6 +144,7 @@ test("a stopped plugin worker cancels its plugin job", async () => {
     }
     assert.ok(calls("cancel").some((entry) => entry.args[0] === jobId));
   } finally {
+    if (launched) stopTaskWorker(launched);
     delete process.env.FAKE_COMPANION_MS;
   }
 });

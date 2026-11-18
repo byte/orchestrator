@@ -27,7 +27,7 @@ import {
   nowIso,
   withFileLock
 } from "./state.mjs";
-import { gitOperationInProgress, integrateTaskWorktree, recoverTaskIntegration } from "./worktrees.mjs";
+import { createPreviewWorktree, gitOperationInProgress, inspectTaskWorktree, integrateTaskWorktree, prepareTaskWorktree, recoverTaskIntegration } from "./worktrees.mjs";
 import { DEFAULT_EXECUTOR, normalizeExecutor } from "./codex-plugin.mjs";
 
 export const DEFAULT_WORKER_MODEL = null;
@@ -2692,6 +2692,26 @@ export function revertTaskAnswer(cwd, runId, taskId, { attemptId, round: answere
   });
 }
 
+/** Preserve the worktree and setup intent before a possibly long provisioning command. */
+export function prepareTaskAttempt(cwd, runId, taskId, attemptId, worktree, options = {}) {
+  return withFileLock(runFile(cwd, runId), () => {
+    const run = loadRun(cwd, runId), task = requireTask(run, taskId), attempt = currentAttempt(task, attemptId);
+    if (task.status !== "dispatching" || attempt.status !== "dispatching") {
+      if (!attempt.worktree) { attempt.worktree = worktree; writeRun(cwd, run); }
+      throw new AttachRefusedError("Task no longer dispatching; setup refused.");
+    }
+    attempt.worktree = worktree;
+    if (!run.contract?.setup) return;
+    worktree.setupPending = { startedAt: nowIso() };
+    writeRun(cwd, run);
+    try { prepareTaskWorktree(cwd, run, worktree, options); }
+    finally {
+      if (!worktree.setup?.terminationUncertain) delete worktree.setupPending;
+      writeRun(cwd, run);
+    }
+  });
+}
+
 export function attachExecution(cwd, runId, taskId, { attemptId, worktree, runner }) {
   const id = assertId(runId, "run");
   const filePath = runFile(cwd, id);
@@ -3059,6 +3079,7 @@ export function recordIntegration(
     }
     const task = requireTask(run, taskId);
     assertRequiredChecks(cwd, run, task.id);
+    assertIntegrationPreview(run, task, integration.inspection);
     return finishIntegration(cwd, run, task, integration);
   });
 }
@@ -3203,6 +3224,76 @@ function assertRequiredChecks(cwd, run, taskId = null) {
   }
 }
 
+export function previewRunTask(cwd, runId, taskId, options = {}) {
+  return withFileLock(path.join(localDir(cwd), "integration"), () =>
+    withFileLock(runFile(cwd, runId), () => {
+      const run = loadRun(cwd, runId);
+      assertNoPendingIntegration(run);
+      const task = requireTask(run, taskId);
+      if (task.kind !== "write" || task.status !== "reported") throw new Error("Preview requires a reported write task.");
+      const attempt = currentAttempt(task);
+      const inspection = inspectTaskWorktree(task, attempt, { cwd });
+      if (!inspection.ready) throw new Error("Candidate must pass worktree inspection before preview.");
+      const id = `preview-${randomUUID()}`;
+      const receipt = {
+        id, taskId, attemptId: attempt.id, planRevision: run.planRevision,
+        targetHead: run.repository.integrationHead, candidateHead: inspection.head, commits: inspection.commits,
+        worktree: { path: path.join(localDir(cwd), "previews", run.id, id) },
+        startedAt: nowIso(), status: "preparing", passed: false, checks: []
+      };
+      (run.previews ??= []).push(receipt);
+      writeRun(cwd, run);
+      try {
+        receipt.worktree = createPreviewWorktree(cwd, run, receipt.worktree.path);
+        prepareTaskWorktree(cwd, run, receipt.worktree, options);
+        writeRun(cwd, run);
+        const previewRun = { ...run, repository: { ...run.repository, branch: "HEAD" } };
+        const integrated = integrateTaskWorktree(receipt.worktree.path, previewRun, task, attempt, {
+          beforeApply(current) {
+            if (current.head !== receipt.candidateHead) throw new Error("Candidate changed while preparing preview; retry preview.");
+            receipt.status = "applying";
+            writeRun(cwd, run);
+          }
+        });
+        receipt.integrationHead = integrated.integrationHead;
+        receipt.status = "checking";
+        // Setup is provisioned from the trusted target, not candidate-modified scripts.
+        if (receipt.worktree.setup && checkoutFingerprint(receipt.worktree.path, { files: receipt.worktree.setup.definition.inputs }) !== receipt.worktree.setup.fingerprint) {
+          throw new Error("Candidate changes setup inputs; trusted target setup cannot certify its dependencies. Review the dependency change separately before preview.");
+        }
+        for (const definition of normalizeChecks(run.contract?.checks ?? [])) {
+          const before = checkoutFingerprint(receipt.worktree.path, { gitDir: receipt.worktree.gitDir });
+          const execution = executeCheck(receipt.worktree.path, definition, { codexCommand: options.codexCommand });
+          const after = checkoutFingerprint(receipt.worktree.path, { gitDir: receipt.worktree.gitDir });
+          receipt.checks.push({ ...execution, definition, fingerprint: before, changedDuringCheck: before !== after, passed: execution.passed && before === after });
+          receipt.mayBeRunning ||= Boolean(execution.terminationUncertain);
+          writeRun(cwd, run);
+        }
+        receipt.passed = receipt.checks.every((check) => check.passed);
+        receipt.status = receipt.passed ? "passed" : "failed";
+      } catch (error) {
+        receipt.status = "failed";
+        receipt.error = error.message;
+        receipt.mayBeRunning = Boolean(error.gitMayBeRunning || error.details?.terminationUncertain);
+      }
+      receipt.finishedAt = nowIso();
+      writeRun(cwd, run);
+      appendEvent(cwd, run.id, { type: "integration.previewed", receiptId: id, taskId, passed: receipt.passed });
+      return receipt;
+    }));
+}
+
+function assertIntegrationPreview(run, task, inspection) {
+  const definitions = normalizeChecks(run.contract?.checks ?? []);
+  const receipt = (run.previews ?? []).filter((entry) => entry.taskId === task.id && entry.attemptId === currentAttempt(task).id).at(-1);
+  if (!definitions.length && !receipt) return;
+  if (!receipt?.passed || receipt.targetHead !== run.repository.integrationHead || receipt.candidateHead !== inspection.head ||
+      receipt.planRevision !== run.planRevision || JSON.stringify(receipt.commits) !== JSON.stringify(inspection.commits) ||
+      JSON.stringify(receipt.checks.map((check) => check.definition)) !== JSON.stringify(definitions)) {
+    throw new Error(`Combined integration preview is missing, failed, or stale. Run orch run preview ${run.id} ${task.id}.`);
+  }
+}
+
 /** The checkout lock serializes runs; the run lock protects acceptance from cancellation. */
 export function integrateRunTask(cwd, runId, taskId, { evidence = [] } = {}) {
   const checks = stringList(evidence, "integration evidence");
@@ -3228,6 +3319,7 @@ export function integrateRunTask(cwd, runId, taskId, { evidence = [] } = {}) {
           operationId,
           beforeApply(inspection) {
             assertRequiredChecks(cwd, run, task.id);
+            assertIntegrationPreview(run, task, inspection);
             run.pendingIntegration = {
               id: operationId, taskId: task.id, attemptId: currentAttempt(task).id,
               priorHead: run.repository.integrationHead, inspection, evidence: checks,
@@ -3696,12 +3788,26 @@ export function takeWorktreesForRemoval(cwd, runId, taskId, detach, live = () =>
         continue;
       }
       for (const attempt of task.attempts) {
+        if (attempt.worktree?.setupPending || attempt.worktree?.setup?.terminationUncertain) {
+          refused.push({ taskId: task.id, attemptId: attempt.id, error: "Setup process termination is uncertain; preserve its worktree and receipt." });
+          continue;
+        }
         try {
           taken.push({ taskId: task.id, attempt: structuredClone(attempt), trash: detach(attempt) });
         } catch (error) {
           refused.push({ taskId: task.id, attemptId: attempt.id, error: error.message });
         }
       }
+    }
+    for (const preview of run.previews ?? []) {
+      if (taskId && preview.taskId !== taskId) continue;
+      if (preview.mayBeRunning || !["passed", "failed"].includes(preview.status)) {
+        refused.push({ taskId: preview.taskId, attemptId: preview.id, error: `Preview ${preview.worktree.path} has uncertain process termination; preserve it for manual diagnosis.` });
+        continue;
+      }
+      const attempt = { id: preview.id, worktree: preview.worktree };
+      try { taken.push({ taskId: preview.taskId, attempt, trash: detach(attempt) }); }
+      catch (error) { refused.push({ taskId: preview.taskId, attemptId: preview.id, error: error.message }); }
     }
     return { taken, refused };
   });

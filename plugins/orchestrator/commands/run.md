@@ -463,8 +463,7 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" run inspect <run-id> <task-id> --j
 
 Require a clean worktree, at least one worker commit, exact agreement between reported and changed
 files, and no paths outside the task's planned scope plus any scope you granted it (`grantedScope`
-in the inspection). After independently confirming tests and acceptance criteria,
-integrate it:
+in the inspection). After independently confirming tests and acceptance criteria, run `run preview <run-id> <task-id> --json` to check the combined candidate before integration. It is required when the contract has checks. A failed preview preserves the user's branch; inspect its receipt and fix the candidate rather than bypassing it. A later accepted task or candidate edit invalidates the preview. Candidate changes to setup inputs need separate dependency/setup review, not execution of modified scripts with setup permissions. Then integrate it:
 
 ```bash
 node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" run integrate <run-id> <task-id> \
