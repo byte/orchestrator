@@ -2806,13 +2806,16 @@ export function prepareTaskAttempt(cwd, runId, taskId, attemptId, worktree, opti
   if (!worktree.setup?.terminationUncertain) delete worktree.setupPending;
   withFileLock(runFile(cwd, runId), () => {
     const current = loadRun(cwd, runId);
-    const attempt = currentAttempt(requireTask(current, taskId), attemptId);
-    if (attempt.worktree?.path === worktree.path) {
+    // Found among retired tasks too: a replan during setup must not lose its receipt.
+    const owner = taskHistory(current).find((entry) => entry.id === taskId &&
+      entry.attempts.some((candidate) => candidate.id === attemptId));
+    const attempt = owner?.attempts.find((candidate) => candidate.id === attemptId);
+    if (attempt && attempt.worktree?.path === worktree.path) {
       attempt.worktree = worktree;
       writeRun(cwd, current);
     }
     const task = current.tasks[taskId];
-    if (!failure && (task?.status !== "dispatching" || attempt.status !== "dispatching")) {
+    if (!failure && (task?.status !== "dispatching" || attempt?.status !== "dispatching")) {
       failure = new AttachRefusedError("Task no longer dispatching after setup; no worker started.");
     }
   });
