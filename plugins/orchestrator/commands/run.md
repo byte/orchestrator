@@ -415,6 +415,8 @@ For every reported task:
 - evaluate every acceptance criterion
 - check blockers, assumptions, and confidence
 
+If the frozen contract has task checks, execute `run check <run-id> <task-id> --json` before acceptance. A worker's test claims cannot satisfy them. Inspect failed receipts rather than repeating acceptance; edits invalidate the old receipt. Check scripts run read-only with a private writable `TMPDIR` and no network. Passing commands do not replace review of the acceptance criteria.
+
 For read and verification tasks, record the supervisor verdict:
 
 ```bash

@@ -1,4 +1,5 @@
 import { loadLanesState, nowIso, updateLanesState, updateLocalState } from "./state.mjs";
+import { normalizeChecks } from "./checks.mjs";
 
 const NAME_PATTERN = /^[a-z0-9][a-z0-9._-]*$/;
 
@@ -39,7 +40,7 @@ export function requireLane(cwd, name) {
   return lane;
 }
 
-export function addLane(cwd, name, { description = "", scope = [], constraints = [], done = "" } = {}) {
+export function addLane(cwd, name, { description = "", scope = [], constraints = [], done = "", checks } = {}) {
   const laneName = assertValidLaneName(name);
   updateLanesState(cwd, (state) => {
     const existing = state.lanes[laneName];
@@ -48,6 +49,7 @@ export function addLane(cwd, name, { description = "", scope = [], constraints =
       scope: scope.length ? scope : existing?.scope ?? [],
       constraints: constraints.length ? constraints : existing?.constraints ?? [],
       done: done || existing?.done || "",
+      ...(checks === undefined ? (existing?.checks ? { checks: existing.checks } : {}) : { checks: normalizeChecks(checks) }),
       createdAt: existing?.createdAt ?? nowIso(),
       updatedAt: nowIso()
     };

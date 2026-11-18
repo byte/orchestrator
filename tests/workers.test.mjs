@@ -181,7 +181,7 @@ test("polling does not execute an integrated worker-written ps through relative 
   const id = "run-relative-ps";
   plan(root, id);
   replacePlan(root, id, [loadRun(root, id).tasks.build, {
-    id: "waiting", title: "Wait", objective: "Wait", kind: "read", scope: ["src/**"]
+    id: "waiting", title: "Wait", objective: "Wait", kind: "read", scope: ["src/**"], acceptance: ["Source reviewed"]
   }]);
   checkpointPlan(root, id);
   const dispatch = claimTask(root, id, "build", { constraints: [] });
@@ -200,7 +200,7 @@ test("polling does not execute an integrated worker-written ps through relative 
   fs.writeFileSync(statusFile, JSON.stringify({ pid: idle.pid, startedAt, status: "running" }));
   attachExecution(root, id, "waiting", { attemptId: second.attemptId, runner: { pid: idle.pid, statusFile, launchedAt: startedAt } });
   try {
-    const integrated = runCli(root, ["run", "integrate", id, "build"]);
+    const integrated = runCli(root, ["run", "integrate", id, "build", "--evidence", "Reviewed the candidate paths"]);
     assert.equal(integrated.code, 0, integrated.stderr);
     const polled = spawnSync(process.execPath, [CLI, "run", "poll", id], {
       cwd: root, encoding: "utf8", env: { ...process.env, PATH: `src:.:${process.env.PATH}` }
@@ -368,7 +368,7 @@ test("integration reaps a signalled Git launcher's group or retains mutation own
     reportFiles(root, id, dispatch.attemptId, ["src/module.js"]);
     const pidFile = path.join(path.dirname(runFile(root, id)), "git.pid");
     const head = git(root, ["rev-parse", "HEAD"]).trim();
-    const result = spawnSync(process.execPath, [CLI, "run", "integrate", id, "build"], {
+    const result = spawnSync(process.execPath, [CLI, "run", "integrate", id, "build", "--evidence", "Reviewed the candidate paths"], {
       cwd: root, encoding: "utf8",
       env: { ...process.env, NODE_OPTIONS: `--import=${preload}`, ORCH_TEST_INTEGRATION_INTERRUPT: phase,
         ORCH_TEST_GIT_PID: pidFile }
@@ -492,7 +492,7 @@ test("accepted integration repairs its audit event exactly once after publicatio
     git(worktree.path, ["add", "src/module.js"]);
     git(worktree.path, ["commit", "--quiet", "-m", "Add module"]);
     reportFiles(root, id, dispatch.attemptId, ["src/module.js"]);
-    const result = spawnSync(process.execPath, [CLI, "run", "integrate", id, "build"], {
+    const result = spawnSync(process.execPath, [CLI, "run", "integrate", id, "build", "--evidence", "Reviewed the candidate paths"], {
       cwd: root, encoding: "utf8",
       env: { ...process.env, NODE_OPTIONS: `--import=${preload}`, ORCH_TEST_INTEGRATION_INTERRUPT: phase }
     });
@@ -534,7 +534,7 @@ test("a run with a write task still refuses to finalize on a dirty checkout", ()
   const root = repo();
   const id = "run-final-write-dirty";
   reportedBuild(root, id);
-  const integrated = runCli(root, ["run", "integrate", id, "build", "--json"]);
+  const integrated = runCli(root, ["run", "integrate", id, "build", "--evidence", "Reviewed the candidate paths", "--json"]);
   assert.equal(integrated.code, 0, integrated.stderr);
   assert.equal(loadRun(root, id).status, "finalizing");
   write(root, "uncommitted.txt", "dirty\n");
@@ -551,9 +551,9 @@ test("a pending audit event holds the run, and a torn log line does not block it
   const root = repo();
   const id = "run-audit-held";
   reportedBuild(root, id, [{
-    id: "after", title: "After", objective: "After", kind: "read", scope: ["src/**"], dependsOn: ["build"]
+    id: "after", title: "After", objective: "After", kind: "read", scope: ["src/**"], dependsOn: ["build"], acceptance: ["Source reviewed"]
   }]);
-  const result = spawnSync(process.execPath, [CLI, "run", "integrate", id, "build"], {
+  const result = spawnSync(process.execPath, [CLI, "run", "integrate", id, "build", "--evidence", "Reviewed the candidate paths"], {
     cwd: root, encoding: "utf8",
     env: { ...process.env, NODE_OPTIONS: `--import=${preload}`, ORCH_TEST_INTEGRATION_INTERRUPT: "audit-publish" }
   });
@@ -580,7 +580,7 @@ test("an interrupted integration recorded before phases recovers once Git has re
   const id = "run-legacy-pending";
   reportedBuild(root, id);
   const before = git(root, ["rev-parse", "HEAD"]).trim();
-  const result = spawnSync(process.execPath, [CLI, "run", "integrate", id, "build"], {
+  const result = spawnSync(process.execPath, [CLI, "run", "integrate", id, "build", "--evidence", "Reviewed the candidate paths"], {
     cwd: root, encoding: "utf8",
     env: { ...process.env, NODE_OPTIONS: `--import=${preload}`, ORCH_TEST_INTEGRATION_INTERRUPT: "before-git" }
   });
@@ -608,7 +608,7 @@ test("a refused run cancellation leaves its still-running worker untouched", asy
   const id = "run-refused-cancel";
   plan(root, id);
   replacePlan(root, id, [loadRun(root, id).tasks.build, {
-    id: "waiting", title: "Wait", objective: "Wait", kind: "read", scope: ["src/**"]
+    id: "waiting", title: "Wait", objective: "Wait", kind: "read", scope: ["src/**"], acceptance: ["Source reviewed"]
   }]);
   checkpointPlan(root, id);
   const first = claimTask(root, id, "build", { constraints: [] });
@@ -627,7 +627,7 @@ test("a refused run cancellation leaves its still-running worker untouched", asy
   attachExecution(root, id, "waiting", { attemptId: second.attemptId, runner: { pid: idle.pid, statusFile, launchedAt: startedAt } });
   const preload = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "interrupt-integration.mjs");
   try {
-    assert.throws(() => execFileSync(process.execPath, [CLI, "run", "integrate", id, "build"], {
+    assert.throws(() => execFileSync(process.execPath, [CLI, "run", "integrate", id, "build", "--evidence", "Reviewed the candidate paths"], {
       cwd: root, stdio: "pipe",
       env: { ...process.env, NODE_OPTIONS: `--import=${preload}`, ORCH_TEST_INTEGRATION_INTERRUPT: "before-git" }
     }), (error) => error.status === 86);
@@ -686,7 +686,7 @@ test("a conflicted integration rolls back without running a worker-changed fsmon
   const task = run.tasks.build;
   task.attempts.at(-1).worktree = worktree;
   fs.writeFileSync(runFile(root, "run-conflict"), `${JSON.stringify(run, null, 2)}\n`);
-  const result = runCli(root, ["run", "integrate", "run-conflict", "build"]);
+  const result = runCli(root, ["run", "integrate", "run-conflict", "build", "--evidence", "Reviewed the candidate paths"]);
   assert.equal(result.code, 1);
   assert.match(result.stderr, /integration|cherry-pick|conflict/i);
   assert.equal(loadRun(root, "run-conflict").pendingIntegration, undefined);
@@ -1152,8 +1152,8 @@ test("the pool runs independent read tasks as separate detached workers in the c
     reasoningEffort: "high"
   });
   replacePlan(root, "run-pool-e2e", [
-    { id: "inspect-a", title: "Inspect A", objective: "Inspect A", kind: "read" },
-    { id: "inspect-b", title: "Inspect B", objective: "Inspect B", kind: "read" }
+    { id: "inspect-a", title: "Inspect A", objective: "Inspect A", kind: "read", acceptance: ["Source reviewed"] },
+    { id: "inspect-b", title: "Inspect B", objective: "Inspect B", kind: "read", acceptance: ["Source reviewed"] }
   ]);
   checkpointPlan(root, "run-pool-e2e");
   const first = launchTaskWorker(root, "run-pool-e2e", "inspect-a", { constraints: [] }, {
@@ -1208,8 +1208,8 @@ test("a read task launches in a dirty checkout and sees its untracked files; a w
   const root = repo();
   createRun(root, { id: "run-dirty", lane: "api", objective: "Review a draft", workerModel: "sol", reasoningEffort: "high" });
   replacePlan(root, "run-dirty", [
-    { id: "review", title: "Review", objective: "Review docs/draft.md", kind: "read" },
-    { id: "build", title: "Build", objective: "Build it", kind: "write", scope: ["src/**"] }
+    { id: "review", title: "Review", objective: "Review docs/draft.md", kind: "read", acceptance: ["Draft reviewed"] },
+    { id: "build", title: "Build", objective: "Build it", kind: "write", scope: ["src/**"], acceptance: ["Module built"] }
   ]);
   checkpointPlan(root, "run-dirty");
   write(root, "docs/draft.md", "# Untracked draft\n");
@@ -1238,8 +1238,8 @@ test("one worker that cannot be stopped does not leave the run's other workers r
   const id = "run-partial-stop";
   createRun(root, { id, lane: "api", objective: "Inspect in parallel", maxWorkers: 2, workerModel: "sol", reasoningEffort: "high" });
   replacePlan(root, id, [
-    { id: "held", title: "Held", objective: "Held", kind: "read" },
-    { id: "free", title: "Free", objective: "Free", kind: "read" }
+    { id: "held", title: "Held", objective: "Held", kind: "read", acceptance: ["Source reviewed"] },
+    { id: "free", title: "Free", objective: "Free", kind: "read", acceptance: ["Source reviewed"] }
   ]);
   checkpointPlan(root, id);
   const held = launchTaskWorker(root, id, "held", { constraints: [] }, { codexCommand: [process.execPath, slowFixture] });
@@ -2086,8 +2086,8 @@ test("a user-pinned model is substituted too, but flagged prominently", async ()
     reasoningEffort: "high"
   });
   replacePlan(root, "run-pinned-substitute", [
-    { id: "first", title: "First", objective: "Inspect one", kind: "read" },
-    { id: "second", title: "Second", objective: "Inspect two", kind: "read" }
+    { id: "first", title: "First", objective: "Inspect one", kind: "read", acceptance: ["Source reviewed"] },
+    { id: "second", title: "Second", objective: "Inspect two", kind: "read", acceptance: ["Source reviewed"] }
   ]);
   checkpointPlan(root, "run-pinned-substitute");
   const codexCommand = [process.execPath, unavailableFixture, "--unavailable=gpt-6.2-astra,gpt-6.2-sol"];

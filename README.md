@@ -299,6 +299,27 @@ replacement run or rely on conversational memory.
 
 See [Architecture and recovery](docs/architecture.md) for the state machine and failure behavior.
 
+### Executed check receipts
+
+Configure trusted checks on a lane before creating a run; new runs freeze these definitions:
+
+```bash
+orch lane add api --check '{"id":"tests","argv":["node","--test"],"timeoutSeconds":300,"stages":["task","final"]}'
+orch run check <run-id> <task-id> --json
+orch run check <run-id> --json
+```
+
+Task checks run on the reported attempt's checkout; final checks run after every task is accepted.
+The runner invokes `codex sandbox` without a model call, with a read-only checkout, no network,
+and a private writable `TMPDIR`. Check scripts must work within those permissions. Each receipt
+records argv, times, timeout, exit status, attempt/plan identity, tested HEAD plus dirty source
+contents, and the last 32 KiB of each output stream (with a truncation marker). Ignored dependency
+contents are not fingerprinted. Missing, failing, timed-out, or stale required receipts block
+acceptance; worker-reported commands never become trusted check definitions. There is no implicit
+waiver. Manual supervisor evidence remains required for acceptance on contracted runs, including
+criteria that cannot be established by a passing command. Lanes without checks retain manual
+verification, and existing runs do not acquire checks retroactively.
+
 ## Worktrees and your branch
 
 You do not need a branching workflow. Integrated work lands as ordinary commits on the branch the

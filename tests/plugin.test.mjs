@@ -71,7 +71,7 @@ test("executor names and the plugin's effort ceiling", () => {
 });
 
 test("a read task runs through the plugin's job commands in the checkout and its report is parsed from prose", async () => {
-  const root = repo("run-plugin-read", [{ id: "review", title: "Review", objective: "Review", kind: "read" }], { effort: "max" });
+  const root = repo("run-plugin-read", [{ id: "review", title: "Review", objective: "Review", kind: "read", acceptance: ["Report reviewed findings"] }], { effort: "max" });
   const launched = launchTaskWorker(root, "run-plugin-read", "review", lane);
   assert.equal(launched.worktree.inPlace, true);
   assert.equal(launched.runner.executor, "codex-plugin");
@@ -97,7 +97,7 @@ test("a read task runs through the plugin's job commands in the checkout and its
 });
 
 test("a write task runs through the plugin in its worktree, is committed, and a warm retry resumes", async () => {
-  const root = repo("run-plugin-write", [{ id: "build", title: "Build", objective: "Build", kind: "write", scope: ["src/**"] }]);
+  const root = repo("run-plugin-write", [{ id: "build", title: "Build", objective: "Build", kind: "write", scope: ["src/**"], acceptance: ["Module implements the request"] }]);
   const launched = launchTaskWorker(root, "run-plugin-write", "build", lane);
   assert.notEqual(launched.worktree.path, fs.realpathSync(root));
   let task = await settle(root, "run-plugin-write", "build");
@@ -123,7 +123,7 @@ test("a write task runs through the plugin in its worktree, is committed, and a 
 test("a stopped plugin worker cancels its plugin job", async () => {
   process.env.FAKE_COMPANION_MS = "60000";
   try {
-    const root = repo("run-plugin-cancel", [{ id: "review", title: "Review", objective: "Review", kind: "read" }]);
+    const root = repo("run-plugin-cancel", [{ id: "review", title: "Review", objective: "Review", kind: "read", acceptance: ["Report reviewed findings"] }]);
     launchTaskWorker(root, "run-plugin-cancel", "review", lane);
     let jobId = null;
     for (let index = 0; index < 100 && !jobId; index += 1) {
@@ -143,7 +143,7 @@ test("a stopped plugin worker cancels its plugin job", async () => {
 });
 
 test("a run on the plugin executor refuses to launch without the plugin and spends no attempt", () => {
-  const root = repo("run-plugin-missing", [{ id: "review", title: "Review", objective: "Review", kind: "read" }]);
+  const root = repo("run-plugin-missing", [{ id: "review", title: "Review", objective: "Review", kind: "read", acceptance: ["Report reviewed findings"] }]);
   process.env.ORCHESTRATOR_CODEX_COMPANION = path.join(scratch, "missing.mjs");
   try {
     assert.throws(() => launchTaskWorker(root, "run-plugin-missing", "review", lane), /codex@openai-codex plugin is not installed/);

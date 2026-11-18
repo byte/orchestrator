@@ -13,6 +13,7 @@ import {
 import { overlappingPatterns, scopeCovers } from "./glob.mjs";
 import { ledgerForBriefing } from "./ledger.mjs";
 import { getLane } from "./lanes.mjs";
+import { checkoutFingerprint, executeCheck, normalizeChecks } from "./checks.mjs";
 import {
   OUTCOME_SIGNALS,
   REASON_CODES,
@@ -3048,6 +3049,7 @@ export function recordIntegration(
       throw new Error("An accepted integration has a pending audit event; resume the run before another integration.");
     }
     const task = requireTask(run, taskId);
+    assertRequiredChecks(cwd, run, task.id);
     return finishIntegration(cwd, run, task, integration);
   });
 }
@@ -3079,6 +3081,7 @@ function finishIntegration(cwd, run, task, { evidence = [], inspection, commits,
   if (task.status !== "reported") {
     throw new Error(`Task "${task.id}" cannot be integrated from status "${task.status}".`);
   }
+  assertAcceptanceEvidence(run, evidence);
   task.verification = { verdict: "pass", evidence: stringList(evidence, "integration evidence"), at: nowIso() };
   task.integration = { inspection, commits, integrationHead, integratedAt: nowIso() };
   task.status = "completed";
@@ -3134,6 +3137,63 @@ export function recoverRunIntegration(cwd, runId) {
     withFileLock(runFile(cwd, runId), () => recoverIntegration(cwd, loadRun(cwd, runId))));
 }
 
+function checkTarget(cwd, run, taskId) {
+  const task = taskId ? requireTask(run, taskId) : null;
+  const attempt = task ? currentAttempt(task) : null;
+  const worktree = attempt?.worktree;
+  if (task?.kind === "write" && !worktree) throw new Error("Write checks require an attached task worktree.");
+  return {
+    task, attempt, cwd: worktree?.path ?? cwd,
+    gitDir: worktree?.inPlace ? null : worktree?.gitDir ?? null
+  };
+}
+
+function requiredChecks(run, taskId) {
+  return normalizeChecks(run.contract?.checks ?? []).filter((check) => check.stages.includes(taskId ? "task" : "final"));
+}
+
+export function runChecks(cwd, runId, taskId = null, options = {}) {
+  return withFileLock(runFile(cwd, runId), () => {
+    const run = loadRun(cwd, runId);
+    assertNoPendingIntegration(run);
+    const target = checkTarget(cwd, run, taskId);
+    if (target.task && target.task.status !== "reported") throw new Error("Task checks require a reported result.");
+    if (!target.task && run.status !== "finalizing") throw new Error("Final checks require a finalizing run.");
+    const receipts = [];
+    for (const definition of requiredChecks(run, taskId)) {
+      const before = checkoutFingerprint(target.cwd, { gitDir: target.gitDir });
+      const execution = executeCheck(target.cwd, definition, options);
+      const after = checkoutFingerprint(target.cwd, { gitDir: target.gitDir });
+      const receipt = {
+        id: randomUUID(), checkId: definition.id, definition,
+        taskId, attemptId: target.attempt?.id ?? null, planRevision: run.planRevision,
+        fingerprint: before, changedDuringCheck: before !== after,
+        ...execution, passed: execution.passed && before === after, provenance: "supervisor-executed"
+      };
+      (run.checkReceipts ??= []).push(receipt);
+      receipts.push(receipt);
+      writeRun(cwd, run);
+      appendEvent(cwd, run.id, { type: "check.executed", receiptId: receipt.id, taskId, checkId: definition.id, passed: receipt.passed });
+    }
+    return receipts;
+  });
+}
+
+function assertRequiredChecks(cwd, run, taskId = null) {
+  const definitions = requiredChecks(run, taskId);
+  if (!definitions.length) return;
+  const target = checkTarget(cwd, run, taskId);
+  const fingerprint = checkoutFingerprint(target.cwd, { gitDir: target.gitDir });
+  for (const definition of definitions) {
+    const receipt = (run.checkReceipts ?? []).filter((entry) => entry.checkId === definition.id &&
+      entry.taskId === taskId && entry.attemptId === (target.attempt?.id ?? null)).at(-1);
+    if (!receipt?.passed || receipt.planRevision !== run.planRevision || receipt.fingerprint !== fingerprint ||
+        JSON.stringify(receipt.definition) !== JSON.stringify(definition)) {
+      throw new Error(`Required check "${definition.id}" is missing, failed, or stale. Run orch run check ${run.id}${taskId ? ` ${taskId}` : ""}.`);
+    }
+  }
+}
+
 /** The checkout lock serializes runs; the run lock protects acceptance from cancellation. */
 export function integrateRunTask(cwd, runId, taskId, { evidence = [] } = {}) {
   const checks = stringList(evidence, "integration evidence");
@@ -3151,12 +3211,14 @@ export function integrateRunTask(cwd, runId, taskId, { evidence = [] } = {}) {
       if (task.status !== "reported") {
         throw new Error(`Task "${task.id}" cannot be integrated from status "${task.status}".`);
       }
+      assertAcceptanceEvidence(run, checks);
       const operationId = randomUUID();
       let integrated;
       try {
         integrated = integrateTaskWorktree(cwd, run, task, currentAttempt(task), {
           operationId,
           beforeApply(inspection) {
+            assertRequiredChecks(cwd, run, task.id);
             run.pendingIntegration = {
               id: operationId, taskId: task.id, attemptId: currentAttempt(task).id,
               priorHead: run.repository.integrationHead, inspection, evidence: checks,
@@ -3192,6 +3254,12 @@ export function integrateRunTask(cwd, runId, taskId, { evidence = [] } = {}) {
     }));
 }
 
+function assertAcceptanceEvidence(run, evidence) {
+  if (run.contract && !stringList(evidence, "acceptance evidence").some((item) => !isNone(item))) {
+    throw new Error("Acceptance requires meaningful supervisor evidence; worker claims alone are not verification.");
+  }
+}
+
 export function verifyTask(cwd, runId, taskId, { verdict, evidence = [] }) {
   const id = assertId(runId, "run");
   const normalizedVerdict = String(verdict ?? "").trim().toLowerCase();
@@ -3219,6 +3287,10 @@ export function verifyTask(cwd, runId, taskId, { verdict, evidence = [] }) {
       evidence: stringList(evidence, "verification evidence"),
       at: nowIso()
     };
+    if (normalizedVerdict === "pass") {
+      assertAcceptanceEvidence(run, evidence);
+      assertRequiredChecks(cwd, run, task.id);
+    }
     task.verification = verification;
     task.status = normalizedVerdict === "pass" ? "completed" : "failed";
     task.updatedAt = nowIso();
@@ -3790,6 +3862,7 @@ export function finalizeRun(
         `The supervisor branch advanced outside run "${id}"; expected ${run.repository.integrationHead}, found ${supervisorHead}.`
       );
     }
+    if (normalizedVerdict === "pass") assertRequiredChecks(cwd, run);
     run.finalization = {
       verdict: normalizedVerdict,
       summary: text,

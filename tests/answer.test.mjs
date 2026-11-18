@@ -256,7 +256,7 @@ test("everything outside the task's planned and granted scope is still refused",
   const inspection = inspectTaskWorktree(task, task.attempts[0]);
   assert.deepEqual(inspection.outOfScope, ["lib/other.js"]);
   assert.equal(inspection.ready, false);
-  const refused = runCli(root, ["run", "integrate", "run-stray", "work"]);
+  const refused = runCli(root, ["run", "integrate", "run-stray", "work", "--evidence", "Reviewed the candidate paths"]);
   assert.equal(refused.code, 1);
   assert.match(refused.stderr, /did not pass integration inspection/);
 });
@@ -428,8 +428,8 @@ test("needs_input holds a pool slot and blocks replanning until answered or canc
   const root = repo();
   createRun(root, { id: "run-slot", lane: "api", objective: "Slots", workerModel: "sol", reasoningEffort: "high", maxWorkers: 1 });
   replacePlan(root, "run-slot", [
-    { id: "work", title: "work", objective: "Do work", kind: "write", scope: ["src/**"] },
-    { id: "next", title: "next", objective: "Do next", kind: "write", scope: ["lib/**"] }
+    { id: "work", title: "work", objective: "Do work", kind: "write", scope: ["src/**"], acceptance: ["Reported changes satisfy the request"] },
+    { id: "next", title: "next", objective: "Do next", kind: "write", scope: ["lib/**"], acceptance: ["Reported changes satisfy the request"] }
   ]);
   checkpointPlan(root, "run-slot");
   paused(root, "run-slot", "work");
@@ -520,11 +520,12 @@ test("runs saved before needs_input existed load, pause, and answer", () => {
   const file = runFile(root, "run-old-answer");
   const state = JSON.parse(fs.readFileSync(file, "utf8"));
   state.version = 5;
+  delete state.contract;
   fs.writeFileSync(file, `${JSON.stringify(state, null, 2)}\n`);
   paused(root, "run-old-answer", "work");
   const answered = answerTask(root, "run-old-answer", "work", lane(root), { grantScope: ["lib/helper.js"] });
   assert.equal(answered.round.round, 1);
-  assert.equal(loadRun(root, "run-old-answer").version, 6);
+  assert.equal(loadRun(root, "run-old-answer").version, 7);
 });
 
 test("a malformed needs_input request fails the result contract", () => {

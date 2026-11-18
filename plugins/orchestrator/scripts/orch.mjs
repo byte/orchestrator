@@ -53,6 +53,7 @@ import {
   renderSupervisorBriefing,
   replacePlan,
   retryTask,
+  runChecks,
   verifyTask
 } from "./lib/runs.mjs";
 import {
@@ -88,7 +89,7 @@ Usage:
   orch preflight [--json]
   orch init
   orch lane list [--json]
-  orch lane add <name> [--description <text>] [--scope <glob>]... [--constraint <text>]... [--done <text>]
+  orch lane add <name> [--description <text>] [--scope <glob>]... [--constraint <text>]... [--done <text>] [--check <json>]...
   orch lane remove <name>
   orch lane show <name> [--json]
   orch ledger show
@@ -125,6 +126,7 @@ Usage:
   orch run wait <run-id> [--timeout <seconds>] [--interval <seconds>] [--no-watch] [--json]
       exit 0 changed (poll payload), 2 timed out, 3 no active workers, 4 only paused workers awaiting an answer
   orch run inspect <run-id> <task-id> [--json]
+  orch run check <run-id> [task-id] [--json]
   orch run integrate <run-id> <task-id> [--evidence <text>]... [--json]
   orch run finalize <run-id> --verdict <pass|fail> --summary <text> [--evidence <text>]... [--json]
   orch run cost <run-id> [--json]
@@ -335,7 +337,7 @@ function commandLane(argv, cwd) {
   const [action = "list", ...rest] = argv;
   const { options, positionals } = parseArgs(rest, {
     booleanOptions: ["json"],
-    repeatableOptions: ["scope", "constraint"],
+    repeatableOptions: ["scope", "constraint", "check"],
     valueOptions: ["description", "done"]
   });
 
@@ -354,7 +356,8 @@ function commandLane(argv, cwd) {
       description: options.description ?? "",
       scope: repeatedValues(options.scope),
       constraints: repeatedValues(options.constraint),
-      done: options.done ?? ""
+      done: options.done ?? "",
+      ...(options.check ? { checks: options.check.map((value) => JSON.parse(value)) } : {})
     });
     return options.json ? emitJson(lane) : emit(renderLanes([lane]));
   }
@@ -424,7 +427,7 @@ function renderPollUpdate(update) {
 // (show, cost, list, inspect, briefing) is not recorded as a supervisor.
 const SUPERVISING_ACTIONS = new Set([
   "plan", "ready", "resume", "checkpoint", "claim", "bind", "report", "verify", "decide", "retry",
-  "answer", "cancel", "recover", "launch", "poll", "wait", "integrate", "finalize", "tally", "guidance"
+  "answer", "cancel", "recover", "launch", "poll", "wait", "integrate", "finalize", "tally", "guidance", "check"
 ]);
 
 // Best effort: a failure to record the session must never stop the command.
@@ -885,6 +888,14 @@ function commandRun(argv, cwd) {
       resultText: fs.readFileSync(options["result-file"], "utf8")
     });
     return options.json ? emitJson(result) : emit(`Recorded ${result.task.status} result for ${taskId}.`);
+  }
+
+  if (action === "check") {
+    const receipts = runChecks(cwd, runId, positionals[1] ?? null);
+    if (receipts.some((receipt) => !receipt.passed)) process.exitCode = 1;
+    return options.json ? emitJson(receipts) : emit(receipts.length
+      ? receipts.map((receipt) => `${receipt.checkId}: ${receipt.passed ? "passed" : "failed"} (exit ${receipt.exitCode ?? receipt.signal ?? "unknown"})`).join("\n")
+      : "No required checks configured for this stage; manual evidence is still required.");
   }
 
   if (action === "verify") {

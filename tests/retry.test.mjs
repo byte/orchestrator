@@ -499,7 +499,7 @@ test("runs saved before warm retries existed still retry, warm when they can", (
   const second = claimTask(root, "run-old-state", "work", lane);
   assert.equal(second.retry.resumeThreadId, "thread-old");
   assert.match(second.briefing, /old evidence/);
-  assert.equal(loadRun(root, "run-old-state").version, 6);
+  assert.equal(loadRun(root, "run-old-state").version, 7);
 });
 
 test("retrying a reported task points at review rejection and the conflict disposition", () => {

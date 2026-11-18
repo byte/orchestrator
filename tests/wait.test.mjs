@@ -291,7 +291,7 @@ test("limits default per model tier and plans validate timeoutMinutes", () => {
       /timeoutMinutes must be a positive number of minutes/
     );
   }
-  replacePlan(root, "run-bad-limit", [{ id: "a", title: "a", objective: "a", kind: "read" }]);
+  replacePlan(root, "run-bad-limit", [{ id: "a", title: "a", objective: "a", kind: "read", acceptance: ["Report reviewed findings"] }]);
   assert.equal(Object.hasOwn(loadRun(root, "run-bad-limit").tasks.a, "timeoutMinutes"), false);
 });
 

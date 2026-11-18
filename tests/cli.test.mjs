@@ -87,7 +87,7 @@ test("free-text and glob options keep their commas", () => {
     "--model", "sol", "--effort", "high"
   ]);
   const planPath = writeResult(JSON.stringify({
-    tasks: [{ id: "review", title: "Review", objective: "Review request", kind: "read" }]
+    tasks: [{ id: "review", title: "Review", objective: "Review request", kind: "read", acceptance: ["Report findings with evidence"] }]
   }));
   runCli(root, ["run", "plan", "run-commas", "--plan-file", planPath]);
   const checkpoint = JSON.parse(runCli(root, [
@@ -512,7 +512,7 @@ test("the run CLI records explicit policy and authority dispositions", () => {
     "--model", "sol", "--effort", "high"
   ]);
   const planPath = writeResult(JSON.stringify({
-    tasks: [{ id: "review", title: "Review", objective: "Review request", kind: "read" }]
+    tasks: [{ id: "review", title: "Review", objective: "Review request", kind: "read", acceptance: ["Report findings with evidence"] }]
   }));
   runCli(root, ["run", "plan", "run-decide", "--plan-file", planPath]);
   runCli(root, ["run", "checkpoint", "run-decide", "--summary", "Ready"]);
@@ -547,7 +547,7 @@ test("the run CLI rejects premature integration and records typed worktree failu
     "--objective", "Guard integration", "--model", "sol", "--effort", "high"
   ]);
   const planPath = writeResult(JSON.stringify({
-    tasks: [{ id: "review", title: "Review", objective: "Review request", kind: "read" }]
+    tasks: [{ id: "review", title: "Review", objective: "Review request", kind: "read", acceptance: ["Report findings with evidence"] }]
   }));
   runCli(root, ["run", "plan", "run-integrate-guard", "--plan-file", planPath]);
 
@@ -567,7 +567,7 @@ test("the run CLI rejects premature integration and records typed worktree failu
     "--result-file", resultPath
   ]);
 
-  const failed = runCli(root, ["run", "integrate", "run-integrate-guard", "review"]);
+  const failed = runCli(root, ["run", "integrate", "run-integrate-guard", "review", "--evidence", "Reviewed report"]);
   assert.equal(failed.code, 1);
   assert.match(failed.stderr, /worktree.*unavailable/i);
   const shown = JSON.parse(
@@ -588,7 +588,7 @@ test("the learn CLI collects, inspects, labels, exports, and completely purges s
     "--model", "sol", "--effort", "high"
   ]);
   const planPath = writeResult(JSON.stringify({
-    tasks: [{ id: "review", title: "Review", objective: "Review request", kind: "read" }]
+    tasks: [{ id: "review", title: "Review", objective: "Review request", kind: "read", acceptance: ["Report findings with evidence"] }]
   }));
   runCli(root, ["run", "plan", "run-learn-cli", "--plan-file", planPath]);
   runCli(root, ["run", "checkpoint", "run-learn-cli", "--summary", "Ready"]);
@@ -678,7 +678,7 @@ test("the run guidance CLI enables reviewed advice and supports disable and roll
     "--objective", "SOURCE-GUIDANCE-CANARY", "--model", "sol", "--effort", "high"
   ]);
   const sourcePlan = writeResult(JSON.stringify({
-    tasks: [{ id: "review", title: "Review", objective: "Inspect input", kind: "read" }]
+    tasks: [{ id: "review", title: "Review", objective: "Inspect input", kind: "read", acceptance: ["Report missing inputs precisely"] }]
   }));
   runCli(root, ["run", "plan", "run-guidance-source", "--plan-file", sourcePlan]);
   runCli(root, ["run", "checkpoint", "run-guidance-source", "--summary", "Ready"]);
@@ -712,7 +712,7 @@ test("the run guidance CLI enables reviewed advice and supports disable and roll
     "--objective", "Use reviewed guidance", "--model", "sol", "--effort", "high"
   ]);
   const guidedPlan = writeResult(JSON.stringify({
-    tasks: [{ id: "review", title: "Review", objective: "Inspect input", kind: "read" }]
+    tasks: [{ id: "review", title: "Review", objective: "Inspect input", kind: "read", acceptance: ["Report missing inputs precisely"] }]
   }));
   runCli(root, ["run", "plan", "run-guided", "--plan-file", guidedPlan]);
   runCli(root, ["run", "checkpoint", "run-guided", "--summary", "Ready"]);

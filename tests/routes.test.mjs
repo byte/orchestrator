@@ -318,6 +318,7 @@ function livePlan(root) {
       title: "Next",
       objective: "Do the next thing",
       scope: ["src/**"],
+      acceptance: ["Requested behavior passes review"],
       model: "sol",
       effort: "high",
       routingReason: "Ordinary implementation."
