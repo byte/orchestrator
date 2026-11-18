@@ -274,6 +274,8 @@ Codex thread id are stored in run state. Launch independent ready tasks without 
 them. A launch response whose `substitution` is not null ran on a different model than the plan
 named; read its notice.
 
+When the frozen lane has setup, launch provisions the isolated worktree before starting Codex. Inspect a `setup_failed` attempt's worktree receipt, fix the external prerequisite, and use `run retry`; no model call is spent while setup fails. If setup inputs changed after coding, use `run retry --fresh` rather than running the worker's modified script outside its sandbox. Do not copy credentials or dependencies from the user's checkout.
+
 A write launch requires a clean checkout on the run's branch with no commits made outside the run.
 It checks before claiming the task, so a refusal leaves the task pending and spends no attempt.
 If the checkout has uncommitted work that is not the run's (`init` and preflight warn about it),

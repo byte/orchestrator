@@ -29,7 +29,7 @@ import {
 } from "./runs.mjs";
 import { removeTree, SCRATCH_OWNER_FILE } from "./remove-tree.mjs";
 import { atomicWrite } from "./state.mjs";
-import { assertLaunchable, createTaskWorktree, inPlaceCheckout, reuseTaskWorktree, worktreeGitDir } from "./worktrees.mjs";
+import { assertLaunchable, createTaskWorktree, inPlaceCheckout, prepareTaskWorktree, reuseTaskWorktree, worktreeGitDir } from "./worktrees.mjs";
 import { DEFAULT_EXECUTOR, findCodexCompanion, pluginEffort, pluginLimitations } from "./codex-plugin.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -557,6 +557,7 @@ export function launchTaskWorker(
             task.attempts.find((entry) => entry.id === retry.worktree.attemptId)
           )
         : createTaskWorktree(cwd, run, task, attempt);
+    if (task.kind === "write") prepareTaskWorktree(cwd, run, worktree, { codexCommand });
     runner = spawnWorker(cwd, executionDir(cwd, runId, taskId, attempt.id), {
       prompt: dispatch.briefing,
       codexCommand,

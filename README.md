@@ -69,12 +69,27 @@ and build products already there. They cannot write it; a private `TMPDIR` takes
 files, so tests that write only temporary output can run.
 
 Each write task starts in a fresh Git worktree that contains only committed files. Ignored files
-such as `node_modules` are not copied into it, and the runtime does not install dependencies or
-provision worktrees. For a project that needs setup, put the install in the write task's own
-objective and acceptance criteria, so it runs and is checked in that worktree; the supervisor can
-rerun the checks there before integration. Do not assume an install in one worktree provisions
-another. This repository's dependency-free fixtures do not certify that workflow for
-dependency-heavy projects.
+such as `node_modules` are not copied into it. For repeatable provisioning, configure a trusted
+setup command before creating a run:
+
+```bash
+orch lane add api --setup '{"argv":["npm","ci","--ignore-scripts","--cache",".cache"],"inputs":["package.json","package-lock.json"],"network":true,"timeoutSeconds":600}'
+```
+
+Review this command and its network permission before using it. Ignore `.cache/` and dependency
+outputs in Git. Setup gets write access only to the isolated worktree and private scratch, never
+the supervisor checkout or shared dependency caches. It must leave source unchanged. List its
+script, manifests, lockfiles, and other installation inputs explicitly. Nothing copies `.env`
+files or credentials. Lifecycle scripts are off in this npm example; enable them only deliberately.
+
+Setup finishes before any model worker starts, and its execution receipt is stored on the
+worktree. A failure is `setup_failed`, not a coding failure. `run retry` retries setup in the same
+worktree without a model call until setup passes; `--fresh` instead creates a pristine worktree.
+Warm retries reuse successful setup only while the declared input contents match. If setup needs
+rerunning after worker source changes, preserve the old worktree and use `--fresh`: the supervisor
+never executes worker-modified setup scripts. Lanes without setup keep their previous manual
+provisioning behavior. An offline npm install with a local dependency has been exercised with the
+real Codex sandbox; large dependency graphs and network installs still need project-level trials.
 
 ## Install
 

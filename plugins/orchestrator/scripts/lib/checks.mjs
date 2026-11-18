@@ -35,11 +35,21 @@ export function normalizeCommand(command) {
   return { argv: [...command.argv], timeoutSeconds };
 }
 
+export function normalizeSetup(setup) {
+  if (setup === null) return null;
+  if (!setup || !Array.isArray(setup.inputs) || !setup.inputs.length || setup.inputs.some((file) =>
+    typeof file !== "string" || !file || path.isAbsolute(file) || file.split(/[\\/]/).some((part) => ["..", ".git"].includes(part)) || /[*?\[\]{}\0]/.test(file))) {
+    throw new Error("Setup requires explicit repository-relative input files, including its script and dependency manifests/lockfiles.");
+  }
+  if (setup.network !== undefined && typeof setup.network !== "boolean") throw new Error("Setup network must be true or false.");
+  return { ...normalizeCommand(setup), inputs: [...new Set(setup.inputs)].sort(), network: setup.network ?? false };
+}
+
 /** HEAD plus dirty source contents, never worker prose, staging state, or just path names. */
-export function checkoutFingerprint(cwd, { gitDir = null, scope = null } = {}) {
+export function checkoutFingerprint(cwd, { gitDir = null, scope = null, files = null } = {}) {
   const hash = createHash("sha256");
-  hash.update(headSha(cwd, gitDir ? { gitDir } : {}) ?? "no-head");
-  for (const file of changedFiles(cwd, { gitDir })) {
+  if (!files) hash.update(headSha(cwd, gitDir ? { gitDir } : {}) ?? "no-head");
+  for (const file of files ?? changedFiles(cwd, { gitDir })) {
     if (scope && !scope(file)) continue;
     hash.update(JSON.stringify(file));
     const target = path.join(cwd, file);
@@ -80,7 +90,8 @@ export function executeCheck(cwd, definition, { codexCommand = ["codex"], writab
   const descriptors = [fs.openSync(stdout, "wx", 0o600), fs.openSync(stderr, "wx", 0o600)];
   const startedAt = new Date().toISOString();
   try {
-    const result = spawnSync(resolveExecutable(codexCommand[0]), [
+    let result;
+    try { result = spawnSync(resolveExecutable(codexCommand[0]), [
       ...codexCommand.slice(1), "sandbox",
       "-c", `default_permissions="${profile}"`,
       "-c", `permissions.${profile}.extends=":read-only"`,
@@ -90,7 +101,7 @@ export function executeCheck(cwd, definition, { codexCommand = ["codex"], writab
     ], {
       cwd, env: { ...process.env, TMPDIR: scratch }, detached: true,
       timeout: command.timeoutSeconds * 1000, killSignal: "SIGKILL", stdio: ["ignore", ...descriptors]
-    });
+    }); } catch (error) { result = { status: null, signal: null, error }; }
     if (result.pid) {
       let reused = false;
       try { process.kill(result.pid, 0); reused = true; } catch (error) {

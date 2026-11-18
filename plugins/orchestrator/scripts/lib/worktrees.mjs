@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { parseFileList } from "./briefing.mjs";
+import { checkoutFingerprint, executeCheck, normalizeSetup } from "./checks.mjs";
 import { GIT_MUTATION_TIMEOUT_MS, execGit } from "./exec.mjs";
 import { SUPERVISOR_GIT_ARGS, changedFiles, configuredDrivers, currentBranch, headSha, worktreeGitEnv } from "./git.mjs";
 import { partitionByScope } from "./glob.mjs";
@@ -182,6 +183,33 @@ export function createTaskWorktree(cwd, run, task, attempt) {
   return { path: target, gitDir: worktreeGitDir(cwd, target), branch, baseHead, createdAt: new Date().toISOString() };
 }
 
+/** Setup runs only in an isolated, pristine tree, never over worker-modified scripts. */
+export function prepareTaskWorktree(cwd, run, worktree, options = {}) {
+  const definition = normalizeSetup(run.contract?.setup ?? null);
+  if (!definition) return null;
+  if (isSupervisorCheckout(cwd, worktree)) throw new Error("Setup cannot run in the supervisor checkout.");
+  const gitDir = trustedGitDir(worktree, cwd);
+  const fingerprint = checkoutFingerprint(worktree.path, { files: definition.inputs });
+  if (worktree.setup?.passed && worktree.setup.fingerprint === fingerprint &&
+      JSON.stringify(worktree.setup.definition) === JSON.stringify(definition)) return worktree.setup;
+  if (headSha(worktree.path, { gitDir }) !== worktree.baseHead || changedFiles(worktree.path, { gitDir }).length) {
+    throw new WorktreeOperationError("Setup inputs changed or setup needs rerunning over worker changes. Preserve this worktree and retry --fresh; setup never executes worker-modified scripts.", {
+      kind: "failed", reasonCode: "setup_failed"
+    });
+  }
+  const before = checkoutFingerprint(worktree.path, { gitDir });
+  const execution = executeCheck(worktree.path, definition, { codexCommand: options.codexCommand, writable: true, network: definition.network });
+  const unchanged = before === checkoutFingerprint(worktree.path, { gitDir });
+  const receipt = { ...execution, definition, fingerprint, sourceUnchanged: unchanged, passed: execution.passed && unchanged };
+  worktree.setup = receipt;
+  if (!receipt.passed) {
+    throw new WorktreeOperationError(`Worktree setup failed${unchanged ? "" : ": setup modified source instead of ignored dependencies"}. No model worker was started. Inspect the setup receipt and retry, or retry --fresh.`, {
+      kind: "failed", reasonCode: "setup_failed", details: receipt
+    });
+  }
+  return receipt;
+}
+
 /**
  * A warm retry continues in the previous attempt's worktree, keeping its branch,
  * its original base, its commits, and any uncommitted changes, so inspection and
@@ -208,6 +236,7 @@ export function reuseTaskWorktree(cwd, run, previousAttempt) {
     // The head the earlier attempts left: commits up to here are theirs, commits
     // after it are this attempt's. Inspection carries declarations only for the former.
     reusedHead: headSha(source.path, { gitDir }),
+    ...(source.setup ? { setup: source.setup } : {}),
     reusedAt: new Date().toISOString()
   };
 }

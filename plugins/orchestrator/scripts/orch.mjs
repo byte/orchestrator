@@ -89,7 +89,7 @@ Usage:
   orch preflight [--json]
   orch init
   orch lane list [--json]
-  orch lane add <name> [--description <text>] [--scope <glob>]... [--constraint <text>]... [--done <text>] [--check <json>]...
+  orch lane add <name> [--description <text>] [--scope <glob>]... [--constraint <text>]... [--done <text>] [--check <json>]... [--setup <json>]
   orch lane remove <name>
   orch lane show <name> [--json]
   orch ledger show
@@ -338,7 +338,7 @@ function commandLane(argv, cwd) {
   const { options, positionals } = parseArgs(rest, {
     booleanOptions: ["json"],
     repeatableOptions: ["scope", "constraint", "check"],
-    valueOptions: ["description", "done"]
+    valueOptions: ["description", "done", "setup"]
   });
 
   if (action === "list") {
@@ -357,7 +357,8 @@ function commandLane(argv, cwd) {
       scope: repeatedValues(options.scope),
       constraints: repeatedValues(options.constraint),
       done: options.done ?? "",
-      ...(options.check ? { checks: options.check.map((value) => JSON.parse(value)) } : {})
+      ...(options.check ? { checks: options.check.map((value) => JSON.parse(value)) } : {}),
+      ...(options.setup ? { setup: JSON.parse(options.setup) } : {})
     });
     return options.json ? emitJson(lane) : emit(renderLanes([lane]));
   }

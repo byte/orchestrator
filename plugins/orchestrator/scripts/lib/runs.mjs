@@ -2016,6 +2016,9 @@ function claimRetry(task) {
       worktree = { mode: "new", reason: "previous worktree is gone" };
     }
   }
+  if (task.kind === "write" && pending.reuseSetupWorktree && previous?.worktree?.path && fs.existsSync(previous.worktree.path)) {
+    worktree = { mode: "reuse", reason: "retry setup without another model call", attemptId: previous.id };
+  }
   return {
     previousAttemptId: pending.previousAttemptId,
     mode,
@@ -3584,7 +3587,7 @@ export function retryTask(cwd, runId, taskId, { note = null, fresh = false } = {
         recordedAt: nowIso()
       };
     }
-    const source = priorWorkerAttempt(task);
+    const source = previousAttempt?.outcome?.reasonCode === "setup_failed" ? previousAttempt : priorWorkerAttempt(task);
     const decision = retryMode(task, source, fresh);
     // A note given on an earlier retry of the same attempt survives a retry that
     // was only needed because the relaunch itself failed.
@@ -3599,6 +3602,7 @@ export function retryTask(cwd, runId, taskId, { note = null, fresh = false } = {
       mode: decision.mode,
       reason: decision.reason,
       note: correction || carriedNote,
+      reuseSetupWorktree: !fresh && source?.outcome?.reasonCode === "setup_failed",
       requestedAt: nowIso()
     };
     const warmFailures = warmFailureCount(task);
