@@ -24,7 +24,7 @@ import {
   usageLine
 } from "../plugins/orchestrator/scripts/lib/usage.mjs";
 import { checkpointPlan, cleanup, makeRepo, runCli } from "./helpers.mjs";
-import { noteSupervisorSession } from "../plugins/orchestrator/scripts/lib/runs.mjs";
+import { cancelRun, noteSupervisorSession } from "../plugins/orchestrator/scripts/lib/runs.mjs";
 
 const dirs = [];
 after(() => {
@@ -339,4 +339,39 @@ test("a supervising command records the Claude session once; looking does not", 
     else process.env.ORCH_TEST_CLAUDE_SESSION_ID = previous;
   }
   assert.deepEqual(loadRun(root, "run-sess").supervisorSessions.map((entry) => entry.id), ["aaaaaaaa-1111", "bbbbbbbb-2222"]);
+});
+
+test("a cancelled run's usage window ends at cancellation, and sessions after the end are not supervisors", () => {
+  const root = repo();
+  createRun(root, { id: "run-cancel-end", lane: "api", objective: "Review", workerModel: "sol", reasoningEffort: "high" });
+  assert.equal(noteSupervisorSession(root, "run-cancel-end", "aaaaaaaa-1111"), true);
+  cancelRun(root, "run-cancel-end", "stopped");
+  const cancelled = loadRun(root, "run-cancel-end");
+  assert.ok(cancelled.cancelledAt);
+  // A later look or command from a new session neither joins nor moves the end.
+  assert.equal(noteSupervisorSession(root, "run-cancel-end", "bbbbbbbb-2222"), false);
+  const home = codexHome();
+  const dir = path.join(home, "projects", "-tmp-cancel");
+  fs.mkdirSync(dir, { recursive: true });
+  const firstSeen = Date.parse(cancelled.supervisorSessions[0].firstSeenAt);
+  const end = Date.parse(cancelled.cancelledAt);
+  const at = (ms) => new Date(ms).toISOString();
+  fs.writeFileSync(path.join(dir, "aaaaaaaa-1111.jsonl"), [
+    prompt(at(firstSeen - 1000), "/orchestrator:run"),
+    reply(at(firstSeen + 1), "msg-during", [1, 0, 0, 1]),
+    prompt(at(end + 1000), "an unrelated question after cancelling"),
+    reply(at(end + 2000), "msg-after", [500, 0, 0, 500])
+  ].join("\n") + "\n");
+  // Later writes move updatedAt; the window must still end at cancellation.
+  const usage = runClaudeUsage({ ...cancelled, updatedAt: "2099-01-01T00:00:00.000Z" }, { home, nowMs: Date.parse("2099-01-01T00:00:00.000Z") });
+  assert.equal(usage.sessions.length, 1);
+  assert.equal(usage.sessions[0].messages, 1);
+  assert.equal(usage.tokens.output, 1);
+  // Data written by an older build: a session first seen after the end supervised nothing.
+  const late = runClaudeUsage({
+    ...cancelled,
+    supervisorSessions: [{ id: "cccccccc-3333", firstSeenAt: "2099-01-01T00:00:00.000Z" }]
+  }, { home });
+  assert.equal(late.measured, 0);
+  assert.equal(late.sessions[0].reason, "first seen after the run ended");
 });

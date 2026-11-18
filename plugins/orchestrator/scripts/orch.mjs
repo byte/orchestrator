@@ -726,7 +726,10 @@ function commandRun(argv, cwd) {
     const line = safeUsageLine(run);
     let claudeLine = null;
     try {
-      claudeLine = claudeUsageLine(runClaudeUsage(run));
+      // A finalized run's figure is fixed: use the saved snapshot instead of
+      // rereading whole transcripts on every look. Open runs read them live.
+      const saved = run.status === "completed" ? run.finalization?.usage?.claude : null;
+      claudeLine = claudeUsageLine(saved?.measured ? saved : runClaudeUsage(run));
     } catch {
       // Advisory only.
     }

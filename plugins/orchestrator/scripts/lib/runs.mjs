@@ -4110,6 +4110,8 @@ export function cancelRun(cwd, runId, reason = "") {
     }
     run.status = "cancelled";
     run.cancelReason = String(reason ?? "").trim();
+    // updatedAt moves with every later write; usage needs when it ended.
+    run.cancelledAt = nowIso();
     writeRun(cwd, run);
     appendEvent(cwd, id, {
       type: "run.cancelled",
@@ -4320,10 +4322,14 @@ export function noteSupervisorSession(cwd, runId, sessionId) {
   const session = String(sessionId ?? "").trim();
   if (!/^[\w-]{8,128}$/.test(session)) return false;
   const id = assertId(runId, "run");
-  const known = loadRun(cwd, id).supervisorSessions ?? [];
+  const loaded = loadRun(cwd, id);
+  // A session that first touches a run after it ended did not supervise it.
+  if (!isOpenRun(loaded)) return false;
+  const known = loaded.supervisorSessions ?? [];
   if (known.some((entry) => entry.id === session)) return false;
   return withFileLock(runFile(cwd, id), () => {
     const run = loadRun(cwd, id);
+    if (!isOpenRun(run)) return false;
     run.supervisorSessions ??= [];
     if (run.supervisorSessions.some((entry) => entry.id === session)) return false;
     run.supervisorSessions.push({ id: session, firstSeenAt: nowIso() });

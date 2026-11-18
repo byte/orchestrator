@@ -490,7 +490,7 @@ export function claudeSessionUsage(sessionId, { firstSeenMs, endMs, home = claud
 }
 
 function runEndMs(run, nowMs) {
-  const end = run.finalization?.at ?? (run.status === "cancelled" ? run.updatedAt : null);
+  const end = run.finalization?.at ?? run.cancelledAt ?? (run.status === "cancelled" ? run.updatedAt : null);
   const at = Date.parse(end ?? "");
   return Number.isFinite(at) ? at : nowMs;
 }
@@ -498,12 +498,14 @@ function runEndMs(run, nowMs) {
 /** Claude usage across every session that supervised the run. */
 export function runClaudeUsage(run, { home = claudeHome(), nowMs = Date.now() } = {}) {
   const endMs = runEndMs(run, nowMs);
-  const sessions = (run.supervisorSessions ?? []).map((session) =>
-    claudeSessionUsage(session.id, {
-      firstSeenMs: Number.isFinite(Date.parse(session.firstSeenAt)) ? Date.parse(session.firstSeenAt) : Date.parse(run.createdAt) || 0,
-      endMs,
-      home
-    }));
+  const sessions = (run.supervisorSessions ?? []).map((session) => {
+    const firstSeenMs = Number.isFinite(Date.parse(session.firstSeenAt)) ? Date.parse(session.firstSeenAt) : Date.parse(run.createdAt) || 0;
+    // Recorded by an older build after the run had ended: it supervised nothing.
+    if (firstSeenMs > endMs) {
+      return { sessionId: session.id, available: false, reason: "first seen after the run ended" };
+    }
+    return claudeSessionUsage(session.id, { firstSeenMs, endMs, home });
+  });
   const tokens = emptyClaudeTokens();
   const byModel = {};
   for (const session of sessions.filter((entry) => entry.available)) {
