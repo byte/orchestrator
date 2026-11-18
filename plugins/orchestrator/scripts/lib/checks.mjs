@@ -4,8 +4,9 @@ import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
 
-import { changedFiles, headSha } from "./git.mjs";
-import { resolveExecutable, signalProcessGroup } from "./exec.mjs";
+import { changedFiles, headSha, SUPERVISOR_GIT_ARGS } from "./git.mjs";
+import { execGit, resolveExecutable, signalProcessGroup } from "./exec.mjs";
+import { matchesScope } from "./glob.mjs";
 
 export function normalizeChecks(checks = []) {
   if (!Array.isArray(checks)) throw new Error("Checks must be an array.");
@@ -60,6 +61,7 @@ export function checkoutFingerprint(cwd, { gitDir = null, scope = null, files = 
       continue;
     }
     hash.update(String(stat.mode));
+    hash.update(`:${stat.size}:`);
     if (stat.isSymbolicLink()) {
       hash.update(fs.readlinkSync(target));
     } else {
@@ -75,6 +77,13 @@ export function checkoutFingerprint(cwd, { gitDir = null, scope = null, files = 
     }
   }
   return hash.digest("hex");
+}
+
+/** Content identity for the declared review surface, including dirty and untracked files. */
+export function reviewFingerprint(cwd, scope = []) {
+  const files = execGit([...SUPERVISOR_GIT_ARGS, "ls-files", "--cached", "--others", "--exclude-standard", "-z"], { cwd })
+    .split("\0").filter((file) => file && !file.startsWith(".orchestrator/") && (!scope.length || matchesScope(file, scope)));
+  return checkoutFingerprint(cwd, { files: [...new Set(files)].sort() });
 }
 
 /** Execute a trusted argv inside Codex's sandbox, without invoking a model. */

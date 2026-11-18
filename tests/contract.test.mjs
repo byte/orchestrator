@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import { after, test } from "node:test";
 
+import { loadRun, recordTaskResult, runDiagnostics, runFile } from "../plugins/orchestrator/scripts/lib/runs.mjs";
 import { cleanup, git, makeRepo, runCli, write } from "./helpers.mjs";
 
 const repos = [];
@@ -71,4 +73,63 @@ test("definitely shared writers wait, while disjoint writers stay parallel", () 
   const ready = JSON.parse(cli(root, ["run", "ready", "work", "--json"]));
   assert.equal(ready.blocked[0].id, "second");
   assert.equal(JSON.parse(cli(root, ["run", "show", "work", "--json"])).tasks.second.attempts.length, 0);
+});
+
+test("review freshness distinguishes unrelated edits from changed dirty and untracked review contents", () => {
+  const root = repo();
+  write(root, "src/review.js", "untracked original\n");
+  assert.equal(plan(root, [{ ...task("review", ["src/review.js"]), kind: "read" }]).code, 0);
+  checkpoint(root);
+  const dispatch = JSON.parse(cli(root, ["run", "claim", "work", "review", "--json"]));
+  write(root, "other.txt", "unrelated edit\n");
+  const report = () => recordTaskResult(root, "work", "review", { attemptId: dispatch.attemptId, resultText: JSON.stringify({
+    summary: "Reviewed original", files_touched: [], tests: [], decisions: [], assumptions: [], blockers: [], confidence: "high"
+  }) });
+  report();
+  const before = fs.readFileSync(runFile(root, "work"), "utf8");
+  assert.match(cli(root, ["run", "show", "work"]), /Declared review contents match dispatch/);
+  assert.equal(fs.readFileSync(runFile(root, "work"), "utf8"), before, "show must not mutate run state");
+  write(root, "src/review.js", "same path, different content\n");
+  assert.match(cli(root, ["run", "show", "work"]), /contents changed/);
+  assert.match(runCli(root, ["run", "verify", "work", "review", "--verdict", "pass", "--evidence", "Looks right"]).stderr, /stale/);
+  cli(root, ["run", "verify", "work", "review", "--verdict", "fail", "--evidence", "Source changed; re-review"]);
+  cli(root, ["run", "retry", "work", "review", "--fresh"]);
+  checkpoint(root);
+  const next = JSON.parse(cli(root, ["run", "claim", "work", "review", "--json"]));
+  recordTaskResult(root, "work", "review", { attemptId: next.attemptId, resultText: JSON.stringify({ summary: "Reviewed new", files_touched: [], tests: [], decisions: [], assumptions: [], blockers: [], confidence: "high" }) });
+  cli(root, ["run", "verify", "work", "review", "--verdict", "pass", "--evidence", "Rechecked current content"]);
+});
+
+test("observation commands do not register the observing Claude session", () => {
+  const root = repo();
+  assert.equal(plan(root, [task("first")]).code, 0);
+  const before = fs.readFileSync(runFile(root, "work"), "utf8");
+  const saved = process.env.ORCH_TEST_CLAUDE_SESSION_ID;
+  process.env.ORCH_TEST_CLAUDE_SESSION_ID = "observing-session";
+  try {
+    for (const command of ["show", "ready", "recover"]) {
+      cli(root, ["run", command, "work"]);
+      assert.equal(fs.readFileSync(runFile(root, "work"), "utf8"), before, command);
+    }
+  } finally {
+    if (saved === undefined) delete process.env.ORCH_TEST_CLAUDE_SESSION_ID;
+    else process.env.ORCH_TEST_CLAUDE_SESSION_ID = saved;
+  }
+});
+
+test("blocked diagnostics name dependencies, stale checkpoints, and ambiguous integration phases without recovery", () => {
+  const root = repo();
+  assert.equal(plan(root, [task("first"), { ...task("second"), dependsOn: ["first"] }]).code, 0);
+  const run = loadRun(root, "work");
+  const report = runDiagnostics(root, run);
+  assert.match(report.tasks.find((entry) => entry.taskId === "second").reason, /dependency first not accepted/);
+  assert.ok(report.alerts.some((entry) => /checkpoint/i.test(entry.reason)));
+  run.pendingIntegration = { id: "interrupted", taskId: "first", phase: "started" };
+  const preserved = JSON.stringify(run);
+  const recovery = runDiagnostics(root, run).alerts.find((entry) => /interrupted/.test(entry.reason));
+  assert.match(recovery.next, /Git child may still mutate/);
+  assert.equal(JSON.stringify(run), preserved, "diagnosis cannot clear pending intent");
+  run.pendingIntegration = null;
+  run.pendingIntegrationEvent = { eventId: "accepted-but-unpublished" };
+  assert.match(runDiagnostics(root, run).alerts[0].reason, /accepted; audit publication pending/);
 });

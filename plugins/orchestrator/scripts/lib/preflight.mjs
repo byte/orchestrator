@@ -1,7 +1,10 @@
 import { spawnSync } from "node:child_process";
+import fs from "node:fs";
+import { fileURLToPath } from "node:url";
 
 import { isInitialized } from "./state.mjs";
 import { changedFiles } from "./git.mjs";
+import { listLanes } from "./lanes.mjs";
 import { isGitRepository, resolveWorkspaceRoot } from "./workspace.mjs";
 
 /**
@@ -96,12 +99,20 @@ function checkInitialized(cwd) {
 }
 
 export function preflight(cwd = process.cwd()) {
+  const pluginPath = fileURLToPath(new URL("../../", import.meta.url));
+  const plugin = JSON.parse(fs.readFileSync(new URL("../../.claude-plugin/plugin.json", import.meta.url), "utf8"));
+  const setupLanes = isInitialized(cwd) ? listLanes(cwd).filter((lane) => lane.setup) : [];
   const checks = [
+    { id: "plugin", label: "Executing plugin copy", ok: true, detail: `${plugin.version} at ${pluginPath}; reload/update the installed copy if this is not the expected path` },
     checkCodexBinary(),
     checkCodexAuth(),
     checkGit(cwd),
     checkInitialized(cwd),
-    checkCleanCheckout(cwd)
+    checkCleanCheckout(cwd),
+    { id: "setup", label: "Worktree setup", ok: true, detail: setupLanes.length
+      ? setupLanes.map((lane) => `${lane.name}: configured, network ${lane.setup.network ? "enabled" : "disabled"}`).join("; ")
+      : "not configured; ignored dependencies are not copied and write worktrees need manual setup or lane --setup" },
+    { id: "sandbox", label: "Sandbox capabilities", ok: false, optional: true, detail: "not checked by preflight; worker launch probes read scratch isolation, required checks/setup use codex sandbox without a model call" }
   ].filter(Boolean);
 
   // Pool dispatch invokes Codex CLI directly; no Claude-side Codex plugin is needed.

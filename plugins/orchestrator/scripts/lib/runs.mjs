@@ -13,7 +13,7 @@ import {
 import { overlappingPatterns, scopeCovers } from "./glob.mjs";
 import { ledgerForBriefing } from "./ledger.mjs";
 import { getLane } from "./lanes.mjs";
-import { checkoutFingerprint, executeCheck, normalizeChecks } from "./checks.mjs";
+import { checkoutFingerprint, executeCheck, normalizeChecks, reviewFingerprint } from "./checks.mjs";
 import {
   OUTCOME_SIGNALS,
   REASON_CODES,
@@ -27,7 +27,7 @@ import {
   nowIso,
   withFileLock
 } from "./state.mjs";
-import { integrateTaskWorktree, recoverTaskIntegration } from "./worktrees.mjs";
+import { gitOperationInProgress, integrateTaskWorktree, recoverTaskIntegration } from "./worktrees.mjs";
 import { DEFAULT_EXECUTOR, normalizeExecutor } from "./codex-plugin.mjs";
 
 export const DEFAULT_WORKER_MODEL = null;
@@ -2130,6 +2130,9 @@ export function claimTask(cwd, runId, taskId, lane) {
       guidanceSnapshot: structuredClone(task.guidanceSelection),
       diagnostics: []
     };
+    if (task.kind !== "write") {
+      attempt.readSurface = { scope: [...task.scope], fingerprint: reviewFingerprint(cwd, task.scope), capturedAt: nowIso() };
+    }
     task.attempts.push(attempt);
     delete task.pendingRetry;
     task.status = "dispatching";
@@ -2361,6 +2364,9 @@ export function recordTaskResult(cwd, runId, taskId, { attemptId, resultText, ru
       structured: structured?.payload ?? null,
       reportedAt: nowIso()
     };
+    if (attempt.readSurface) {
+      result.reviewFreshness = { changedDuringReview: reviewFingerprint(cwd, attempt.readSurface.scope) !== attempt.readSurface.fingerprint };
+    }
     // A request is a pause, not an end: the attempt stays open with no outcome
     // and resumes on the same thread once the supervisor answers (M3.5). Past the
     // per-task cap it is recorded as the blocker it would otherwise have been.
@@ -3263,6 +3269,13 @@ function assertAcceptanceEvidence(run, evidence) {
   }
 }
 
+export function reviewFreshness(cwd, task) {
+  const surface = task.attempts.at(-1)?.readSurface;
+  if (!surface) return { status: "unrecorded", reason: "No recorded read-surface identity; legacy/manual evidence only." };
+  const stale = task.result?.reviewFreshness?.changedDuringReview || reviewFingerprint(cwd, surface.scope) !== surface.fingerprint;
+  return { status: stale ? "stale" : "fresh", reason: stale ? "Reviewed contents changed since dispatch; reject and retry the review." : "Declared review contents match dispatch." };
+}
+
 export function verifyTask(cwd, runId, taskId, { verdict, evidence = [] }) {
   const id = assertId(runId, "run");
   const normalizedVerdict = String(verdict ?? "").trim().toLowerCase();
@@ -3292,6 +3305,9 @@ export function verifyTask(cwd, runId, taskId, { verdict, evidence = [] }) {
     };
     if (normalizedVerdict === "pass") {
       assertAcceptanceEvidence(run, evidence);
+      if (task.kind !== "write" && reviewFreshness(cwd, task).status === "stale") {
+        throw new Error("Review evidence is stale: declared contents changed since dispatch. Reject this result and retry the review.");
+      }
       assertRequiredChecks(cwd, run, task.id);
     }
     task.verification = verification;
@@ -3781,6 +3797,61 @@ export function cancelRun(cwd, runId, reason = "") {
   });
 }
 
+/** Observation only: no polling, acceptance, cleanup, or automatic Git recovery. */
+export function runDiagnostics(cwd, run) {
+  const alerts = [];
+  if (run.pendingIntegrationEvent) alerts.push({ reason: "Integration accepted; audit publication pending", next: `orch run resume ${run.id}` });
+  if (run.pendingIntegration) {
+    const pending = run.pendingIntegration;
+    const phase = pending.phase ?? "legacy/unknown";
+    alerts.push({ reason: `Integration ${pending.id ?? "legacy"} for ${pending.taskId} is ${phase}; preserved intent and inspected commits remain in run state`,
+      next: phase === "started"
+        ? "A Git child may still mutate the checkout. Establish that it stopped before manual recovery; do not remove locks or reset the branch."
+        : `orch run resume ${run.id} — reconcile operation-specific receipts; ambiguous state stays untouched` });
+  }
+  const checkpoint = checkpointStatus(run);
+  if (!checkpoint.current && !["completed", "cancelled"].includes(run.status)) alerts.push({ reason: checkpoint.reason, next: `orch run checkpoint ${run.id} --summary <reviewed-plan-and-why>` });
+  const writePending = Object.values(run.tasks).some((task) => task.kind === "write" && ["pending", "reported"].includes(task.status));
+  let checkoutBlock = null;
+  if (writePending) {
+    if (currentBranch(cwd) !== run.repository.branch) checkoutBlock = "wrong branch";
+    else if (headSha(cwd) !== run.repository.integrationHead) checkoutBlock = "branch drift outside this run";
+    else if (gitOperationInProgress(cwd)) checkoutBlock = "a Git operation is in progress";
+    else if (changedFiles(cwd).length) checkoutBlock = "uncommitted checkout changes";
+    if (checkoutBlock) alerts.push({ reason: `Write launch/integration blocked: ${checkoutBlock}`, next: "Preserve user changes; resolve the checkout condition explicitly. Read tasks can still launch." });
+  }
+  const entries = Object.values(run.tasks).filter((task) => task.status !== "completed").map((task) => {
+    const attempt = task.attempts.at(-1);
+    let state = "blocked", reason = task.status, next = `orch run retry ${run.id} ${task.id} --note <correction>`;
+    if (["running", "dispatching"].includes(task.status)) {
+      state = "running"; reason = task.status; next = `orch run wait ${run.id}`;
+    } else if (task.status === "needs_input") {
+      const request = attempt?.inputRequests?.at(-1)?.request;
+      state = "awaiting answer"; reason = request ? summarizeInputRequest(request) : "worker request"; next = `orch run answer ${run.id} ${task.id} --reply <decision>`;
+    } else if (task.status === "reported") {
+      state = "awaiting review"; reason = task.kind === "write" ? "inspect, check, and integrate the candidate" : reviewFreshness(cwd, task).reason;
+      next = task.kind === "write" ? `orch run inspect ${run.id} ${task.id}` : `orch run verify ${run.id} ${task.id} --verdict <pass|fail> --evidence <review>`;
+    } else if (task.status === "pending") {
+      const dependencies = task.dependsOn.filter((id) => run.tasks[id]?.status !== "completed");
+      const conflicts = [...grantedSurfaceConflicts(run, task), ...plannedSurfaceConflicts(run, task)];
+      const route = effectiveTaskRoute(run, task);
+      const blocks = [...dependencies.map((id) => `dependency ${id} not accepted`), ...conflicts];
+      if (!checkpoint.current) blocks.push(checkpoint.reason);
+      if (route.exhausted) blocks.push("model route exhausted; replan the route");
+      if (task.kind === "write" && checkoutBlock) blocks.push(checkoutBlock);
+      if (run.pendingIntegration || run.pendingIntegrationEvent) blocks.push("integration recovery/audit pending");
+      if (!blocks.length && activeTaskCount(run) >= run.workerPolicy.maxWorkers) blocks.push("worker capacity full");
+      state = blocks.length ? "blocked" : "ready"; reason = blocks.join("; ") || "dependencies and dispatch gates satisfied";
+      next = state === "ready" ? `orch run launch ${run.id} ${task.id}` : "Resolve the listed gate before launch.";
+    } else if (attempt?.outcome?.reasonCode === "setup_failed") {
+      reason = "setup_failed — no model worker started; setup receipt and worktree preserved";
+      next = `Inspect attempts[].worktree.setup; fix the prerequisite, then orch run retry ${run.id} ${task.id} (or --fresh for changed inputs).`;
+    } else if (attempt?.outcome?.reasonCode) reason = `${task.status}: ${attempt.outcome.reasonCode}`;
+    return { taskId: task.id, state, reason, next };
+  });
+  return { alerts, tasks: entries };
+}
+
 export function recoveryReport(run) {
   return Object.values(run.tasks)
     .filter((task) => ACTIVE_TASK_STATUSES.has(task.status))
@@ -4134,7 +4205,7 @@ ${renderList(guidanceItems)}
 ${renderList(grants)}` : ""}
 - objective: ${task.objective}
 - latest worker: ${workerHandle || "not dispatched"}
-- result: ${task.result?.summary || "none"}
+- result: ${task.result?.summary || "none"}${task.kind !== "write" && task.status === "reported" ? `\n- review freshness: ${reviewFreshness(cwd, task).reason}` : ""}
 - confidence: ${structured?.confidence || task.result?.fields?.confidence || "not reported"}
 - blockers: ${structured?.blockers?.length ? structured.blockers.join("; ") : task.result?.fields?.blockers || "none"}
 - attempt outcomes:

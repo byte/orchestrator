@@ -356,12 +356,28 @@ Every write task gets its own worktree, because:
 Read and verify tasks get no worktree. They run in your checkout exactly as it is, uncommitted and
 untracked files included, under a sandbox that cannot write it, and several can share it at once.
 A review of a draft you have not committed sees the draft. Each launch records the commit and the
-uncommitted files the worker saw.
+uncommitted files the worker saw. New read attempts also hash the task scope (the lane default
+when omitted, or the whole source tree for explicit `scope: []`), including dirty and untracked contents. Changes detected at result
+collection or acceptance block a passing verdict until the review is retried. Unrelated paths
+outside an explicit scope do not invalidate it. This detects observed changes, not edits restored
+between observations, and is not an atomic filesystem snapshot. Ignored dependencies and symlink
+targets outside the declared surface are not covered; narrow scopes must include the actual
+dependencies of the review. Legacy attempts without a snapshot remain labelled as unrecorded.
 
 While a run has write tasks to launch or integrate, leave the checkout to it: those steps and
 finalization require it to be clean, and a commit made outside the run is refused as branch drift
 until you reconcile it. A refused write launch leaves the task pending and spends no attempt, and
 `/orchestrator:init` warns when the checkout has uncommitted files.
+
+`run show`, `run ready`, and `run recover` explain running work, unanswered requests, reports awaiting
+review, blocked dependencies/routes/scopes, stale checkpoints, and checkout conditions, with next
+actions. These diagnostics do not poll workers or change Git/run state. `ready --json` and
+`resume --json` include structured diagnostics; `recover --json` retains its worker-handle array.
+Pending integration intent names its phase: a `started` operation may still have a live Git child,
+so diagnosis does not clear locks, reset branches, or infer safety from HEAD alone. `run resume`
+uses the existing operation-specific recovery receipts, and accepted-but-unpublished audit events
+are shown separately from an unaccepted integration. Preflight now identifies the executing plugin
+path/version, configured setup, and sandbox capabilities explicitly not yet checked.
 
 The cost for write tasks is setup: ignored files such as `node_modules` are not in a fresh
 worktree (see [Project dependencies and test setup](#project-dependencies-and-test-setup)), and

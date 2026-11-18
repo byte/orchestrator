@@ -5,6 +5,7 @@
 - Freeze configured lane contracts on new runs. Initial out-of-lane tasks require recorded owner approval, acceptance criteria are required, and identical planned writer surfaces are serialized. Plan output diagnoses potential overlap. State version 7 keeps older releases from ignoring the new contract while preserving legacy runs.
 - Lanes can freeze trusted argv checks into new runs. `run check` executes them without a model call in Codex's read-only sandbox and saves state-bound receipts; missing, failed, timed-out, or stale required checks block task acceptance and finalization. Contracted acceptance also requires supervisor evidence rather than worker claims alone.
 - Optional lane setup provisions isolated write worktrees before model launch, with explicit inputs/network permission and stored receipts. Setup failure has its own outcome and retries spend no model call; matching warm retries reuse setup, while changed inputs cannot cause supervisor execution of worker-modified scripts.
+- Read attempts bind their evidence to declared source contents and refuse stale passing verdicts. Compact show/ready/recover diagnostics explain next actions, setup failures, checkout gates, and preserved integration phases without mutating state; preflight identifies the executing plugin copy and setup configuration.
 
 ## 0.6.7
 

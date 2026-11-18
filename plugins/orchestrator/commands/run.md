@@ -417,6 +417,8 @@ For every reported task:
 - evaluate every acceptance criterion
 - check blockers, assumptions, and confidence
 
+For read/verify tasks, declare the review's relevant paths in `scope`; an empty scope fingerprints the whole source tree. Include dependencies the verdict relies on. If `show` or verification reports stale review evidence, reject and retry the review against the current contents. Rerunning a test does not make old prose review new code.
+
 If the frozen contract has task checks, execute `run check <run-id> <task-id> --json` before acceptance. A worker's test claims cannot satisfy them. Inspect failed receipts rather than repeating acceptance; edits invalidate the old receipt. Check scripts run read-only with a private writable `TMPDIR` and no network. Passing commands do not replace review of the acceptance criteria.
 
 For read and verification tasks, record the supervisor verdict:
@@ -580,7 +582,7 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" run tally <run-id> \
   --worker-only <n> --supervisor-only <n> --note "<one line, optional>"
 ```
 
-When every task is complete, the run enters `finalizing`. Record the combined supervisor gate:
+When every task is complete, the run enters `finalizing`. If the frozen contract has final checks, execute `run check <run-id> --json` on the combined checkout. Record the combined supervisor gate:
 
 ```bash
 node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" run finalize <run-id> \

@@ -16,7 +16,7 @@ function reported(argv) {
   assert.equal(runCli(root, ["init"]).code, 0);
   addLane(root, "review", { checks: [{ id: "test", argv }] });
   createRun(root, { id: "checks", lane: "review", objective: "Review", workerModel: "sol", reasoningEffort: "high" });
-  replacePlan(root, "checks", [{ id: "review", title: "Review", objective: "Review", kind: "read", acceptance: ["The test passes"] }]);
+  replacePlan(root, "checks", [{ id: "review", title: "Review", objective: "Review", kind: "read", scope: ["review/**"], acceptance: ["The test passes"] }]);
   checkpointPlan(root, "checks");
   const dispatch = claimTask(root, "checks", "review");
   recordTaskResult(root, "checks", "review", { attemptId: dispatch.attemptId, resultText: JSON.stringify({

@@ -54,6 +54,7 @@ import {
   replacePlan,
   retryTask,
   runChecks,
+  runDiagnostics,
   verifyTask
 } from "./lib/runs.mjs";
 import {
@@ -425,10 +426,10 @@ function renderPollUpdate(update) {
 }
 
 // Commands only the supervising session runs. A session that merely looks
-// (show, cost, list, inspect, briefing) is not recorded as a supervisor.
+// (show, ready, recover, cost, list, inspect, briefing) is not recorded as a supervisor.
 const SUPERVISING_ACTIONS = new Set([
-  "plan", "ready", "resume", "checkpoint", "claim", "bind", "report", "verify", "decide", "retry",
-  "answer", "cancel", "recover", "launch", "poll", "wait", "integrate", "finalize", "tally", "guidance", "check"
+  "plan", "resume", "checkpoint", "claim", "bind", "report", "verify", "decide", "retry",
+  "answer", "cancel", "launch", "poll", "wait", "integrate", "finalize", "tally", "guidance", "check"
 ]);
 
 // Best effort: a failure to record the session must never stop the command.
@@ -515,6 +516,15 @@ function renderRunSummary(run) {
     `- guidance: ${run.guidance?.mode ?? "legacy-disabled"}; revision ${run.guidance?.revision ?? 0}`,
     `- plan revision: ${run.planRevision}`,
     `- tasks: ${Object.entries(taskCounts).map(([status, count]) => `${status}=${count}`).join(", ") || "none"}`
+  ].join("\n");
+}
+
+function renderDiagnostics(cwd, run) {
+  const report = runDiagnostics(cwd, run);
+  return [
+    ...report.alerts.map((entry) => `- ${entry.reason}\n  next: ${entry.next}`),
+    ...report.tasks.map((entry) => `- ${entry.taskId}: ${entry.state} — ${entry.reason}\n  next: ${entry.next}`),
+    ...(run.status === "finalizing" ? [`- all tasks accepted; next: orch run check ${run.id}, then final supervisor verdict`] : [])
   ].join("\n");
 }
 
@@ -719,6 +729,7 @@ function commandRun(argv, cwd) {
     }
     return emit(
       renderRunSummary(run) +
+      `\n\n${renderDiagnostics(cwd, run)}` +
       (line ? `\n- usage (Codex workers): ${line}` : "") +
       (claudeLine ? `\n- usage (Claude supervisor): ${claudeLine}` : "")
     );
@@ -792,7 +803,7 @@ function commandRun(argv, cwd) {
     });
     const checkpoint = checkpointStatus(run);
     if (options.json) {
-      return emitJson({ tasks, blocked, checkpoint });
+      return emitJson({ tasks, blocked, checkpoint, diagnostics: runDiagnostics(cwd, run) });
     }
     const lines = tasks.length
       ? tasks.map((task) => `${task.id}\t${task.title}`)
@@ -808,7 +819,7 @@ function commandRun(argv, cwd) {
           : "Dispatch is blocked until a checkpoint covers the current plan revision."
       );
     }
-    return emit(lines.join("\n"));
+    return emit([...lines, renderDiagnostics(cwd, run)].filter(Boolean).join("\n"));
   }
 
   if (action === "briefing") {
@@ -836,6 +847,7 @@ function commandRun(argv, cwd) {
           updates,
           integrationRecovery,
           recovery,
+          diagnostics: runDiagnostics(cwd, run),
           substitutions,
           routes: routes.text ? routes.evidence : null,
           run,
@@ -985,10 +997,11 @@ function commandRun(argv, cwd) {
   }
 
   if (action === "recover") {
-    const report = recoveryReport(loadRun(cwd, runId));
+    const run = loadRun(cwd, runId);
+    const report = recoveryReport(run);
     return options.json
       ? emitJson(report)
-      : emit(report.length ? report.map((item) => `${item.taskId}\t${item.attemptStatus}\t${item.model}\t${item.reasoningEffort}\t${item.jobId ?? item.agentId ?? "unbound"}`).join("\n") : "No active workers need recovery.");
+      : emit(renderDiagnostics(cwd, run) || "No active workers or pending integration obligations.");
   }
 
   if (action === "launch") {

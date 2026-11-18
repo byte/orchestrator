@@ -443,7 +443,7 @@ function untrackedInTheWay(cwd, files) {
   return blocked.sort();
 }
 
-function gitOperationInProgress(cwd) {
+export function gitOperationInProgress(cwd) {
   return ["sequencer", "CHERRY_PICK_HEAD", "MERGE_HEAD", "rebase-merge", "rebase-apply"]
     .some((entry) => fs.existsSync(path.resolve(cwd, git(cwd, ["rev-parse", "--git-path", entry]))));
 }
