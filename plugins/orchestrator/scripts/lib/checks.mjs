@@ -47,43 +47,88 @@ export function normalizeSetup(setup) {
 }
 
 /** HEAD plus dirty source contents, never worker prose, staging state, or just path names. */
-export function checkoutFingerprint(cwd, { gitDir = null, scope = null, files = null } = {}) {
+/**
+ * HEAD plus dirty source contents, never worker prose, staging state, or just
+ * path names. With `contents: false` it hashes each file's stat identity
+ * (mode, size, mtime, inode) instead of reading it: a cheap first look whose
+ * match means "unchanged" in practice, while a mismatch needs the full hash.
+ */
+export function checkoutFingerprint(cwd, { gitDir = null, scope = null, files = null, contents = true, depth = 0 } = {}) {
   const hash = createHash("sha256");
   if (!files) hash.update(headSha(cwd, gitDir ? { gitDir } : {}) ?? "no-head");
   for (const file of files ?? changedFiles(cwd, { gitDir })) {
     if (scope && !scope(file)) continue;
     hash.update(JSON.stringify(file));
-    const target = path.join(cwd, file);
-    let stat;
-    try { stat = fs.lstatSync(target); } catch (error) {
-      if (error.code !== "ENOENT") throw error;
-      hash.update("deleted");
-      continue;
-    }
-    hash.update(String(stat.mode));
-    hash.update(`:${stat.size}:`);
-    if (stat.isSymbolicLink()) {
-      hash.update(fs.readlinkSync(target));
-    } else {
-      // O_NONBLOCK avoids a FIFO swapped in between lstat and open. Never
-      // follow a worker-planted symlink while collecting evidence outside it.
-      const fd = fs.openSync(target, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK | fs.constants.O_NOFOLLOW);
-      try {
-        if (!fs.fstatSync(fd).isFile()) throw new Error(`Cannot fingerprint non-regular source path ${file}.`);
-        const buffer = Buffer.alloc(64 * 1024);
-        let bytes;
-        while ((bytes = fs.readSync(fd, buffer, 0, buffer.length, null))) hash.update(buffer.subarray(0, bytes));
-      } finally { fs.closeSync(fd); }
-    }
+    hashPath(hash, path.join(cwd, file), { contents, depth });
   }
   return hash.digest("hex");
 }
 
-/** Content identity for the declared review surface, including dirty and untracked files. */
-export function reviewFingerprint(cwd, scope = []) {
+function hashPath(hash, target, { contents, depth }) {
+  let stat;
+  try { stat = fs.lstatSync(target); } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+    hash.update("deleted");
+    return;
+  }
+  hash.update(String(stat.mode));
+  hash.update(`:${stat.size}:`);
+  if (stat.isSymbolicLink()) {
+    hash.update(fs.readlinkSync(target));
+    return;
+  }
+  if (stat.isDirectory()) {
+    // Git lists a submodule (or a nested repository) as one path. Hash its
+    // own HEAD and dirty contents; an uninitialized one is an empty directory.
+    hash.update(`dir:${nestedRepositoryFingerprint(target, { contents, depth })}`);
+    return;
+  }
+  if (!stat.isFile()) {
+    // A FIFO, socket, or device: never open it, only note that it is there.
+    hash.update("special");
+    return;
+  }
+  if (!contents) {
+    hash.update(`:${stat.mtimeMs}:${stat.ino}`);
+    return;
+  }
+  // O_NONBLOCK avoids blocking on a FIFO swapped in between lstat and open.
+  // Never follow a worker-planted symlink while collecting evidence outside it.
+  const fd = fs.openSync(target, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK | fs.constants.O_NOFOLLOW);
+  try {
+    if (!fs.fstatSync(fd).isFile()) {
+      hash.update("swapped");
+      return;
+    }
+    const buffer = Buffer.alloc(64 * 1024);
+    let bytes;
+    while ((bytes = fs.readSync(fd, buffer, 0, buffer.length, null))) hash.update(buffer.subarray(0, bytes));
+  } finally { fs.closeSync(fd); }
+}
+
+function nestedRepositoryFingerprint(target, { contents, depth }) {
+  if (!fs.existsSync(path.join(target, ".git"))) return "no-repository";
+  // Bounded: a submodule of a submodule is hashed, a deeper chain only by name.
+  if (depth >= 3) return "nested-too-deep";
+  try {
+    return checkoutFingerprint(target, { contents, depth: depth + 1 });
+  } catch (error) {
+    return `unreadable:${error.message}`;
+  }
+}
+
+function reviewFiles(cwd, scope) {
   const files = execGit([...SUPERVISOR_GIT_ARGS, "ls-files", "--cached", "--others", "--exclude-standard", "-z"], { cwd })
     .split("\0").filter((file) => file && !file.startsWith(".orchestrator/") && (!scope.length || matchesScope(file, scope)));
-  return checkoutFingerprint(cwd, { files: [...new Set(files)].sort() });
+  return [...new Set(files)].sort();
+}
+
+/**
+ * Identity of the declared review surface, including dirty and untracked
+ * files. `contents: false` gives the cheap stat identity (see checkoutFingerprint).
+ */
+export function reviewFingerprint(cwd, scope = [], { contents = true } = {}) {
+  return checkoutFingerprint(cwd, { files: reviewFiles(cwd, scope), contents });
 }
 
 /** Execute a trusted argv inside Codex's sandbox, without invoking a model. */

@@ -2043,9 +2043,40 @@ function restorePendingRetry(task, attempt) {
   }
 }
 
+/**
+ * A read task's surface identity: the content hash, plus the cheap stat hash
+ * taken at the same moment so a later look can skip rereading unchanged files.
+ */
+function readSurfaceIdentity(cwd, scope) {
+  return {
+    scope: [...scope],
+    statFingerprint: reviewFingerprint(cwd, scope, { contents: false }),
+    fingerprint: reviewFingerprint(cwd, scope)
+  };
+}
+
+// Hashing a whole source tree can take seconds; do it before taking the run
+// lock, which polls and other commands are waiting on. The caller re-reads the
+// task under the lock and recomputes only if its scope changed meanwhile.
+function precomputeReadSurface(cwd, runId, taskId, scopeOf) {
+  try {
+    const scope = scopeOf(loadRun(cwd, runId).tasks[taskId]);
+    return scope ? readSurfaceIdentity(cwd, scope) : null;
+  } catch {
+    return null;
+  }
+}
+
+function surfaceFor(cwd, precomputed, scope) {
+  return precomputed && JSON.stringify(precomputed.scope) === JSON.stringify(scope)
+    ? precomputed
+    : readSurfaceIdentity(cwd, scope);
+}
+
 export function claimTask(cwd, runId, taskId, lane) {
   const id = assertId(runId, "run");
   const filePath = runFile(cwd, id);
+  const precomputed = precomputeReadSurface(cwd, id, taskId, (task) => task && task.kind !== "write" ? task.scope : null);
   return withFileLock(filePath, () => {
     const run = loadRun(cwd, id);
     const task = requireTask(run, taskId);
@@ -2131,7 +2162,8 @@ export function claimTask(cwd, runId, taskId, lane) {
       diagnostics: []
     };
     if (task.kind !== "write") {
-      attempt.readSurface = { scope: [...task.scope], fingerprint: reviewFingerprint(cwd, task.scope), capturedAt: nowIso() };
+      const surface = surfaceFor(cwd, precomputed, task.scope);
+      attempt.readSurface = { scope: surface.scope, fingerprint: surface.fingerprint, capturedAt: nowIso() };
     }
     task.attempts.push(attempt);
     delete task.pendingRetry;
@@ -2344,6 +2376,8 @@ function parseStructuredResult(text) {
 export function recordTaskResult(cwd, runId, taskId, { attemptId, resultText, runnerStatusFile }) {
   const id = assertId(runId, "run");
   const filePath = runFile(cwd, id);
+  const precomputed = precomputeReadSurface(cwd, id, taskId,
+    (task) => task?.attempts?.find((entry) => entry.id === attemptId)?.readSurface?.scope ?? null);
   return withFileLock(filePath, () => {
     const run = loadRun(cwd, id);
     const task = requireTask(run, taskId);
@@ -2365,7 +2399,12 @@ export function recordTaskResult(cwd, runId, taskId, { attemptId, resultText, ru
       reportedAt: nowIso()
     };
     if (attempt.readSurface) {
-      result.reviewFreshness = { changedDuringReview: reviewFingerprint(cwd, attempt.readSurface.scope) !== attempt.readSurface.fingerprint };
+      const surface = surfaceFor(cwd, precomputed, attempt.readSurface.scope);
+      result.reviewFreshness = {
+        changedDuringReview: surface.fingerprint !== attempt.readSurface.fingerprint,
+        // Stat identity of the contents as collected, for cheap later looks.
+        statFingerprint: surface.statFingerprint
+      };
     }
     // A request is a pause, not an end: the attempt stays open with no outcome
     // and resumes on the same thread once the supervisor answers (M3.5). Past the
@@ -3431,10 +3470,19 @@ function assertAcceptanceEvidence(run, evidence) {
   }
 }
 
-export function reviewFreshness(cwd, task) {
+/**
+ * Whether the reviewed contents still match what the worker saw. A `quick`
+ * look (show, ready, briefings) first compares cheap stat identities and reads
+ * contents only when they differ; acceptance always compares contents.
+ */
+export function reviewFreshness(cwd, task, { quick = false } = {}) {
   const surface = task.attempts.at(-1)?.readSurface;
   if (!surface) return { status: "unrecorded", reason: "No recorded read-surface identity; legacy/manual evidence only." };
-  const stale = task.result?.reviewFreshness?.changedDuringReview || reviewFingerprint(cwd, surface.scope) !== surface.fingerprint;
+  const recorded = task.result?.reviewFreshness;
+  const unchangedByStat = quick && recorded?.statFingerprint &&
+    reviewFingerprint(cwd, surface.scope, { contents: false }) === recorded.statFingerprint;
+  const stale = recorded?.changedDuringReview ||
+    (!unchangedByStat && reviewFingerprint(cwd, surface.scope) !== surface.fingerprint);
   return { status: stale ? "stale" : "fresh", reason: stale ? "Reviewed contents changed since dispatch; reject and retry the review." : "Declared review contents match dispatch." };
 }
 
@@ -4065,7 +4113,7 @@ export function runDiagnostics(cwd, run) {
       const request = attempt?.inputRequests?.at(-1)?.request;
       state = "awaiting answer"; reason = request ? summarizeInputRequest(request) : "worker request"; next = `orch run answer ${run.id} ${task.id} --reply <decision>`;
     } else if (task.status === "reported") {
-      state = "awaiting review"; reason = task.kind === "write" ? "inspect, check, and integrate the candidate" : reviewFreshness(cwd, task).reason;
+      state = "awaiting review"; reason = task.kind === "write" ? "inspect, check, and integrate the candidate" : reviewFreshness(cwd, task, { quick: true }).reason;
       next = task.kind === "write" ? `orch run inspect ${run.id} ${task.id}` : `orch run verify ${run.id} ${task.id} --verdict <pass|fail> --evidence <review>`;
     } else if (task.status === "pending") {
       const dependencies = task.dependsOn.filter((id) => run.tasks[id]?.status !== "completed");
@@ -4441,7 +4489,7 @@ ${renderList(guidanceItems)}
 ${renderList(grants)}` : ""}
 - objective: ${task.objective}
 - latest worker: ${workerHandle || "not dispatched"}
-- result: ${task.result?.summary || "none"}${task.kind !== "write" && task.status === "reported" ? `\n- review freshness: ${reviewFreshness(cwd, task).reason}` : ""}
+- result: ${task.result?.summary || "none"}${task.kind !== "write" && task.status === "reported" ? `\n- review freshness: ${reviewFreshness(cwd, task, { quick: true }).reason}` : ""}
 - confidence: ${structured?.confidence || task.result?.fields?.confidence || "not reported"}
 - blockers: ${structured?.blockers?.length ? structured.blockers.join("; ") : task.result?.fields?.blockers || "none"}
 - attempt outcomes:

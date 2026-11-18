@@ -391,7 +391,8 @@ uncommitted files the worker saw. New read attempts also hash the task scope (th
 when omitted, or the whole source tree for explicit `scope: []`), including dirty and untracked contents. Changes detected at result
 collection or acceptance block a passing verdict until the review is retried. Unrelated paths
 outside an explicit scope do not invalidate it. This detects observed changes, not edits restored
-between observations, and is not an atomic filesystem snapshot. Ignored dependencies and symlink
+between observations, and is not an atomic filesystem snapshot. A submodule counts by its own commit and
+dirty contents, and a FIFO or socket only by being there. Ignored dependencies and symlink
 targets outside the declared surface are not covered; narrow scopes must include the actual
 dependencies of the review. Legacy attempts without a snapshot remain labelled as unrecorded.
 
