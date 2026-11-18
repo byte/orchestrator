@@ -67,7 +67,9 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" run create <lane> \
 
 Pass `--max-workers` only when the user gave a worker count; the default pool is 5 concurrent
 workers. Append `--model <astra|sol|terra|luna>` or `--effort <level>` only when the user explicitly
-supplied that override. Omitted dimensions remain supervisor-routed. Keep the returned run id.
+supplied that override. Omitted dimensions remain supervisor-routed. Keep the returned run id,
+and tell the user it once in plain words, with how to come back to it: "Run `<id>`; if this
+session ends, `/orchestrator:resume` picks it up (or `/orchestrator:resume <last 8 characters>`)."
 
 Append `--executor codex-plugin` only when the user asks for workers to run through the OpenAI
 Codex plugin for Claude Code (`codex@openai-codex`) rather than the Codex CLI directly; the default
@@ -593,10 +595,12 @@ Report the objective, task outcomes, important decisions, exact verification evi
 created, and any residual risk. Distinguish built, verified, and unverified work.
 
 Then run `node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" run cost <run-id>` and end the report with
-its usage line and contribution lines, as printed. They are the user's answer to what the workers
-cost and what they added. Do not convert tokens to money: subscription plans are not billed per
-token, and the weekly-limit change is account-wide. Say that your own supervisor usage is not
-included. A tally is your own count, not a controlled comparison: do not claim the workers made
+its Codex worker line, its Claude supervisor line, and the contribution lines, as printed. They
+are the user's answer to what the run cost on both sides and what the workers added. Do not
+convert tokens to money: subscription plans are not billed per token, and the weekly-limit change
+is account-wide. The supervisor figure covers this session's turns on the run (subagents
+included) and runs to the end of the current turn, so it is read before your final message and
+slightly understates it. A tally is your own count, not a controlled comparison: do not claim the workers made
 the result some percentage better.
 
 ## Hard rules

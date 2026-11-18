@@ -218,10 +218,19 @@ silently change them.
 Resume the same manager after interruption or compaction:
 
 ```text
-/orchestrator:resume <run-id>
+/orchestrator:resume
+/orchestrator:resume 729b948c
 ```
 
-This polls workers first and reconstructs the supervisor briefing from disk. It does not create a
+With no argument it finds the open run itself, or asks which one when there are several. Every run
+command also takes the full id, `latest`, or a unique fragment such as the id's last 8 characters.
+To see the runs, newest first with status, age, and progress:
+
+```text
+orch run list [--open]
+```
+
+Resume polls workers first and reconstructs the supervisor briefing from disk. It does not create a
 replacement run or rely on conversational memory.
 
 ### Upgrading to 0.6.5
@@ -409,8 +418,17 @@ same thread, so each attempt counts only the tokens used between its start and f
 reports the account's weekly window, it also shows the weekly Codex limit before and after the run.
 That figure is account-wide, so any other Codex use in the same window is included. Nothing is
 converted to money: subscription plans are not billed per token. An attempt whose log is missing
-is listed as not measured. The supervisor's own Claude usage is not visible to the runtime; see
-`/cost` in Claude Code. `run show` adds the same one-line summary, and `run finalize` saves a
+is listed as not measured.
+
+It also reports the Claude supervisor's side. Each supervising command (`plan`, `launch`, `wait`,
+`verify`, `finalize`, `resume`, and the like; not `show` or `cost`) records the Claude Code session
+running it (`CLAUDE_CODE_SESSION_ID`), and `run cost` reads those sessions' transcripts
+(`$CLAUDE_CONFIG_DIR/projects`, default `~/.claude`), subagents included, counting each API
+response once: input, cache writes, cache reads, and output, per session and model. A session
+counts from the start of the turn in which it first supervised the run to the end of the turn in
+which the run finished, so anything else it did in that span is included. A run resumed in a new
+session lists both. Runs created before 0.6.7 have no recorded session. `run show` adds both
+one-line summaries, and `run finalize` saves a
 snapshot of it in the finalization record, so it survives if the logs are later pruned.
 
 `run tally` records the supervisor's count of what the workers contributed: worker findings, how

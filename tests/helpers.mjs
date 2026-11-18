@@ -59,7 +59,13 @@ export function runCli(root, args) {
   try {
     const stdout = execFileSync(process.execPath, [CLI, ...args], {
       cwd: root,
-      env: { ...process.env, CODEX_HOME: process.env.CODEX_HOME ?? NO_CODEX_HOME },
+      // Nor the developer's Claude Code session: a test opts in with ORCH_TEST_CLAUDE_SESSION_ID.
+      env: {
+        ...process.env,
+        CODEX_HOME: process.env.CODEX_HOME ?? NO_CODEX_HOME,
+        CLAUDE_CONFIG_DIR: process.env.ORCH_TEST_CLAUDE_CONFIG_DIR ?? NO_CODEX_HOME,
+        CLAUDE_CODE_SESSION_ID: process.env.ORCH_TEST_CLAUDE_SESSION_ID ?? ""
+      },
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"]
     });

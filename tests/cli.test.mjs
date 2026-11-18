@@ -795,3 +795,36 @@ test("the run guidance CLI enables reviewed advice and supports disable and roll
     "run", "guidance", "run-guided", "--upload", "yes"
   ]).stderr, /Unknown option --upload/);
 });
+
+test("run list is one line per run, --open hides closed runs, and short ids resolve", () => {
+  const root = repo();
+  runCli(root, ["lane", "add", "api", "--scope", "src/**"]);
+  for (const id of ["run-20261101000000-aaaa1111", "run-20261102000000-bbbb2222"]) {
+    const created = runCli(root, ["run", "create", "api", "--id", id, "--objective", `Objective ${id}`, "--model", "sol", "--effort", "high"]);
+    assert.equal(created.code, 0, created.stderr);
+  }
+  const cancelled = runCli(root, ["run", "cancel", "aaaa1111", "--reason", "stopped"]);
+  assert.equal(cancelled.code, 0, cancelled.stderr);
+
+  const all = runCli(root, ["run", "list"]).stdout.trim().split("\n");
+  assert.equal(all.length, 2);
+  assert.match(all[0], /^run-20261102000000-bbbb2222 +planning .* 0\/0 tasks +api: Objective run-20261102000000-bbbb2222$/);
+  assert.match(all[1], /^run-20261101000000-aaaa1111 +cancelled/);
+  const open = runCli(root, ["run", "list", "--open"]).stdout.trim().split("\n");
+  assert.deepEqual(open.map((line) => line.split(" ")[0]), ["run-20261102000000-bbbb2222"]);
+  assert.equal(JSON.parse(runCli(root, ["run", "list", "--open", "--json"]).stdout).length, 1);
+
+  assert.match(runCli(root, ["run", "show", "bbbb2222"]).stdout, /^# Run run-20261102000000-bbbb2222/);
+  assert.match(runCli(root, ["run", "show", "latest"]).stdout, /^# Run run-20261102000000-bbbb2222/);
+  const ambiguous = runCli(root, ["run", "show", "run-2026110"]);
+  assert.equal(ambiguous.code, 1);
+  assert.match(ambiguous.stderr, /matches 2 runs; use more of the id:\n- run-20261102000000-bbbb2222 \(planning\)\n- run-20261101000000-aaaa1111 \(cancelled\)/);
+  assert.match(runCli(root, ["run", "show", "nope"]).stderr, /No run matches "nope"/);
+  assert.match(runCli(root, ["run", "show"]).stderr, /requires a run id; `orch run list --open`/);
+});
+
+test("run list --open says so when nothing is open", () => {
+  const root = repo();
+  assert.match(runCli(root, ["run", "list", "--open"]).stdout, /No open orchestration runs\./);
+  assert.match(runCli(root, ["run", "show", "latest"]).stderr, /no orchestration runs in this repository yet/);
+});

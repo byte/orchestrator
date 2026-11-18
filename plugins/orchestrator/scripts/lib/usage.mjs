@@ -293,13 +293,50 @@ export function contributionLines(run) {
   return lines;
 }
 
-export function renderRunCost(run, usage) {
+function renderClaudeSection(run, claude) {
+  const lines = [];
+  const snapshot = run.finalization?.usage?.claude;
+  const line = claudeUsageLine(claude);
+  if (line) {
+    lines.push(line);
+  } else if (snapshot?.measured) {
+    lines.push(`${claudeUsageLine(snapshot)} (saved at finalization; the transcripts are no longer readable)`);
+  } else if (!(run.supervisorSessions ?? []).length) {
+    lines.push("No supervising Claude Code session was recorded for this run (runs created before 0.6.7, or run outside Claude Code).");
+    return lines;
+  } else {
+    lines.push("No Claude usage could be read from the recorded sessions' transcripts.");
+  }
+  const sessions = (claude?.sessions ?? []);
+  if (sessions.length) {
+    lines.push("");
+    lines.push("| Session | Messages | Input | Cache write | Cache read | Output |");
+    lines.push("| --- | --- | --- | --- | --- | --- |");
+    for (const session of sessions) {
+      if (session.available) {
+        const t = session.tokens;
+        lines.push(`| ${session.sessionId.slice(0, 8)} | ${session.messages} | ${formatTokens(t.input)} | ${formatTokens(t.cacheWrite)} | ${formatTokens(t.cacheRead)} | ${formatTokens(t.output)} |`);
+      } else {
+        lines.push(`| ${session.sessionId.slice(0, 8)} | — | — | — | — | ${session.reason} |`);
+      }
+    }
+  }
+  lines.push("");
+  lines.push(
+    "Counted from the turn in which each session first ran a supervising command to the end of the turn in " +
+    "which the run finished, subagents included. Anything else the session did in that span is included too. " +
+    "Tokens only: a Claude subscription is not billed per token."
+  );
+  return lines;
+}
+
+export function renderRunCost(run, usage, claude = null) {
   const out = [`# Cost and contribution: ${run.id}`, ""];
   const snapshot = run.finalization?.usage;
   const line = usageLine(usage);
   if (line) {
     out.push(line);
-  } else if (snapshot) {
+  } else if (snapshot?.measured) {
     out.push(`${usageLine(snapshot)} (saved at finalization; the session logs are no longer readable)`);
     usage = { ...usage, plan: usage.plan ?? snapshot.plan };
   } else {
@@ -323,8 +360,175 @@ export function renderRunCost(run, usage) {
   if (usage.weekly) {
     out.push("The weekly-limit change is account-wide: it includes any other Codex use during the run.");
   }
-  out.push("The supervisor's own Claude usage is not visible here; see `/cost` in Claude Code.");
+  out.push("", "## Claude supervisor", "");
+  out.push(...renderClaudeSection(run, claude));
   out.push("");
   out.push(...contributionLines(run));
   return out.join("\n");
+}
+
+// ---------------------------------------------------------------------------
+// The supervisor's side: Claude Code session transcripts.
+//
+// Every orchestrator command a supervising session runs records that session's
+// id on the run (CLAUDE_CODE_SESSION_ID). Claude Code keeps each session at
+// $CLAUDE_CONFIG_DIR/projects/<project>/<session>.jsonl, with its subagents
+// under <session>/subagents/. Each assistant message carries its API usage,
+// written once per content block, so messages are counted once by id.
+
+export function claudeHome(env = process.env) {
+  return env.CLAUDE_CONFIG_DIR ? path.resolve(env.CLAUDE_CONFIG_DIR) : path.join(os.homedir(), ".claude");
+}
+
+/** The session's own transcript and its subagents' transcripts, or null. */
+export function findClaudeTranscripts(sessionId, { home = claudeHome() } = {}) {
+  if (!sessionId || !/^[\w-]+$/.test(sessionId)) return null;
+  const projects = path.join(home, "projects");
+  let dirs;
+  try {
+    dirs = fs.readdirSync(projects);
+  } catch {
+    return null;
+  }
+  for (const dir of dirs) {
+    const main = path.join(projects, dir, `${sessionId}.jsonl`);
+    if (!fs.existsSync(main)) continue;
+    const subagentDir = path.join(projects, dir, sessionId, "subagents");
+    let subagents = [];
+    try {
+      subagents = fs.readdirSync(subagentDir)
+        .filter((name) => name.endsWith(".jsonl"))
+        .map((name) => path.join(subagentDir, name));
+    } catch {
+      // No subagents.
+    }
+    return { main, subagents };
+  }
+  return null;
+}
+
+function readJsonLines(file) {
+  let text;
+  try {
+    text = fs.readFileSync(file, "utf8");
+  } catch {
+    return [];
+  }
+  const entries = [];
+  for (const line of text.split("\n")) {
+    if (!line) continue;
+    try {
+      entries.push(JSON.parse(line));
+    } catch {
+      // A torn line.
+    }
+  }
+  return entries;
+}
+
+// A prompt the user typed, as opposed to a tool result or injected context.
+function isUserPrompt(entry) {
+  if (entry?.type !== "user" || entry.isSidechain || entry.isMeta) return false;
+  const content = entry.message?.content;
+  if (typeof content === "string") return true;
+  return Array.isArray(content) &&
+    content.some((block) => block?.type === "text") &&
+    !content.some((block) => block?.type === "tool_result");
+}
+
+const CLAUDE_FIELDS = [
+  ["input", "input_tokens"],
+  ["cacheWrite", "cache_creation_input_tokens"],
+  ["cacheRead", "cache_read_input_tokens"],
+  ["output", "output_tokens"]
+];
+
+export function emptyClaudeTokens() {
+  return Object.fromEntries(CLAUDE_FIELDS.map(([key]) => [key, 0]));
+}
+
+function addClaude(sum, usage) {
+  for (const [key, source] of CLAUDE_FIELDS) sum[key] += Number(usage?.[source]) || 0;
+  return sum;
+}
+
+/**
+ * One session's Claude usage while it supervised the run: from the start of
+ * the turn in which it first touched the run to the end of the turn in which
+ * the run ended (or now). Everything the session did in between counts,
+ * including any unrelated work; the report says so.
+ */
+export function claudeSessionUsage(sessionId, { firstSeenMs, endMs, home = claudeHome() }) {
+  const found = findClaudeTranscripts(sessionId, { home });
+  if (!found) return { sessionId, available: false, reason: `no Claude Code transcript for session ${sessionId}` };
+  const entries = readJsonLines(found.main);
+  const prompts = entries.filter(isUserPrompt)
+    .map((entry) => Date.parse(entry.timestamp))
+    .filter(Number.isFinite);
+  const fromMs = prompts.filter((at) => at <= firstSeenMs).at(-1) ?? firstSeenMs;
+  const toMs = prompts.find((at) => at > endMs) ?? Infinity;
+  const seen = new Set();
+  const tokens = emptyClaudeTokens();
+  const byModel = {};
+  let messages = 0;
+  const count = (entry) => {
+    const message = entry?.message;
+    if (entry?.type !== "assistant" || !message?.usage) return;
+    const at = Date.parse(entry.timestamp);
+    if (!Number.isFinite(at) || at < fromMs || at >= toMs) return;
+    const key = message.id ?? entry.requestId ?? entry.uuid;
+    if (key && seen.has(key)) return;
+    if (key) seen.add(key);
+    messages += 1;
+    addClaude(tokens, message.usage);
+    const model = message.model ?? "unknown";
+    byModel[model] = addClaude(byModel[model] ?? emptyClaudeTokens(), message.usage);
+  };
+  entries.forEach(count);
+  for (const file of found.subagents) readJsonLines(file).forEach(count);
+  return { sessionId, available: true, messages, tokens, byModel, fromMs, toMs: Number.isFinite(toMs) ? toMs : null };
+}
+
+function runEndMs(run, nowMs) {
+  const end = run.finalization?.at ?? (run.status === "cancelled" ? run.updatedAt : null);
+  const at = Date.parse(end ?? "");
+  return Number.isFinite(at) ? at : nowMs;
+}
+
+/** Claude usage across every session that supervised the run. */
+export function runClaudeUsage(run, { home = claudeHome(), nowMs = Date.now() } = {}) {
+  const endMs = runEndMs(run, nowMs);
+  const sessions = (run.supervisorSessions ?? []).map((session) =>
+    claudeSessionUsage(session.id, {
+      firstSeenMs: Number.isFinite(Date.parse(session.firstSeenAt)) ? Date.parse(session.firstSeenAt) : Date.parse(run.createdAt) || 0,
+      endMs,
+      home
+    }));
+  const tokens = emptyClaudeTokens();
+  const byModel = {};
+  for (const session of sessions.filter((entry) => entry.available)) {
+    for (const [key] of CLAUDE_FIELDS) tokens[key] += session.tokens[key];
+    for (const [model, used] of Object.entries(session.byModel)) {
+      const sum = byModel[model] ?? emptyClaudeTokens();
+      for (const [key] of CLAUDE_FIELDS) sum[key] += used[key];
+      byModel[model] = sum;
+    }
+  }
+  return {
+    sessions,
+    measured: sessions.filter((entry) => entry.available).length,
+    tokens,
+    byModel
+  };
+}
+
+export function claudeUsageLine(claude) {
+  if (!claude?.measured) return null;
+  const t = claude.tokens;
+  const total = t.input + t.cacheWrite + t.cacheRead + t.output;
+  const inputs = t.input + t.cacheWrite + t.cacheRead;
+  const cached = inputs ? Math.round((t.cacheRead / inputs) * 100) : 0;
+  const models = Object.keys(claude.byModel).join(", ");
+  return `${claude.measured} session${claude.measured === 1 ? "" : "s"} · ${formatTokens(total)} tokens ` +
+    `(${cached}% cache reads) · ${models}`;
 }

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.7
+
+- `/orchestrator:resume` with no run id finds the open run itself, or asks which one when there are several, instead of requiring the user to look the id up.
+- Every run command accepts the full id, `latest`, or a unique fragment such as the id's last 8 characters (`729b948c`). A fragment that matches several runs is refused with the candidates.
+- `run list` prints one line per run, newest first (id, status, age, completed tasks, lane and objective), and `--open` hides completed and cancelled runs. `--json` is unchanged.
+- `/orchestrator:run` tells the user the run id and how to resume it when it creates the run.
+- `run cost` also reports the Claude supervisor's usage. Each supervising command records the Claude Code session running it (`CLAUDE_CODE_SESSION_ID`; looking with `show` or `cost` does not), and `run cost` reads those sessions' transcripts, subagents included, counting each API response once: input, cache writes, cache reads, and output per session and model. A session counts from the start of the turn in which it first supervised the run to the end of the turn in which the run finished. `run show` prints the Codex and Claude lines separately, and the finalization snapshot includes both. Tokens only, never money.
+
 ## 0.6.6
 
 - `run cost <run-id>` reports what a run's Codex workers used: tokens per attempt (fresh input, cached input, output) read from Codex's own session logs, and the weekly Codex limit before and after the run (account-wide). It works for both executors, and a resumed thread counts each attempt's share only. Nothing is converted to money. `run show` adds the one-line summary, and `run finalize` saves a snapshot in the finalization record.

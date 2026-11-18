@@ -20,7 +20,7 @@ import {
   purgeLearningExamples
 } from "./lib/learning.mjs";
 import { preflight } from "./lib/preflight.mjs";
-import { renderRunCost, runUsage, usageLine } from "./lib/usage.mjs";
+import { claudeUsageLine, renderRunCost, runClaudeUsage, runUsage, usageLine } from "./lib/usage.mjs";
 import { renderLanes, renderPreflight } from "./lib/render.mjs";
 import {
   addCheckpoint,
@@ -30,7 +30,10 @@ import {
   configureRunGuidance,
   createRun,
   finalizeRun,
+  isOpenRun,
+  noteSupervisorSession,
   recordContribution,
+  resolveRunId,
   integrateRunTask,
   listRuns,
   loadRun,
@@ -94,7 +97,8 @@ Usage:
   orch learn label <sample-id> --outcome <value> --action <value> --reason-code <code> --provenance <supervisor|user|imported> [--json]
   orch learn export [--name <id>] [--run <id>]... [--outcome <value>]... [--sample <id>]... [--include-text <field>]... [--consent <supervisor|user>] [--acknowledge-sensitive-export] [--json]
   orch learn purge [--sample <id>]... [--run <id>]... [--task <id>]... [--attempt <id>]... [--expired|--all] [--json]
-  orch run list [--json]
+  orch run list [--open] [--json]
+      newest first; --open hides completed and cancelled runs
   orch run routes [--lane <lane>] [--include-legacy] [--json]
       per model and effort: attempts, first-attempt acceptance (rate only when n>=5), retries, median duration
   orch run create <lane> --objective <text> [--id <run-id>] [--max-workers <n>] [--model <auto|astra|sol|terra|luna>] [--effort <auto|level>] [--executor <cli|codex-plugin>] [--json]
@@ -414,14 +418,37 @@ function renderPollUpdate(update) {
   return `${update.taskId}\t${update.status}`;
 }
 
+// Commands only the supervising session runs. A session that merely looks
+// (show, cost, list, inspect, briefing) is not recorded as a supervisor.
+const SUPERVISING_ACTIONS = new Set([
+  "plan", "ready", "resume", "checkpoint", "claim", "bind", "report", "verify", "decide", "retry",
+  "answer", "cancel", "recover", "launch", "poll", "wait", "integrate", "finalize", "tally", "guidance"
+]);
+
+// Best effort: a failure to record the session must never stop the command.
+function noteSession(cwd, runId) {
+  try {
+    noteSupervisorSession(cwd, runId, process.env.CLAUDE_CODE_SESSION_ID);
+  } catch {
+    // Usage reporting is advisory.
+  }
+}
+
 // Usage is read from Codex's session logs, which may be missing or unreadable;
 // that must never stop a command, so failures count as "not measured".
 function usageSnapshot(run) {
   try {
     const usage = runUsage(run);
-    if (!usage.measured) return null;
     const { workers, measured, unmeasured, tokens, byModel, plan, weekly } = usage;
-    return { workers, measured, unmeasured, tokens, byModel, plan, weekly };
+    let claude = null;
+    try {
+      const read = runClaudeUsage(run);
+      if (read.measured) claude = { measured: read.measured, tokens: read.tokens, byModel: read.byModel };
+    } catch {
+      // Advisory only.
+    }
+    if (!measured && !claude) return null;
+    return { workers, measured, unmeasured, tokens, byModel, plan, weekly, ...(claude ? { claude } : {}) };
   } catch {
     return null;
   }
@@ -433,6 +460,26 @@ function safeUsageLine(run) {
   } catch {
     return null;
   }
+}
+
+function age(iso) {
+  const minutes = Math.max(0, Math.round((Date.now() - Date.parse(iso)) / 60000));
+  if (!Number.isFinite(minutes)) return "?";
+  if (minutes < 60) return `${minutes}m ago`;
+  if (minutes < 48 * 60) return `${Math.round(minutes / 60)}h ago`;
+  return `${Math.round(minutes / 1440)}d ago`;
+}
+
+// One line per run, newest first: what a user needs to pick one to resume.
+function renderRunList(runs) {
+  return runs.map((run) => {
+    const tasks = Object.values(run.tasks ?? {});
+    const done = tasks.filter((task) => task.status === "completed").length;
+    const objective = String(run.objective ?? "").replace(/\s+/g, " ");
+    const short = objective.length > 70 ? `${objective.slice(0, 69)}…` : objective;
+    return `${run.id}  ${run.status.padEnd(10)}  ${age(run.updatedAt ?? run.createdAt).padStart(8)}  ` +
+      `${done}/${tasks.length} tasks  ${run.lane}: ${short}`;
+  }).join("\n");
 }
 
 function renderRunSummary(run) {
@@ -528,12 +575,15 @@ function commandRun(argv, cwd) {
   }
 
   if (action === "list") {
-    const { options } = parseArgs(rest, { booleanOptions: ["json"] });
-    const runs = listRuns(cwd);
+    const { options } = parseArgs(rest, { booleanOptions: ["json", "open"] });
+    const runs = listRuns(cwd).filter((run) => !options.open || isOpenRun(run));
     if (options.json) {
       return emitJson(runs);
     }
-    return emit(runs.length ? runs.map(renderRunSummary).join("\n\n") : "No orchestration runs yet.");
+    if (!runs.length) {
+      return emit(options.open ? "No open orchestration runs." : "No orchestration runs yet.");
+    }
+    return emit(renderRunList(runs));
   }
 
   if (action === "create") {
@@ -555,6 +605,7 @@ function commandRun(argv, cwd) {
       reasoningEffort: options.effort,
       executor: options.executor
     });
+    noteSession(cwd, run.id);
     return options.json ? emitJson(run) : emit(renderRunSummary(run));
   }
 
@@ -643,24 +694,37 @@ function commandRun(argv, cwd) {
       "supervisor-only"
     ]
   });
-  const runId = positionals[0];
-  if (!runId) {
-    throw new Error(`\`orch run ${action}\` requires a run id.`);
+  if (!positionals[0]) {
+    throw new Error(`\`orch run ${action}\` requires a run id; \`orch run list --open\` shows the runs in progress.`);
   }
+  // An exact id, `latest`, or a unique fragment such as the id's last 8 characters.
+  const runId = resolveRunId(cwd, positionals[0]);
+  if (SUPERVISING_ACTIONS.has(action)) noteSession(cwd, runId);
 
   if (action === "show") {
     const run = loadRun(cwd, runId);
     if (options.json) return emitJson(run);
     const line = safeUsageLine(run);
-    return emit(renderRunSummary(run) + (line ? `\n- usage: ${line}` : ""));
+    let claudeLine = null;
+    try {
+      claudeLine = claudeUsageLine(runClaudeUsage(run));
+    } catch {
+      // Advisory only.
+    }
+    return emit(
+      renderRunSummary(run) +
+      (line ? `\n- usage (Codex workers): ${line}` : "") +
+      (claudeLine ? `\n- usage (Claude supervisor): ${claudeLine}` : "")
+    );
   }
 
   if (action === "cost") {
     const run = loadRun(cwd, runId);
     const usage = runUsage(run);
+    const claude = runClaudeUsage(run);
     return options.json
-      ? emitJson({ usage, contribution: run.contribution ?? null })
-      : emit(renderRunCost(run, usage));
+      ? emitJson({ usage, claude, contribution: run.contribution ?? null })
+      : emit(renderRunCost(run, usage, claude));
   }
 
   if (action === "tally") {

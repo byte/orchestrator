@@ -1,6 +1,6 @@
 ---
 description: Resume Claude's supervision of a durable orchestration run
-argument-hint: "<run-id>"
+argument-hint: "[run-id | id suffix | latest]"
 allowed-tools: Read, Grep, Glob, Write, Bash(node:*), AskUserQuestion
 ---
 
@@ -8,6 +8,22 @@ Resume a previously created orchestration run in the main Claude thread.
 
 Run id:
 $ARGUMENTS
+
+If no run id was given, find it yourself; never ask the user to look one up:
+
+```bash
+node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" run list --open --json
+```
+
+- One open run: resume it, and say which one (id and objective) in one line.
+- Several: ask the user which with AskUserQuestion, newest first, each option labelled with the
+  id's last 8 characters and described by its status, age, and objective. Up to four options; if
+  there are more, offer the four most recently updated and mention `run list --open`.
+- None: say there is no open run, show `run list` (the most recent runs) so the user can see what
+  finished, and stop.
+
+Any run command accepts the full id, `latest`, or a unique fragment such as the id's last 8
+characters; a fragment that matches several runs is refused with the candidates.
 
 First recover authoritative state:
 

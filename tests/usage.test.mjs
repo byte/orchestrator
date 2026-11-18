@@ -16,12 +16,15 @@ import {
 } from "../plugins/orchestrator/scripts/lib/runs.mjs";
 import {
   attemptUsage,
+  claudeUsageLine,
+  runClaudeUsage,
   findRollout,
   renderRunCost,
   runUsage,
   usageLine
 } from "../plugins/orchestrator/scripts/lib/usage.mjs";
 import { checkpointPlan, cleanup, makeRepo, runCli } from "./helpers.mjs";
+import { noteSupervisorSession } from "../plugins/orchestrator/scripts/lib/runs.mjs";
 
 const dirs = [];
 after(() => {
@@ -176,7 +179,7 @@ test("run usage totals measured attempts, retired ones included, and spans the w
   const text = renderRunCost(run, usage);
   assert.match(text, /no Codex session log for thread t-none/);
   assert.match(text, /not billed per token/);
-  assert.match(text, /\/cost/);
+  assert.match(text, /No supervising Claude Code session was recorded/);
   assert.match(text, /1 accepted first try · 0 accepted after retry · 0 failed or cancelled/);
   assert.match(text, /No contribution tally recorded/);
   assert.equal(usageLine({ ...usage, measured: 0 }), null);
@@ -246,7 +249,7 @@ test("finalize saves a usage snapshot when the logs can be read", () => {
     assert.equal(usage.measured, 1);
     assert.equal(usage.tokens.input, 500);
     const shown = runCli(root, ["run", "show", "run-snap"]);
-    assert.match(shown.stdout, /- usage: 1 worker · 520 tokens \(20% cached input\)/);
+    assert.match(shown.stdout, /- usage \(Codex workers\): 1 worker · 520 tokens \(20% cached input\)/);
     // Once the logs are pruned, run cost falls back to the saved snapshot.
     fs.rmSync(path.join(home, "sessions"), { recursive: true, force: true });
     const cost = runCli(root, ["run", "cost", "run-snap"]);
@@ -255,4 +258,85 @@ test("finalize saves a usage snapshot when the logs can be read", () => {
     if (previous === undefined) delete process.env.CODEX_HOME;
     else process.env.CODEX_HOME = previous;
   }
+});
+
+function claudeLine(type, at, extra = {}) {
+  return JSON.stringify({ type, timestamp: at, uuid: `${type}-${at}`, ...extra });
+}
+
+function prompt(at, text = "do it") {
+  return claudeLine("user", at, { message: { role: "user", content: text } });
+}
+
+function reply(at, id, usage, model = "claude-opus-5-5") {
+  return claudeLine("assistant", at, {
+    message: {
+      id, model, role: "assistant",
+      usage: { input_tokens: usage[0], cache_creation_input_tokens: usage[1], cache_read_input_tokens: usage[2], output_tokens: usage[3] }
+    }
+  });
+}
+
+test("supervisor usage counts the session's run turns once per message, subagents included", () => {
+  const home = codexHome();
+  const session = "0b3c7122-7df3-4ff9-a65c-5008be31ae2d";
+  const dir = path.join(home, "projects", "-tmp-project");
+  fs.mkdirSync(path.join(dir, session, "subagents"), { recursive: true });
+  fs.writeFileSync(path.join(dir, `${session}.jsonl`), [
+    prompt("2026-11-18T03:00:00.000Z", "unrelated earlier question"),
+    reply("2026-11-18T03:00:05.000Z", "msg-early", [1, 1000, 0, 10]),
+    prompt("2026-11-18T03:50:00.000Z", "/orchestrator:run review the PRD"),
+    reply("2026-11-18T03:51:00.000Z", "msg-plan", [2, 400, 600, 50]),
+    // The same response written again for its second content block.
+    reply("2026-11-18T03:51:00.500Z", "msg-plan", [2, 400, 600, 50]),
+    claudeLine("user", "2026-11-18T03:52:00.000Z", { message: { role: "user", content: [{ type: "tool_result", content: "ok" }] } }),
+    reply("2026-11-18T04:12:00.000Z", "msg-final", [1, 0, 1000, 100]),
+    prompt("2026-11-18T05:00:00.000Z", "something else now"),
+    reply("2026-11-18T05:00:05.000Z", "msg-late", [9, 9, 9, 9])
+  ].join("\n") + "\n");
+  fs.writeFileSync(path.join(dir, session, "subagents", "agent-1.jsonl"),
+    reply("2026-11-18T04:00:00.000Z", "msg-sub", [5, 0, 0, 5], "claude-sonnet-5-5") + "\n");
+  const run = {
+    id: "run-claude",
+    status: "completed",
+    finalization: { at: "2026-11-18T04:11:00.000Z" },
+    // First command for the run came mid-turn, after the prompt.
+    supervisorSessions: [
+      { id: session, firstSeenAt: "2026-11-18T03:57:52.000Z" },
+      { id: "11111111-gone", firstSeenAt: "2026-11-18T04:00:00.000Z" }
+    ]
+  };
+  const claude = runClaudeUsage(run, { home });
+  assert.equal(claude.measured, 1);
+  const [found, missing] = claude.sessions;
+  assert.equal(found.messages, 3);
+  assert.deepEqual(claude.tokens, { input: 8, cacheWrite: 400, cacheRead: 1600, output: 155 });
+  assert.deepEqual(Object.keys(claude.byModel).sort(), ["claude-opus-5-5", "claude-sonnet-5-5"]);
+  assert.match(missing.reason, /no Claude Code transcript/);
+  assert.equal(claudeUsageLine(claude), "1 session · 2K tokens (80% cache reads) · claude-opus-5-5, claude-sonnet-5-5");
+  const text = renderRunCost(run, { attempts: [], measured: 0, tokens: {}, workers: 0 }, claude);
+  assert.match(text, /## Claude supervisor/);
+  assert.match(text, /\| 0b3c7122 \| 3 \|/);
+  assert.match(text, /not billed per token/);
+});
+
+test("a supervising command records the Claude session once; looking does not", () => {
+  const root = repo();
+  createRun(root, { id: "run-sess", lane: "api", objective: "Review", workerModel: "sol", reasoningEffort: "high" });
+  assert.equal(noteSupervisorSession(root, "run-sess", "not ok!"), false);
+  const previous = process.env.ORCH_TEST_CLAUDE_SESSION_ID;
+  try {
+    process.env.ORCH_TEST_CLAUDE_SESSION_ID = "aaaaaaaa-1111";
+    runCli(root, ["run", "show", "run-sess"]);
+    runCli(root, ["run", "cost", "run-sess"]);
+    assert.equal(loadRun(root, "run-sess").supervisorSessions, undefined);
+    runCli(root, ["run", "checkpoint", "run-sess", "--summary", "planning"]);
+    runCli(root, ["run", "checkpoint", "run-sess", "--summary", "again"]);
+    process.env.ORCH_TEST_CLAUDE_SESSION_ID = "bbbbbbbb-2222";
+    runCli(root, ["run", "resume", "run-sess"]);
+  } finally {
+    if (previous === undefined) delete process.env.ORCH_TEST_CLAUDE_SESSION_ID;
+    else process.env.ORCH_TEST_CLAUDE_SESSION_ID = previous;
+  }
+  assert.deepEqual(loadRun(root, "run-sess").supervisorSessions.map((entry) => entry.id), ["aaaaaaaa-1111", "bbbbbbbb-2222"]);
 });

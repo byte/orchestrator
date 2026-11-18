@@ -791,6 +791,13 @@ minute after it finished, never past the next attempt's start) minus the total b
 so warm retries and answered questions on one thread are not double counted. It writes no run
 state; `run cost` computes it on demand. The weekly-limit change is account-wide.
 
+The supervisor's side comes from Claude Code transcripts. Supervising CLI commands add the
+calling session (`CLAUDE_CODE_SESSION_ID`) to `run.supervisorSessions` once, with `firstSeenAt`;
+read-only commands do not. A session's usage runs from the last user prompt at or before
+`firstSeenAt` to the first user prompt after the run ended (finalization, cancellation, or now),
+over its transcript and `subagents/*.jsonl`, deduplicated by message id, since Claude Code writes a
+response once per content block.
+
 `run tally` stores `run.contribution`: the supervisor's own counts of worker findings, re-checked,
 held, corrected, worker-only, and supervisor-only, validated for consistency only. It is replaced,
 not accumulated, and is never a controlled comparison.

@@ -480,6 +480,45 @@ export function listRuns(cwd) {
     .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
 }
 
+const CLOSED_RUN_STATUSES = new Set(["completed", "cancelled"]);
+
+/** A run still needs its supervisor: anything not completed or cancelled. */
+export function isOpenRun(run) {
+  return !CLOSED_RUN_STATUSES.has(run.status);
+}
+
+/**
+ * Resolve what a user typed to one run id: the exact id, `latest` (the newest
+ * run), or a fragment of an id such as its 8-character suffix, which must
+ * match exactly one run. An ambiguous or unknown fragment is refused with the
+ * candidates rather than guessed.
+ */
+export function resolveRunId(cwd, value) {
+  const token = String(value ?? "").trim();
+  if (!token) {
+    throw new Error("A run id is required. `orch run list --open` shows the runs still in progress.");
+  }
+  if (RUN_ID_PATTERN.test(token) && fs.existsSync(runFile(cwd, token))) {
+    return token;
+  }
+  const runs = listRuns(cwd);
+  if (token === "latest") {
+    if (!runs.length) throw new Error("There are no orchestration runs in this repository yet.");
+    return runs[0].id;
+  }
+  const matches = runs.filter((run) => run.id.includes(token));
+  if (matches.length === 1) {
+    return matches[0].id;
+  }
+  if (!matches.length) {
+    throw new Error(`No run matches "${token}". \`orch run list\` shows every run.`);
+  }
+  throw new Error(
+    `"${token}" matches ${matches.length} runs; use more of the id:\n` +
+      matches.slice(0, 10).map((run) => `- ${run.id} (${run.status})`).join("\n")
+  );
+}
+
 function newRunId() {
   const timestamp = new Date().toISOString().replace(/\D/g, "").slice(0, 14);
   return `run-${timestamp}-${randomUUID().slice(0, 8)}`;
@@ -3742,6 +3781,27 @@ export function addCheckpoint(
     writeRun(cwd, run);
     appendEvent(cwd, id, { type: "run.checkpoint_added", checkpoint });
     return checkpoint;
+  });
+}
+
+/**
+ * Remember a Claude Code session that supervised this run, so `run cost` can
+ * read its usage. Recorded once per session, the first time it runs a
+ * supervising command; a run resumed in a new session gains a second entry.
+ */
+export function noteSupervisorSession(cwd, runId, sessionId) {
+  const session = String(sessionId ?? "").trim();
+  if (!/^[\w-]{8,128}$/.test(session)) return false;
+  const id = assertId(runId, "run");
+  const known = loadRun(cwd, id).supervisorSessions ?? [];
+  if (known.some((entry) => entry.id === session)) return false;
+  return withFileLock(runFile(cwd, id), () => {
+    const run = loadRun(cwd, id);
+    run.supervisorSessions ??= [];
+    if (run.supervisorSessions.some((entry) => entry.id === session)) return false;
+    run.supervisorSessions.push({ id: session, firstSeenAt: nowIso() });
+    writeRun(cwd, run);
+    return true;
   });
 }
 
