@@ -334,6 +334,8 @@ acceptance; worker-reported commands never become trusted check definitions. The
 waiver. Manual supervisor evidence remains required for acceptance on contracted runs, including
 criteria that cannot be established by a passing command. Lanes without checks retain manual
 verification, and existing runs do not acquire checks retroactively.
+`lane show` lists a lane's checks and setup; `lane add <name> --clear-checks` or `--clear-setup`
+removes them for new runs, while existing runs keep the definitions they froze.
 
 ### Combined candidate preview
 

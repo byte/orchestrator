@@ -74,3 +74,24 @@ test("lane check definitions reject shell strings, missing ids, and duplicate id
     assert.throws(() => addLane(root, "invalid", { checks }), /argv|unique/);
   }
 });
+
+test("lane show lists checks and setup, and --clear-checks/--clear-setup remove them", () => {
+  const root = makeRepo();
+  repos.push(root);
+  runCli(root, ["init"]);
+  const added = runCli(root, ["lane", "add", "api", "--scope", "src/**",
+    "--check", JSON.stringify({ id: "unit", argv: ["node", "--test"], stages: ["task"] }),
+    "--setup", JSON.stringify({ argv: ["npm", "ci"], inputs: ["package-lock.json"], network: true })]);
+  assert.equal(added.code, 0, added.stderr);
+  const shown = runCli(root, ["lane", "show", "api"]).stdout;
+  assert.match(shown, /check unit \(task, 300s\): `node --test`/);
+  assert.match(shown, /setup \(300s, network enabled\): `npm ci`; inputs package-lock.json/);
+  // Re-adding without the options keeps them.
+  runCli(root, ["lane", "add", "api", "--done", "Tests pass"]);
+  assert.equal(JSON.parse(runCli(root, ["lane", "show", "api", "--json"]).stdout).checks.length, 1);
+  assert.equal(runCli(root, ["lane", "add", "api", "--clear-checks", "--clear-setup"]).code, 0);
+  const cleared = JSON.parse(runCli(root, ["lane", "show", "api", "--json"]).stdout);
+  assert.equal(cleared.checks, undefined);
+  assert.equal(cleared.setup, undefined);
+  assert.match(runCli(root, ["lane", "add", "api", "--check", "{not json"]).stderr, /--check takes a JSON object/);
+});

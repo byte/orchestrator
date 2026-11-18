@@ -163,7 +163,9 @@ test("run wait wakes on a file event when a slow worker completes, with the poll
   assert.equal(result.outcome, "changed");
   assert.equal(result.exitCode, WAIT_EXIT_CODES.changed);
   assert.equal(result.wakeSource, "watch");
-  assert.ok(Date.now() - started < 5000, "woken by the status file, not a fallback poll");
+  // wakeSource already proves the watch woke it. The bound only has to sit well
+  // under the 60-second fallback; a tight one failed under full-suite CPU load.
+  assert.ok(Date.now() - started < NO_FALLBACK_MS / 2, "woken by the status file, not a fallback poll");
   const [update] = result.updates;
   assert.equal(update.taskId, "work");
   assert.equal(update.status, "reported");

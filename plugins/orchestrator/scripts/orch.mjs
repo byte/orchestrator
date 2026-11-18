@@ -91,7 +91,7 @@ Usage:
   orch preflight [--json]
   orch init
   orch lane list [--json]
-  orch lane add <name> [--description <text>] [--scope <glob>]... [--constraint <text>]... [--done <text>] [--check <json>]... [--setup <json>]
+  orch lane add <name> [--description <text>] [--scope <glob>]... [--constraint <text>]... [--done <text>] [--check <json>]... [--setup <json>] [--clear-checks] [--clear-setup]
   orch lane remove <name>
   orch lane show <name> [--json]
   orch ledger show
@@ -336,11 +336,19 @@ function commandLearn(argv, cwd) {
   throw new Error(`Unknown learn action "${action}".`);
 }
 
+function parseJsonOption(flag, value) {
+  try {
+    return JSON.parse(value);
+  } catch (error) {
+    throw new Error(`${flag} takes a JSON object: ${error.message}`);
+  }
+}
+
 function commandLane(argv, cwd) {
   requireInitialized(cwd);
   const [action = "list", ...rest] = argv;
   const { options, positionals } = parseArgs(rest, {
-    booleanOptions: ["json"],
+    booleanOptions: ["json", "clear-checks", "clear-setup"],
     repeatableOptions: ["scope", "constraint", "check"],
     valueOptions: ["description", "done", "setup"]
   });
@@ -361,8 +369,11 @@ function commandLane(argv, cwd) {
       scope: repeatedValues(options.scope),
       constraints: repeatedValues(options.constraint),
       done: options.done ?? "",
-      ...(options.check ? { checks: options.check.map((value) => JSON.parse(value)) } : {}),
-      ...(options.setup ? { setup: JSON.parse(options.setup) } : {})
+      ...(options.check ? { checks: repeatedValues(options.check).map((value) => parseJsonOption("--check", value)) } : {}),
+      ...(options.setup ? { setup: parseJsonOption("--setup", options.setup) } : {}),
+      // Existing runs keep the checks and setup they froze; this changes new runs only.
+      ...(options["clear-checks"] ? { checks: [] } : {}),
+      ...(options["clear-setup"] ? { setup: null } : {})
     });
     return options.json ? emitJson(lane) : emit(renderLanes([lane]));
   }

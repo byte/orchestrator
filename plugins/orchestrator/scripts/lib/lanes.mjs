@@ -40,6 +40,10 @@ export function requireLane(cwd, name) {
   return lane;
 }
 
+function keep(key, value) {
+  return value === undefined || value === null || (Array.isArray(value) && !value.length) ? {} : { [key]: value };
+}
+
 export function addLane(cwd, name, { description = "", scope = [], constraints = [], done = "", checks, setup } = {}) {
   const laneName = assertValidLaneName(name);
   updateLanesState(cwd, (state) => {
@@ -49,8 +53,9 @@ export function addLane(cwd, name, { description = "", scope = [], constraints =
       scope: scope.length ? scope : existing?.scope ?? [],
       constraints: constraints.length ? constraints : existing?.constraints ?? [],
       done: done || existing?.done || "",
-      ...(checks === undefined ? (existing?.checks ? { checks: existing.checks } : {}) : { checks: normalizeChecks(checks) }),
-      ...(setup === undefined ? (existing?.setup ? { setup: existing.setup } : {}) : { setup: normalizeSetup(setup) }),
+      // Omitted keeps what the lane has; an empty list or null removes it.
+      ...keep("checks", checks === undefined ? existing?.checks : normalizeChecks(checks ?? [])),
+      ...keep("setup", setup === undefined ? existing?.setup : normalizeSetup(setup)),
       createdAt: existing?.createdAt ?? nowIso(),
       updatedAt: nowIso()
     };

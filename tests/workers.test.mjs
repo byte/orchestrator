@@ -231,7 +231,9 @@ test("inspection and cleanup bound a Git command blocked on a worker FIFO", () =
   try {
     for (const action of ["inspect", "cleanup"]) {
       const result = spawnSync(process.execPath, [CLI, "run", action, id, "build"], {
-        cwd: root, encoding: "utf8", detached: true, timeout: 3500, killSignal: "SIGKILL",
+        // A blocked Git would hang forever; the bound only has to separate that
+        // from a 1-second Git timeout plus Node startup under full-suite load.
+        cwd: root, encoding: "utf8", detached: true, timeout: 20000, killSignal: "SIGKILL",
         env: { ...process.env, NODE_OPTIONS: `--import=${preload}`, ORCH_TEST_SHORT_GIT_TIMEOUT: "1" }
       });
       if (result.error?.code === "ETIMEDOUT") {

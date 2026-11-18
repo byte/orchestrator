@@ -32,6 +32,13 @@ export function renderLanes(lanes) {
     if (lane.done) {
       lines.push(`- done when: ${lane.done}`);
     }
+    for (const check of lane.checks ?? []) {
+      lines.push(`- check ${check.id} (${check.stages.join(", ")}, ${check.timeoutSeconds}s): \`${check.argv.join(" ")}\``);
+    }
+    if (lane.setup) {
+      lines.push(`- setup (${lane.setup.timeoutSeconds}s, network ${lane.setup.network ? "enabled" : "disabled"}): ` +
+        `\`${lane.setup.argv.join(" ")}\`; inputs ${lane.setup.inputs.join(", ")}`);
+    }
     lines.push("");
   }
   return lines.join("\n").trimEnd();
