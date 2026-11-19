@@ -8,7 +8,9 @@ import {
   createProvisionalGuidancePolicy,
   deriveReviewedGuidanceSources
 } from "./lib/guidance.mjs";
-import { addLedgerEntry, readLedger } from "./lib/ledger.mjs";
+import { addLedgerEntry, deprecateLedgerEntry, ledgerForBriefing, readLedger } from "./lib/ledger.mjs";
+import { dispatchBudgetStatus, schedulingAdvice } from "./lib/run-insights.mjs";
+import { exportDiagnosticMetadata, inventoryStorage } from "./lib/storage.mjs";
 import { addLane, listLanes, removeLane, requireLane } from "./lib/lanes.mjs";
 import {
   collectLearningExamples,
@@ -56,6 +58,7 @@ import {
   retryTask,
   runChecks,
   runDiagnostics,
+  setRunBudgets,
   verifyTask
 } from "./lib/runs.mjs";
 import {
@@ -90,12 +93,15 @@ const USAGE = `orchestrator — a Claude-supervised Codex worker pool
 Usage:
   orch preflight [--json]
   orch init
+  orch storage [--json]
+  orch diagnostics [--json]
   orch lane list [--json]
   orch lane add <name> [--description <text>] [--scope <glob>]... [--constraint <text>]... [--done <text>] [--check <json>]... [--setup <json>] [--clear-checks] [--clear-setup]
   orch lane remove <name>
   orch lane show <name> [--json]
   orch ledger show
-  orch ledger add <section> <text>
+  orch ledger add <section> <text> [--lane <name>] [--source <text>] [--provenance <text>] [--confirmed-by <text>] [--confirmed-at <date>] [--json]
+  orch ledger deprecate <section> <entry-id> --reason <text> [--by <text>] [--json]
   orch learn collect [--run <id>]... [--retention-days <n|forever>] [--json]
   orch learn list [--run <id>]... [--outcome <value>]... [--sample <id>]... [--json]
   orch learn inspect <sample-id> [--json]
@@ -110,7 +116,8 @@ Usage:
   orch run show <run-id> [--json]
   orch run plan <run-id> --plan-file <path> [--user-approved-task <task-id>]... [--json]
   orch run ready <run-id> [--json]
-  orch run briefing <run-id>
+  orch run briefing <run-id> [--task <task-id>]
+  orch run budget <run-id> [--max-attempts <n>] [--max-elapsed-minutes <n>] [--max-worker-tokens <n>] [--clear-budget] [--json]
   orch run guidance <run-id> (--mode <provisional|off> [--policy-version <id>] | --rollback) [--json]
   orch run resume <run-id> [--json]
   orch run checkpoint <run-id> --summary <text> [--decision <text>]... [--risk <text>]... [--next <text>]...
@@ -394,19 +401,34 @@ function commandLane(argv, cwd) {
 function commandLedger(argv, cwd) {
   requireInitialized(cwd);
   const [action = "show", ...rest] = argv;
+  const { options, positionals } = parseArgs(rest, {
+    booleanOptions: ["json", "include-deprecated"],
+    valueOptions: ["lane", "source", "provenance", "confirmed-by", "confirmed-at", "reason", "by"]
+  });
 
   if (action === "show") {
+    if (options.lane || options.json) {
+      const ledger = ledgerForBriefing(cwd, { lane: options.lane ?? null, includeDeprecated: Boolean(options["include-deprecated"]) });
+      return options.json ? emitJson(ledger) : emit(ledger.populated.map(([section, entries]) => `## ${section}\n${entries.map((entry) => `- ${entry}`).join("\n")}`).join("\n\n"));
+    }
     return emit(readLedger(cwd).trimEnd());
   }
 
   if (action === "add") {
-    const section = rest.shift();
-    const text = rest.join(" ").trim();
+    const section = positionals.shift();
+    const text = positionals.join(" ").trim();
     if (!section || !text) {
       throw new Error("`orch ledger add` requires a section and text.");
     }
-    const entry = addLedgerEntry(cwd, section, text);
-    return emit(`Added to ${entry.section}: ${entry.entry}`);
+    const entry = addLedgerEntry(cwd, section, text, { lane: options.lane, source: options.source,
+      provenance: options.provenance, confirmedBy: options["confirmed-by"], confirmedAt: options["confirmed-at"] });
+    return options.json ? emitJson(entry) : emit(`Added to ${entry.section}: ${entry.entry}`);
+  }
+
+  if (action === "deprecate") {
+    if (positionals.length !== 2) throw new Error("Ledger deprecate requires a section and entry id.");
+    const entry = deprecateLedgerEntry(cwd, positionals[0], positionals[1], { reason: options.reason, deprecatedBy: options.by });
+    return options.json ? emitJson(entry) : emit(`Deprecated ${entry.id}; history retained.`);
   }
 
   throw new Error(`Unknown ledger action "${action}".`);
@@ -469,7 +491,7 @@ function usageSnapshot(run) {
       // Advisory only.
     }
     if (!measured && !claude) return null;
-    return { workers, measured, unmeasured, tokens, byModel, plan, weekly, ...(claude ? { claude } : {}) };
+    return { workers, measured, unmeasured, tokens, byModel, plan, weekly, attempts: usage.attempts, ...(claude ? { claude } : {}) };
   } catch {
     return null;
   }
@@ -477,7 +499,7 @@ function usageSnapshot(run) {
 
 function safeUsageLine(run) {
   try {
-    return usageLine(runUsage(run));
+    return usageLine(run.status === "completed" && run.finalization?.usage ? run.finalization.usage : runUsage(run));
   } catch {
     return null;
   }
@@ -537,7 +559,8 @@ function renderDiagnostics(cwd, run) {
   const report = runDiagnostics(cwd, run);
   return [
     ...report.alerts.map((entry) => `- ${entry.reason}\n  next: ${entry.next}`),
-    ...report.tasks.map((entry) => `- ${entry.taskId}: ${entry.state} — ${entry.reason}\n  next: ${entry.next}`),
+    ...report.tasks.map((entry) => `- ${entry.taskId}: ${entry.state} — ${entry.reason}\n  next: ${entry.next}` +
+      (entry.progress ? `\n  active ${Math.round((entry.progress.activeMs ?? 0) / 1000)}s; awaiting answers ${Math.round(entry.progress.awaitingAnswerMs / 1000)}s; last observed output ${entry.progress.lastOutputAt ?? "unknown"} (quiet is not proof of a stall)` : "")),
     ...(run.status === "finalizing" ? [`- all tasks accepted; next: orch run check ${run.id}, then final supervisor verdict`] : [])
   ].join("\n");
 }
@@ -696,10 +719,14 @@ function commandRun(argv, cwd) {
   }
 
   const { options, positionals } = parseArgs(rest, {
-    booleanOptions: ["json", "fresh", "conflict", "deny", "user-approved", "no-watch", "release-uncertain"],
+    booleanOptions: ["json", "fresh", "conflict", "deny", "user-approved", "no-watch", "release-uncertain", "clear-budget"],
     repeatableOptions: ["decision", "risk", "next", "evidence", "grant-scope", "user-approved-task"],
     valueOptions: [
       "plan-file",
+      "task",
+      "max-attempts",
+      "max-elapsed-minutes",
+      "max-worker-tokens",
       "summary",
       "attempt",
       "agent-id",
@@ -730,6 +757,19 @@ function commandRun(argv, cwd) {
   // An exact id, `latest`, or a unique fragment such as the id's last 8 characters.
   const runId = resolveRunId(cwd, positionals[0]);
   if (SUPERVISING_ACTIONS.has(action)) noteSession(cwd, runId);
+
+  if (action === "budget") {
+    let run = loadRun(cwd, runId);
+    const updates = Object.fromEntries([["max-attempts", "maxAttempts"], ["max-elapsed-minutes", "maxElapsedMinutes"], ["max-worker-tokens", "maxWorkerTokens"]]
+      .filter(([option]) => options[option] !== undefined).map(([option, field]) => [field, options[option]]));
+    if (options["clear-budget"] || Object.keys(updates).length) {
+      if (options["clear-budget"] && Object.keys(updates).length) throw new Error("Use --clear-budget alone or specify new limits.");
+      run = setRunBudgets(cwd, runId, options["clear-budget"] ? {} : { ...run.budgets, ...updates });
+      noteSession(cwd, runId);
+    }
+    const budget = dispatchBudgetStatus(run, { usage: run.budgets?.maxWorkerTokens ? runUsage(run) : null });
+    return options.json ? emitJson(budget) : emit(JSON.stringify(budget, null, 2));
+  }
 
   if (action === "show") {
     const run = loadRun(cwd, runId);
@@ -807,11 +847,12 @@ function commandRun(argv, cwd) {
 
   if (action === "ready") {
     const run = loadRun(cwd, runId);
+    const budget = dispatchBudgetStatus(run, { usage: run.budgets?.maxWorkerTokens ? runUsage(run) : null });
     // A ready task whose scope overlaps another active task's grant is refused by
     // `run launch`, so it is listed apart instead of offered for dispatch.
     const blocked = [];
     const tasks = readyTasks(run).filter((task) => {
-      const conflicts = [...grantedSurfaceConflicts(run, task), ...plannedSurfaceConflicts(run, task)];
+      const conflicts = [...budget.blocked, ...grantedSurfaceConflicts(run, task), ...plannedSurfaceConflicts(run, task)];
       const route = effectiveTaskRoute(run, task);
       if (route.exhausted) {
         conflicts.push(`${route.model} was rejected as unavailable and no allowed model remains; re-route it`);
@@ -822,8 +863,9 @@ function commandRun(argv, cwd) {
       return !conflicts.length;
     });
     const checkpoint = checkpointStatus(run);
+    const advice = schedulingAdvice(run).filter((entry) => tasks.some((task) => task.id === entry.taskId));
     if (options.json) {
-      return emitJson({ tasks, blocked, checkpoint, diagnostics: runDiagnostics(cwd, run) });
+      return emitJson({ tasks, blocked, checkpoint, advice, budget, diagnostics: runDiagnostics(cwd, run) });
     }
     const lines = tasks.length
       ? tasks.map((task) => `${task.id}\t${task.title}`)
@@ -831,6 +873,7 @@ function commandRun(argv, cwd) {
     for (const entry of blocked) {
       lines.push(`${entry.id}\tcannot launch: ${entry.conflicts.join("; ")}`);
     }
+    if (advice.some((entry) => entry.unlocks)) lines.push(`Scheduling advice (not a launch override): ${advice.map((entry) => `${entry.taskId} unlocks ${entry.unlocks}`).join("; ")}. Avoid simultaneous builds when machine/account limits dominate.`);
     if (checkpoint.stale) {
       lines.push(
         `checkpoint: stale — ${checkpoint.reason}`,
@@ -845,7 +888,8 @@ function commandRun(argv, cwd) {
   if (action === "briefing") {
     const run = loadRun(cwd, runId);
     const routes = laneRouteEvidence(cwd, run).text;
-    return emit(renderSupervisorBriefing(cwd, run, requireLane(cwd, run.lane), { routeEvidence: routes }).trimEnd());
+    const briefing = renderSupervisorBriefing(cwd, run, requireLane(cwd, run.lane), { routeEvidence: routes, taskId: options.task ?? null }).trimEnd();
+    return options.json ? emitJson({ briefing, bytes: Buffer.byteLength(briefing), focusedTask: options.task ?? null }) : emit(briefing);
   }
 
   if (action === "resume") {
@@ -927,7 +971,8 @@ function commandRun(argv, cwd) {
     const receipts = runChecks(cwd, runId, positionals[1] ?? null);
     if (receipts.some((receipt) => !receipt.passed)) process.exitCode = 1;
     return options.json ? emitJson(receipts) : emit(receipts.length
-      ? receipts.map((receipt) => `${receipt.checkId}: ${receipt.passed ? "passed" : "failed"} (exit ${receipt.exitCode ?? receipt.signal ?? "unknown"})`).join("\n")
+      ? receipts.map((receipt) => `${receipt.checkId}: ${receipt.passed ? "passed" : "failed"} (exit ${receipt.exitCode ?? receipt.signal ?? "unknown"})` +
+        (receipt.regression ? `\n${receipt.regression.attribution}; candidate tasks: ${receipt.regression.candidateTaskIds.join(", ") || "unresolved"}\n${receipt.regression.next}` : "")).join("\n")
       : "No required checks configured for this stage; manual evidence is still required.");
   }
 
@@ -936,7 +981,8 @@ function commandRun(argv, cwd) {
     if (!taskId) throw new Error("`orch run preview` requires a task id.");
     const receipt = previewRunTask(cwd, runId, taskId);
     if (!receipt.passed) process.exitCode = 1;
-    return options.json ? emitJson(receipt) : emit(`Preview ${receipt.id}: ${receipt.status}${receipt.error ? ` — ${receipt.error}` : ""}\nPreserved scratch: ${receipt.worktree.path}`);
+    return options.json ? emitJson(receipt) : emit(`Preview ${receipt.id}: ${receipt.status}${receipt.error ? ` — ${receipt.error}` : ""}\nPreserved scratch: ${receipt.worktree.path}` +
+      (receipt.regression ? `\n${receipt.regression.attribution}\n${receipt.regression.next}` : ""));
   }
 
   if (action === "verify") {
@@ -1139,6 +1185,16 @@ async function main() {
         return commandPreflight(argv, cwd);
       case "init":
         return commandInit(cwd);
+      case "storage": {
+        const { options } = parseArgs(argv, { booleanOptions: ["json"] });
+        const inventory = inventoryStorage(cwd);
+        return options.json ? emitJson(inventory) : emit(inventory.entries.map((entry) =>
+          `${entry.kind}\t${entry.bytes} bytes${entry.complete ? "" : " (incomplete)"}\t${entry.cleanup.eligible ? "cleanup candidate" : "keep"}: ${entry.cleanup.reason}\t${entry.path ?? "unavailable"}`
+        ).join("\n") || "No owned retained storage found.");
+      }
+      case "diagnostics":
+        parseArgs(argv, { booleanOptions: ["json"] });
+        return emitJson(exportDiagnosticMetadata(cwd));
       case "lane":
         return commandLane(argv, cwd);
       case "ledger":

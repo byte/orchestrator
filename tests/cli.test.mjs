@@ -829,3 +829,26 @@ test("run list --open says so when nothing is open", () => {
   assert.match(runCli(root, ["run", "list", "--open"]).stdout, /No open orchestration runs\./);
   assert.match(runCli(root, ["run", "show", "latest"]).stderr, /no orchestration runs in this repository yet/);
 });
+
+test("operator CLI exposes scoped ledger history and read-only storage diagnostics", () => {
+  const root = repo();
+  const added = runCli(root, ["ledger", "add", "Decisions", "API decision", "--lane", "api", "--source", "reviewed code", "--json"]);
+  assert.equal(added.code, 0, added.stderr);
+  const { id } = JSON.parse(added.stdout);
+  assert.ok(id);
+  assert.match(runCli(root, ["ledger", "show", "--lane", "api", "--json"]).stdout, /API decision/);
+  assert.doesNotMatch(runCli(root, ["ledger", "show", "--lane", "web", "--json"]).stdout, /API decision/);
+  const deprecated = runCli(root, ["ledger", "deprecate", "Decisions", id, "--reason", "Replaced by reviewed v2", "--json"]);
+  assert.equal(deprecated.code, 0, deprecated.stderr);
+  assert.doesNotMatch(runCli(root, ["ledger", "show", "--lane", "api", "--json"]).stdout, /API decision/);
+  assert.match(runCli(root, ["ledger", "show"]).stdout, /API decision/);
+  assert.match(runCli(root, ["ledger", "show", "--lane", "api", "--include-deprecated", "--json"]).stdout, /DEPRECATED/);
+  const before = git(root, ["status", "--porcelain"]);
+  const storage = runCli(root, ["storage", "--json"]), diagnostic = runCli(root, ["diagnostics", "--json"]);
+  assert.equal(storage.code, 0, storage.stderr);
+  assert.equal(diagnostic.code, 0, diagnostic.stderr);
+  assert.equal(JSON.parse(storage.stdout).advisory, true);
+  assert.equal(JSON.parse(diagnostic.stdout).certification, "unknown");
+  assert.doesNotMatch(diagnostic.stdout, new RegExp(root));
+  assert.equal(git(root, ["status", "--porcelain"]), before);
+});

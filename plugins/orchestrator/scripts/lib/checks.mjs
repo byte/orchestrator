@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
 import { changedFiles, headSha, SUPERVISOR_GIT_ARGS } from "./git.mjs";
 import { execGit, resolveExecutable, signalProcessGroup } from "./exec.mjs";
@@ -33,7 +34,11 @@ export function normalizeCommand(command) {
   if (!Number.isFinite(timeoutSeconds) || timeoutSeconds <= 0 || timeoutSeconds > 3600) {
     throw new Error("Command timeoutSeconds must be greater than 0 and at most 3600.");
   }
-  return { argv: [...command.argv], timeoutSeconds };
+  if (command.maxOutputBytes !== undefined && (!Number.isInteger(command.maxOutputBytes) || command.maxOutputBytes < 1024 || command.maxOutputBytes > 32 * 1024 * 1024)) {
+    throw new Error("Command maxOutputBytes must be an integer between 1024 and 33554432.");
+  }
+  return { argv: [...command.argv], timeoutSeconds,
+    ...(command.maxOutputBytes === undefined ? {} : { maxOutputBytes: command.maxOutputBytes }) };
 }
 
 export function normalizeSetup(setup) {
@@ -136,29 +141,37 @@ export function executeCheck(cwd, definition, { codexCommand = ["codex"], writab
   const command = normalizeCommand(definition);
   const directory = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "orch-check-")));
   const profile = `orchestrator-check-${randomUUID().replaceAll("-", "")}`;
-  const stdout = path.join(directory, "stdout");
-  const stderr = path.join(directory, "stderr");
   const scratch = path.join(directory, "scratch");
   fs.mkdirSync(scratch, { mode: 0o700 });
   const filesystem = { [scratch]: "write", ...(writable ? { [fs.realpathSync(cwd)]: "write" } : {}) };
-  const descriptors = [fs.openSync(stdout, "wx", 0o600), fs.openSync(stderr, "wx", 0o600)];
   const startedAt = new Date().toISOString();
+  const maxOutputBytes = command.maxOutputBytes ?? 8 * 1024 * 1024;
+  const stdout = path.join(directory, "stdout"), stderr = path.join(directory, "stderr");
+  const resultFile = path.join(directory, "result.json");
   let terminationUncertain = false;
   try {
     let result;
     try {
-      result = spawnSync(resolveExecutable(codexCommand[0]), [
+      const argv = [resolveExecutable(codexCommand[0]),
         ...codexCommand.slice(1), "sandbox",
         "-c", `default_permissions="${profile}"`,
         "-c", `permissions.${profile}.extends=":read-only"`,
         "-c", `permissions.${profile}.filesystem={${Object.entries(filesystem).map(([key, value]) => `${JSON.stringify(key)}=${JSON.stringify(value)}`).join(",")}}`,
         "-c", `permissions.${profile}.network.enabled=${Boolean(network)}`,
         "--", resolveExecutable(command.argv[0], cwd), ...command.argv.slice(1)
-      ], {
+      ];
+      const specFile = path.join(directory, "command.json");
+      fs.writeFileSync(specFile, JSON.stringify({ argv, stdout, stderr, result: resultFile, maxOutputBytes }), { mode: 0o600 });
+      result = spawnSync(process.execPath, [fileURLToPath(new URL("../check-child.mjs", import.meta.url)), specFile], {
         cwd, env: { ...process.env, TMPDIR: scratch }, detached: true,
-        timeout: command.timeoutSeconds * 1000, killSignal: "SIGKILL", stdio: ["ignore", ...descriptors]
+        timeout: command.timeoutSeconds * 1000,
+        killSignal: "SIGKILL", stdio: "ignore"
       });
-    } catch (error) { result = { status: null, signal: null, error }; }
+      if (!result.error) {
+        const captured = JSON.parse(fs.readFileSync(resultFile, "utf8"));
+        result = { ...result, ...captured, error: captured.error ? new Error(captured.error) : null };
+      }
+    } catch (error) { result = { ...result, status: null, signal: null, error }; }
     if (result.pid) {
       try {
         let reused = false;
@@ -172,25 +185,20 @@ export function executeCheck(cwd, definition, { codexCommand = ["codex"], writab
         result.error = error;
       }
     }
-    const tail = (file) => {
-      const size = fs.statSync(file).size;
-      const fd = fs.openSync(file, "r");
-      try {
-        const buffer = Buffer.alloc(Math.min(size, 32 * 1024));
-        fs.readSync(fd, buffer, 0, buffer.length, Math.max(0, size - buffer.length));
-        return { text: buffer.toString("utf8"), truncated: size > buffer.length };
-      } finally { fs.closeSync(fd); }
+    const tail = (file, truncated) => {
+      let text = "";
+      try { text = fs.readFileSync(file, "utf8"); } catch (error) { if (error.code !== "ENOENT") throw error; }
+      return { text, truncated: Boolean(truncated || text.includes("[orchestrator: output truncated]")) };
     };
     return {
       argv: command.argv, cwd, startedAt, finishedAt: new Date().toISOString(),
-      timeoutSeconds: command.timeoutSeconds, exitCode: result.status,
+      timeoutSeconds: command.timeoutSeconds, maxOutputBytes, exitCode: result.status,
       signal: result.signal, error: result.error?.message ?? null,
       passed: !result.error && result.status === 0,
       ...(terminationUncertain ? { terminationUncertain: true, processGroup: result.pid, captureDirectory: directory } : {}),
-      sandbox: { writable, network }, stdout: tail(stdout), stderr: tail(stderr)
+      sandbox: { writable, network }, stdout: tail(stdout, result.stdoutTruncated), stderr: tail(stderr, result.stderrTruncated)
     };
   } finally {
-    descriptors.forEach((fd) => fs.closeSync(fd));
     if (!terminationUncertain) fs.rmSync(directory, { recursive: true, force: true });
   }
 }

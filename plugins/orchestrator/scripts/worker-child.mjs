@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { GIT_MUTATION_TIMEOUT_MS, execGit } from "./lib/exec.mjs";
+import { BoundedLog } from "./lib/bounded-log.mjs";
 import { worktreeGitEnv } from "./lib/git.mjs";
 import { removeTree, SCRATCH_OWNER_FILE } from "./lib/remove-tree.mjs";
 
@@ -58,6 +59,16 @@ let pluginJobId = null;
 let statusSeq = 0;
 
 let currentStatus = "starting";
+let lastOutputAt = null;
+let lastActivityPublication = 0;
+
+function noteActivity() {
+  lastOutputAt = new Date().toISOString();
+  if (Date.now() - lastActivityPublication >= 5000) {
+    lastActivityPublication = Date.now();
+    writeStatus({ status: currentStatus });
+  }
+}
 
 function writeStatus(fields) {
   statusSeq += 1;
@@ -67,6 +78,7 @@ function writeStatus(fields) {
     pid: process.pid,
     ...(childPid ? { childPid, childStartedAt } : {}),
     startedAt,
+    lastOutputAt,
     threadId,
     ...(spec.resumeThreadId ? { resumeThreadId: spec.resumeThreadId } : {}),
     ...(resumeFallback ? { resumeFallback } : {}),
@@ -228,8 +240,8 @@ async function probeReadProfile() {
     };
     current = { kill: (signal) => abandon(signal === "SIGINT" ? "SIGINT" : "SIGKILL") };
     const timer = setTimeout(() => abandon("SIGKILL"), 30000);
-    child.stdout.setEncoding("utf8").on("data", (chunk) => { stdout += chunk; });
-    child.stderr.setEncoding("utf8").on("data", (chunk) => { stderr += chunk; });
+    child.stdout.setEncoding("utf8").on("data", (chunk) => { stdout = (stdout + chunk).slice(-64 * 1024); });
+    child.stderr.setEncoding("utf8").on("data", (chunk) => { stderr = (stderr + chunk).slice(-64 * 1024); });
     child.on("error", (error) => finish({ error, stdout, stderr }));
     child.on("close", (code, signal) => finish({ code, signal, stdout, stderr }));
   });
@@ -334,8 +346,11 @@ function pausedForInput() {
 
 writeStatus({ status: "running" });
 
-const output = fs.createWriteStream(spec.outputFile, { flags: "a", mode: 0o600 });
-const errors = fs.createWriteStream(spec.errorFile, { flags: "a", mode: 0o600 });
+const output = new BoundedLog(spec.outputFile);
+const errors = new BoundedLog(spec.errorFile);
+// A disk error must fail the wrapper rather than silently drop audit output.
+output.on("error", (error) => { throw error; });
+errors.on("error", (error) => { throw error; });
 
 const prompt = fs.readFileSync(spec.promptFile);
 // A resume after `run answer` sends only the answer, because the thread already
@@ -443,13 +458,23 @@ function runCodex(resumeThreadId, input = prompt) {
     let replacedWithoutBriefing = false;
     let stderrText = "";
     let buffered = "";
+    let discardingLine = false;
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (chunk) => {
+      noteActivity();
       output.write(chunk);
+      if (discardingLine) {
+        const newline = chunk.indexOf("\n");
+        if (newline === -1) return;
+        chunk = chunk.slice(newline + 1);
+        discardingLine = false;
+      }
       buffered += chunk;
       const lines = buffered.split("\n");
       buffered = lines.pop() ?? "";
+      if (buffered.length > 1024 * 1024) { buffered = ""; discardingLine = true; }
       for (const line of lines) {
+        if (line.length > 1024 * 1024) continue;
         try {
           const event = JSON.parse(line);
           if (event.type === "thread.started" && event.thread_id) {
@@ -482,7 +507,8 @@ function runCodex(resumeThreadId, input = prompt) {
     });
     child.stderr.setEncoding("utf8");
     child.stderr.on("data", (chunk) => {
-      stderrText += chunk;
+      noteActivity();
+      stderrText = (stderrText + chunk).slice(-64 * 1024);
       errors.write(chunk);
     });
     child.stdin.on("error", () => {
@@ -524,8 +550,8 @@ function companion(args) {
     });
     let stdout = "";
     let stderr = "";
-    child.stdout.setEncoding("utf8").on("data", (chunk) => { stdout += chunk; });
-    child.stderr.setEncoding("utf8").on("data", (chunk) => { stderr += chunk; });
+    child.stdout.setEncoding("utf8").on("data", (chunk) => { stdout = (stdout + chunk).slice(-1024 * 1024); });
+    child.stderr.setEncoding("utf8").on("data", (chunk) => { stderr = (stderr + chunk).slice(-64 * 1024); });
     child.on("error", (error) => resolveRun({ code: null, stdout, stderr: `${stderr}${error.message}` }));
     child.on("close", (code) => resolveRun({ code, stdout, stderr }));
   });
@@ -787,4 +813,6 @@ await Promise.race([
   new Promise((resolve) => { flushTimer = setTimeout(resolve, 5000); })
 ]);
 clearTimeout(flushTimer);
-writeStatus({ ...finalStatus, finishedAt: new Date().toISOString() });
+writeStatus({ ...finalStatus, finishedAt: new Date().toISOString(),
+  capture: { limitBytesPerStream: output.limitBytes, stdoutTruncated: output.truncated, stderrTruncated: errors.truncated,
+    observedBytes: output.observedBytes + errors.observedBytes } });

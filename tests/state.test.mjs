@@ -11,6 +11,7 @@ import {
   RUN_STATE_VERSION,
   initWorkspace,
   lanesFile,
+  ledgerFile,
   loadLanesState,
   loadLocalState,
   threadsFile,
@@ -18,6 +19,14 @@ import {
   updateLocalState,
   withFileLock
 } from "../plugins/orchestrator/scripts/lib/state.mjs";
+import {
+  addLedgerEntry,
+  deprecateLedgerEntry,
+  ledgerForBriefing,
+  parseLedger,
+  parseLedgerEntry,
+  readLedger
+} from "../plugins/orchestrator/scripts/lib/ledger.mjs";
 import { cleanup, makeRepo } from "./helpers.mjs";
 
 const repos = [];
@@ -196,4 +205,67 @@ test("future, mismatched, and incomplete marked shared schemas fail closed", () 
     fs.writeFileSync(entry.file(root), `${JSON.stringify(entry.value)}\n`);
     assert.throws(() => entry.load(root), entry.message);
   }
+});
+
+test("ledger metadata scopes briefings without hiding legacy or unscoped facts", () => {
+  const root = repo();
+  const legacy = addLedgerEntry(root, "decisions", "Legacy global fact.");
+  const global = addLedgerEntry(root, "conventions", "Document the contract.", { source: "run-review", provenance: "supervisor" });
+  const scoped = addLedgerEntry(root, "decisions", "API fact.", {
+    lane: "api", source: "run-api/task-1", provenance: "user", confirmedBy: "reviewer", confirmedAt: "2026-11-19"
+  });
+  addLedgerEntry(root, "commands", "Web command.", { lane: "web" });
+  fs.appendFileSync(ledgerFile(root), "\n## Decisions\n\n- Hand-written legacy fact.\n");
+  const before = readLedger(root);
+  assert.deepEqual(parseLedgerEntry(legacy.entry), { text: legacy.entry, metadata: null });
+  assert.deepEqual(parseLedgerEntry(scoped.entry).metadata, scoped.metadata);
+  assert.equal(parseLedgerEntry(global.entry).metadata.confirmedAt, undefined, "adding a fact must not invent confirmation");
+  assert.ok(parseLedger(before).get("Decisions").includes(scoped.entry), "old Markdown parser still sees the bullet");
+  const briefing = ledgerForBriefing(root, { lane: "api" });
+  const text = JSON.stringify(briefing.populated);
+  assert.match(text, /Legacy global fact/);
+  assert.match(text, /Hand-written legacy fact/);
+  assert.match(text, /Document the contract/);
+  assert.match(text, /API fact/);
+  assert.match(text, /source: run-api\/task-1; provenance: user; confirmedBy: reviewer; confirmedAt: 2026-11-19/);
+  assert.doesNotMatch(text, /Web command/);
+  assert.doesNotMatch(text, /orch-ledger:/);
+  assert.match(JSON.stringify(ledgerForBriefing(root).populated), /Web command/);
+  assert.equal(briefing.bytes, Buffer.byteLength(before));
+  assert.equal(readLedger(root), before, "briefing selection must not rewrite the ledger");
+});
+
+test("ledger deprecation is explicit, preserves evidence, and also works on plain Markdown", () => {
+  const root = repo();
+  const legacy = addLedgerEntry(root, "decisions", "Old global fact.");
+  const scoped = addLedgerEntry(root, "conventions", "Old API convention.", { lane: "api", source: "run-1" });
+  assert.throws(() => deprecateLedgerEntry(root, "decisions", legacy.entry), /requires a single-line reason/);
+  const retired = deprecateLedgerEntry(root, "decisions", legacy.entry, { reason: "Superseded", deprecatedBy: "user" });
+  assert.equal(retired.metadata.deprecated.by, "user");
+  assert.ok(Number.isFinite(Date.parse(retired.metadata.deprecated.at)));
+  const result = deprecateLedgerEntry(root, "conventions", scoped.id, { reason: "No longer applicable" });
+  assert.equal(result.metadata.source, "run-1");
+  assert.equal(result.metadata.lane, "api");
+  assert.match(readLedger(root), /Old global fact/);
+  assert.match(readLedger(root), /Old API convention/);
+  assert.equal(ledgerForBriefing(root, { lane: "api" }).isEmpty, true);
+  const history = JSON.stringify(ledgerForBriefing(root, { lane: "api", includeDeprecated: true }).populated);
+  assert.match(history, /Old global fact.*DEPRECATED: Superseded/);
+  assert.match(history, /Old API convention.*DEPRECATED: No longer applicable/);
+  const before = readLedger(root);
+  assert.deepEqual(deprecateLedgerEntry(root, "decisions", retired.id, { reason: "Superseded" }), retired);
+  assert.equal(readLedger(root), before, "repeated deprecation must preserve the original evidence");
+  assert.throws(() => deprecateLedgerEntry(root, "commands", retired.id, { reason: "Wrong section" }), /not found/);
+});
+
+test("ledger rejects ambiguous deprecation and invalid metadata without changing the file", () => {
+  const root = repo();
+  const entry = addLedgerEntry(root, "decisions", "Repeated fact.");
+  fs.appendFileSync(ledgerFile(root), "\n## Decisions\n\n- " + entry.entry + "\n");
+  const before = readLedger(root);
+  assert.throws(() => deprecateLedgerEntry(root, "decisions", undefined, { reason: "Missing selector" }), /entry id or exact bullet text/);
+  assert.throws(() => deprecateLedgerEntry(root, "decisions", entry.entry, { reason: "Ambiguous" }), /ambiguous/);
+  assert.throws(() => addLedgerEntry(root, "commands", "Do this", { lane: "api\n## Commands" }), /single-line/);
+  assert.throws(() => addLedgerEntry(root, "commands", "Do this", { confirmedAt: "not a date" }), /date or timestamp/);
+  assert.equal(readLedger(root), before);
 });

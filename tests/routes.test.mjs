@@ -11,6 +11,7 @@ import {
   routeEvidence
 } from "../plugins/orchestrator/scripts/lib/routes.mjs";
 import { createRun, runFile } from "../plugins/orchestrator/scripts/lib/runs.mjs";
+import { runUsage } from "../plugins/orchestrator/scripts/lib/usage.mjs";
 import { cleanup, makeRepo, runCli, write } from "./helpers.mjs";
 
 const repos = [];
@@ -157,6 +158,10 @@ function row(evidence, model, effort) {
   return evidence.rows.find((entry) => entry.model === model && entry.reasoningEffort === effort);
 }
 
+function cohortCounts({ outcomeReasons, usage, byTaskKind, ...counts }) {
+  return counts;
+}
+
 test("run routes matches a hand count on a fixture of saved runs", () => {
   const root = repo();
   writeFixture(root);
@@ -172,7 +177,7 @@ test("run routes matches a hand count on a fixture of saved runs", () => {
     "gpt-6.2-sol/high",
     "gpt-6.1-terra/medium"
   ]);
-  assert.deepEqual(row(evidence, "gpt-6.2-sol", "high"), {
+  assert.deepEqual(cohortCounts(row(evidence, "gpt-6.2-sol", "high")), {
     model: "gpt-6.2-sol",
     reasoningEffort: "high",
     attempts: 6,
@@ -185,7 +190,7 @@ test("run routes matches a hand count on a fixture of saved runs", () => {
     medianDurationMs: 5.5 * 60_000,
     durationSamples: 6
   });
-  assert.deepEqual(row(evidence, "gpt-6.1-terra", "medium"), {
+  assert.deepEqual(cohortCounts(row(evidence, "gpt-6.1-terra", "medium")), {
     model: "gpt-6.1-terra",
     reasoningEffort: "medium",
     attempts: 2,
@@ -203,7 +208,8 @@ test("run routes matches a hand count on a fixture of saved runs", () => {
     launchFailed: 1,
     cancelled: 1,
     inProgress: 2,
-    legacy: 1
+    legacy: 1,
+    infrastructure: {}
   });
   assert.deepEqual(evidence.skippedRuns, []);
 });
@@ -388,4 +394,105 @@ test("time paused on a needs_input request is not counted as model runtime", () 
   const sol = row(evidence, "gpt-6.2-sol", "high");
   assert.equal(sol.durationSamples, 2);
   assert.equal(sol.medianDurationMs, 12.5 * 60_000);
+});
+
+test("route strata use historical kinds and saved attempt usage without changing route cohorts", () => {
+  const root = repo();
+  const write = attempt("w-1", "gpt-6.2-sol", "high", ACCEPTED, 1, {
+    assignmentSnapshot: { taskKind: "write" }, threadId: "route-usage-thread"
+  });
+  const read = attempt("r-1", "gpt-6.2-sol", "high", VERIFY_FAILED, 2, {
+    assignmentSnapshot: { taskKind: "read" }
+  });
+  const unknown = attempt("u-1", "gpt-6.2-sol", "high", ACCEPTED, 3);
+  delete unknown.outcome;
+  const tokens = { input: 100, cachedInput: 20, output: 30, reasoningOutput: 10 };
+  const run = { id: "run-usage", lane: "api", tasks: { w: task("w", [write]), r: task("r", [read]), u: task("u", [unknown]) } };
+  // Exercise the actual runUsage emitter against a synthetic Codex log. Route
+  // evidence itself must work with the saved result after that log is removed.
+  const home = path.join(root, "codex-fixture");
+  const start = new Date(write.startedAt);
+  const day = path.join(home, "sessions", String(start.getFullYear()),
+    String(start.getMonth() + 1).padStart(2, "0"), String(start.getDate()).padStart(2, "0"));
+  fs.mkdirSync(day, { recursive: true });
+  fs.writeFileSync(path.join(day, "rollout-fixture-route-usage-thread.jsonl"), JSON.stringify({
+    timestamp: write.finishedAt, type: "event_msg",
+    payload: { type: "token_count", info: { total_token_usage: {
+      input_tokens: 100, cached_input_tokens: 20, output_tokens: 30, reasoning_output_tokens: 10
+    } } }
+  }) + "\n");
+  const emitted = runUsage(run, { home });
+  assert.equal(emitted.workers, 1, "runUsage workers is a count, not the per-attempt record array");
+  assert.equal(emitted.attempts.length, 3);
+  assert.equal(emitted.measured, 1);
+  fs.rmSync(home, { recursive: true });
+  run.finalization = { usage: emitted };
+  const evidence = aggregateRoutes([run]);
+  const sol = evidence.rows[0];
+  assert.equal(evidence.rows.length, 1);
+  assert.equal(sol.attempts, 3);
+  assert.deepEqual(sol.outcomeReasons, { supervisor_verified: 1, supervisor_verification_failed: 1, unknown: 1 });
+  assert.deepEqual(sol.usage, { measured: 1, missing: 2, tokens });
+  assert.deepEqual(sol.byTaskKind.map((kind) => [kind.taskKind, kind.attempts, kind.accepted, kind.usage.measured]),
+    [["read", 1, 0, 0], ["unknown", 1, 1, 0], ["write", 1, 1, 1]]);
+  assert.equal(sol.byTaskKind[0].usage.tokens, null);
+  assert.ok(sol.byTaskKind.every((kind) => kind.firstAttemptAcceptanceRate === null));
+  run.tasks.w.kind = "review";
+  run.tasks.u.kind = "review";
+  assert.deepEqual(aggregateRoutes([run]), evidence);
+  assert.match(renderRouteEvidence(evidence), /kind write: 1\/1 accepted; reasons supervisor_verified ×1; usage 1\/1 measured/);
+
+  // The current summary-only CLI snapshot has no usable per-attempt facts.
+  const { attempts, workers, measured, unmeasured, tokens: totalTokens, byModel, plan, weekly } = emitted;
+  const summary = { workers, measured, unmeasured, tokens: totalTokens, byModel, plan, weekly };
+  run.finalization.usage = summary;
+  assert.deepEqual(aggregateRoutes([run]).rows[0].usage, { measured: 0, missing: 3, tokens: null });
+  // A records array under workers is accepted too, without mistaking its old
+  // numeric value for records. Both forms use exactly the emitter's records.
+  run.finalization.usage = { ...summary, workers: attempts };
+  assert.deepEqual(aggregateRoutes([run]), evidence);
+  run.finalization.usage = { ...summary, attempts };
+  savedRun(root, run.id, run.lane, Object.values(run.tasks));
+  const file = runFile(root, run.id);
+  const saved = JSON.parse(fs.readFileSync(file, "utf8"));
+  saved.finalization = run.finalization;
+  fs.writeFileSync(file, JSON.stringify(saved));
+  assert.deepEqual(routeEvidence(root).rows[0].usage, { measured: 1, missing: 2, tokens });
+
+  // Bad/incomplete measurements cannot turn unknown consumption into zero.
+  run.finalization.usage = { ...summary, attempts: attempts.map((entry) => ({
+    ...entry, tokens: { input: 100 }
+  })) };
+  assert.deepEqual(aggregateRoutes([run]).rows[0].usage, { measured: 0, missing: 3, tokens: null });
+});
+
+test("setup and explicit infrastructure failures are excluded, not attributed to the model", () => {
+  const setup = outcome("execution_failed", "execute", "setup_failed");
+  const infrastructure = outcome("execution_failed", "execute", "worktree_unavailable");
+  const evidence = aggregateRoutes([{ lane: "api", tasks: {
+    setup: task("setup", [
+      attempt("s-1", "gpt-6.2-sol", "high", setup, 1),
+      attempt("s-2", "gpt-6.2-sol", "high", ACCEPTED, 1)
+    ]),
+    launch: task("launch", [
+      attempt("l-1", "gpt-6.2-sol", "high", LAUNCH_FAILED, 0),
+      attempt("l-2", "gpt-6.2-sol", "high", ACCEPTED, 1)
+    ]),
+    infra: task("infra", [
+      attempt("i-1", "gpt-6.2-sol", "high", infrastructure, 1),
+      attempt("i-2", "gpt-6.2-sol", "high", ACCEPTED, 1)
+    ]),
+    process: task("process", [attempt("p-1", "gpt-6.2-sol", "high",
+      outcome("execution_failed", "execute", "worker_process_failed"), 1)])
+  } }]);
+  const sol = evidence.rows[0];
+  assert.equal(sol.attempts, 4);
+  assert.equal(sol.accepted, 3);
+  assert.equal(sol.firstAttempts, 3);
+  assert.equal(sol.firstAccepted, 2);
+  assert.equal(sol.retries, 1);
+  assert.deepEqual(evidence.excluded.infrastructure, { setup_failed: 1, worktree_unavailable: 1 });
+  assert.equal(evidence.excluded.launchFailed, 1);
+  assert.deepEqual(sol.outcomeReasons, { supervisor_verified: 3, worker_process_failed: 1 });
+  assert.match(renderRouteEvidence(evidence), /setup_failed, not model failures/);
 });

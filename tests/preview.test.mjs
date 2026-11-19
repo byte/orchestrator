@@ -59,6 +59,9 @@ test("combined preview catches an interaction before the supervisor branch chang
   const combined = previewRunTask(root, "preview", "b", options);
   assert.equal(combined.passed, false);
   assert.equal(combined.checks[0].exitCode, 5);
+  assert.equal(combined.regression.candidateTaskId, "b");
+  assert.deepEqual(combined.regression.newlyIntegratedTaskIds, ["a"]);
+  assert.equal(loadRun(root, "preview").previews.find((entry) => entry.id === combined.regression.previousPassingPreviewId).passed, true);
   assert.throws(() => integrateRunTask(root, "preview", "b", evidence), /preview is missing, failed, or stale/);
   assert.equal(git(root, ["rev-parse", "HEAD"]), acceptedHead);
   assert.equal(fs.readFileSync(path.join(root, "b.json"), "utf8"), "1\n");
@@ -66,6 +69,33 @@ test("combined preview catches an interaction before the supervisor branch chang
   const cleaned = runCli(root, ["run", "cleanup", "preview", "--json"]);
   assert.equal(cleaned.code, 0, cleaned.stderr);
   assert.equal(fs.existsSync(combined.worktree.path), false);
+});
+
+test("sequential combined checks preserve the passing baseline and identify the intervening integration without claiming causality", () => {
+  const root = candidates();
+  // Provision only the checkout's ignored check prerequisite, as an operator would.
+  write(root, "node_modules/ready", "ready");
+  const baseline = runChecks(root, "preview", null, options)[0];
+  assert.equal(baseline.passed, true);
+  previewRunTask(root, "preview", "a", options);
+  integrateRunTask(root, "preview", "a", evidence);
+  write(root, "b.json", "2\n");
+  const suspected = runChecks(root, "preview", null, options)[0];
+  assert.equal(suspected.passed, false);
+  assert.equal(suspected.regression.previousPassingReceiptId, baseline.id);
+  assert.deepEqual(suspected.regression.candidateTaskIds, ["a"]);
+  assert.match(suspected.regression.attribution, /suspected, not proven causal/);
+  write(root, "b.json", "1\n");
+  const passing = runChecks(root, "preview", null, options)[0];
+  assert.equal(passing.passed, true);
+  // A later dirty edit is not itself an integration and must not be blamed on a worker.
+  write(root, "b.json", "2\n");
+  const failing = runChecks(root, "preview", null, options)[0];
+  assert.equal(failing.passed, false);
+  assert.equal(failing.regression.previousPassingReceiptId, passing.id);
+  assert.deepEqual(failing.regression.candidateTaskIds, []);
+  assert.match(failing.regression.attribution, /unresolved/);
+  assert.equal(loadRun(root, "preview").checkReceipts.find((entry) => entry.id === baseline.id).passed, true);
 });
 
 test("changing the candidate invalidates its preview even after isolated checks pass again", () => {

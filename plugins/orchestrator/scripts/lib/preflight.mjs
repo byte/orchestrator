@@ -1,9 +1,11 @@
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
+import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { isInitialized } from "./state.mjs";
-import { changedFiles } from "./git.mjs";
+import { SUPERVISOR_GIT_ARGS } from "./git.mjs";
+import { findCodexCompanion, pluginLimitations } from "./codex-plugin.mjs";
 import { listLanes } from "./lanes.mjs";
 import { isGitRepository, resolveWorkspaceRoot } from "./workspace.mjs";
 
@@ -11,8 +13,10 @@ import { isGitRepository, resolveWorkspaceRoot } from "./workspace.mjs";
  * Run a probe and merge both streams. `codex login status` reports on stderr, so
  * reading stdout alone yields an empty string that looks like a passing check.
  */
-function tryExec(command, args) {
+function tryExec(command, args, cwd) {
   const probe = spawnSync(command, args, {
+    cwd,
+    env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" },
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
     timeout: 15000
@@ -21,6 +25,7 @@ function tryExec(command, args) {
   const output = `${probe.stdout ?? ""}\n${probe.stderr ?? ""}`.trim();
   return {
     ok: !probe.error && probe.status === 0,
+    stdout: probe.stdout ?? "",
     output: output || String(probe.error?.message ?? "").trim()
   };
 }
@@ -69,11 +74,17 @@ function checkCleanCheckout(cwd) {
   if (!isGitRepository(cwd)) {
     return null;
   }
-  let dirty;
-  try {
-    dirty = changedFiles(cwd);
-  } catch {
-    return null;
+  const probe = tryExec("git", [...SUPERVISOR_GIT_ARGS, "status", "--porcelain", "-z", "--untracked-files=all"], cwd);
+  if (!probe.ok) return { id: "clean_checkout", label: "Checkout clean", ok: false, warning: true,
+    detail: "unknown; Git status could not be read", remedy: "inspect Git status manually" };
+  // Porcelain rename/copy records have a second, undecorated path. Count the
+  // changed entry once; never include orchestrator's own bookkeeping.
+  const dirty = [];
+  const records = probe.stdout.split("\0").filter(Boolean);
+  for (let index = 0; index < records.length; index += 1) {
+    const record = records[index];
+    if (!record.slice(3).startsWith(".orchestrator/")) dirty.push(record);
+    if (/[RC]/.test(record.slice(0, 2))) index += 1;
   }
   return {
     id: "clean_checkout",
@@ -107,18 +118,60 @@ export function preflight(cwd = process.cwd()) {
     checkCodexBinary(),
     checkCodexAuth(),
     checkGit(cwd),
+    { id: "node-version", label: "Node version", ok: true, detail: process.version },
+    checkGitVersion(cwd),
+    checkPendingGitOperations(cwd),
     checkInitialized(cwd),
     checkCleanCheckout(cwd),
     { id: "setup", label: "Worktree setup", ok: true, detail: setupLanes.length
       ? setupLanes.map((lane) => `${lane.name}: configured, network ${lane.setup.network ? "enabled" : "disabled"}`).join("; ")
       : "not configured; ignored dependencies are not copied and write worktrees need manual setup or lane --setup" },
+    { id: "executors", label: "Executor capabilities", ok: true, detail: "cli: structured output, explicit resume, ignore-rules, probed private read scratch (fallback may lack it); codex-plugin: optional companion, weaker guarantees; see executorCapabilities in JSON and docs/compatibility.md" },
+    { id: "certification", label: "Environment certification", ok: false, optional: true, detail: "unknown; version and installation discovery are not containment or live-model certification; preflight makes no model calls" },
     { id: "sandbox", label: "Sandbox capabilities", ok: false, optional: true, detail: "not checked by preflight; worker launch probes read scratch isolation, required checks/setup use codex sandbox without a model call" }
   ].filter(Boolean);
 
-  // Pool dispatch invokes Codex CLI directly; no Claude-side Codex plugin is needed.
+  // The default CLI executor needs no Claude-side Codex plugin.
   const blocking = checks.filter(
     (check) => !check.ok && check.id !== "initialized" && !check.optional && !check.warning
   );
 
-  return { ok: blocking.length === 0, blocking, checks };
+  return { ok: blocking.length === 0, blocking, checks, executorCapabilities: executorCapabilities(), certification: "unknown" };
+}
+
+function checkGitVersion(cwd) {
+  const probe = tryExec("git", ["--version"], cwd);
+  return { id: "git-version", label: "Git version", ok: probe.ok, detail: probe.output || "unknown" };
+}
+
+function checkPendingGitOperations(cwd) {
+  if (!isGitRepository(cwd)) return null;
+  const pending = [];
+  for (const name of ["sequencer", "CHERRY_PICK_HEAD", "MERGE_HEAD", "REVERT_HEAD", "rebase-merge", "rebase-apply", "index.lock"]) {
+    const probe = tryExec("git", [...SUPERVISOR_GIT_ARGS, "rev-parse", "--git-path", name], cwd);
+    if (!probe.ok) return { id: "git-operations", label: "Pending Git operations", ok: false, warning: true, detail: "unknown; inspect Git state manually" };
+    if (fs.existsSync(path.resolve(cwd, probe.output))) pending.push(name);
+  }
+  return { id: "git-operations", label: "Pending Git operations", ok: pending.length === 0, warning: true,
+    detail: pending.length ? `present: ${pending.join(", ")}; preserve checkout and inspect before write launch/integration` : "none detected",
+    remedy: "inspect Git state; do not remove locks or abort operations automatically" };
+}
+
+/** Discovery only: never invoke the companion, install software, or certify it. */
+export function executorCapabilities() {
+  return {
+    cli: {
+      default: true,
+      certification: "unknown",
+      capabilities: ["structured output schema", "explicit thread resume", "saved approval rules ignored", "private read scratch probed at launch"],
+      limitations: ["private read scratch can fall back to plain read-only", "model availability and OS containment require opt-in verification"]
+    },
+    "codex-plugin": {
+      default: false,
+      companionFound: Boolean(findCodexCompanion()),
+      certification: "unknown",
+      capabilities: ["background task/status/result/cancel protocol"],
+      limitations: [...pluginLimitations("read"), "efforts above xhigh are stepped down to xhigh", "companion presence does not verify its version or protocol compatibility"]
+    }
+  };
 }

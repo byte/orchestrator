@@ -12,6 +12,8 @@ import {
 } from "./guidance.mjs";
 import { overlappingPatterns, patternsMayOverlap, scopeCovers } from "./glob.mjs";
 import { ledgerForBriefing } from "./ledger.mjs";
+import { attemptProgress, combinedRegression, dispatchBudgetStatus, normalizeBudgets } from "./run-insights.mjs";
+import { runUsage } from "./usage.mjs";
 import { getLane } from "./lanes.mjs";
 import { checkoutFingerprint, executeCheck, normalizeChecks, reviewFingerprint } from "./checks.mjs";
 import {
@@ -747,7 +749,8 @@ export function createRun(
     maxWorkers = DEFAULT_MAX_WORKERS,
     workerModel = DEFAULT_WORKER_MODEL,
     reasoningEffort = DEFAULT_REASONING_EFFORT,
-    executor = DEFAULT_EXECUTOR
+    executor = DEFAULT_EXECUTOR,
+    budgets = {}
   }
 ) {
   const runId = assertId(id, "run");
@@ -775,6 +778,7 @@ export function createRun(
       // lower-level API used by older programmatic callers.
       contract: getLane(cwd, lane),
       objective: body,
+      budgets: normalizeBudgets(budgets),
       status: "planning",
       workerPolicy: {
         routingMode: model ? "pinned" : DEFAULT_ROUTING_MODE,
@@ -804,6 +808,17 @@ export function createRun(
       lane: run.lane,
       workerPolicy: run.workerPolicy
     });
+    return run;
+  });
+}
+
+export function setRunBudgets(cwd, runId, budgets) {
+  const normalized = normalizeBudgets(budgets);
+  return withFileLock(runFile(cwd, runId), () => {
+    const run = loadRun(cwd, runId);
+    run.budgets = normalized;
+    writeRun(cwd, run);
+    appendEvent(cwd, run.id, { type: "run.budgets_changed", budgets: normalized });
     return run;
   });
 }
@@ -1639,8 +1654,8 @@ function appendAttemptDiagnostic(attempt, diagnostic) {
   return attempt.diagnostics.at(-1);
 }
 
-function renderWorkerLedger(cwd) {
-  const ledger = ledgerForBriefing(cwd);
+function renderWorkerLedger(cwd, lane) {
+  const ledger = ledgerForBriefing(cwd, { lane });
   if (!ledger.populated.length) {
     return "No durable project facts are relevant yet.";
   }
@@ -1983,7 +1998,7 @@ ${dependencyContext.length ? dependencyContext.join("\n\n") : "- none"}
 
 ## Durable project context
 
-${renderWorkerLedger(cwd)}
+${renderWorkerLedger(cwd, run.lane)}
 
 ## Required behavior
 
@@ -2126,10 +2141,13 @@ export function claimTask(cwd, runId, taskId, lane) {
   const id = assertId(runId, "run");
   const filePath = runFile(cwd, id);
   const precomputed = precomputeReadSurface(cwd, id, taskId, (task) => task && task.kind !== "write" ? task.scope : null);
+  const usage = loadRun(cwd, id).budgets?.maxWorkerTokens ? runUsage(loadRun(cwd, id)) : null;
   return withFileLock(filePath, () => {
     const run = loadRun(cwd, id);
     const task = requireTask(run, taskId);
     assertTaskAuthority(run, task);
+    const budget = dispatchBudgetStatus(run, { usage });
+    if (budget.blocked.length) throw new Error(`Dispatch budget: ${budget.blocked.join("; ")}.`);
     const ready = new Set(readyTasks(run).map((entry) => entry.id));
     if (!ready.has(task.id)) {
       throw new Error(`Task "${task.id}" is not ready.`);
@@ -2915,6 +2933,8 @@ export function syncExecutionStatus(cwd, runId, taskId, { attemptId, status, run
     attempt.runner.childPid = status.childPid ?? attempt.runner.childPid ?? null;
     attempt.runner.exitCode = status.exitCode ?? attempt.runner.exitCode ?? null;
     attempt.runner.signal = status.signal ?? attempt.runner.signal ?? null;
+    attempt.runner.lastOutputAt = status.lastOutputAt ?? attempt.runner.lastOutputAt ?? null;
+    if (status.capture) attempt.runner.capture = status.capture;
     attempt.threadId = status.threadId ?? attempt.threadId;
     const current = {
       statusSeq: attempt.runner.statusSeq,
@@ -3318,7 +3338,7 @@ export function runChecks(cwd, runId, taskId = null, options = {}) {
     assertNoPendingIntegration(run);
     const target = checkTarget(cwd, run, taskId);
     if (target.task && target.task.status !== "reported") throw new Error("Task checks require a reported result.");
-    if (!target.task && run.status !== "finalizing") throw new Error("Final checks require a finalizing run.");
+    if (!target.task && ["planning", "cancelled"].includes(run.status)) throw new Error("Combined checks require a planned, non-cancelled run.");
     const definitions = requiredChecks(run, taskId);
     const executionId = randomUUID();
     if (definitions.length) {
@@ -3345,11 +3365,14 @@ export function runChecks(cwd, runId, taskId = null, options = {}) {
         id: randomUUID(), checkId: definition.id, definition, executionId,
         taskId, attemptId: target.attempt?.id ?? null, planRevision: run.planRevision,
         fingerprint: before, changedDuringCheck: !after || before !== after,
+        integratedTasks: Object.values(run.tasks).filter((task) => task.integration)
+          .map((task) => ({ taskId: task.id, head: task.integration.integrationHead })),
         ...execution, ...(fingerprintError ? { fingerprintError } : {}),
         passed: Boolean(execution.passed && after && before === after), provenance: "supervisor-executed"
       };
       withFileLock(runFile(cwd, runId), () => {
         const current = loadRun(cwd, runId);
+        if (!taskId && !receipt.passed) receipt.regression = combinedRegression(current, receipt);
         (current.checkReceipts ??= []).push(receipt);
         writeRun(cwd, current);
         appendEvent(cwd, current.id, { type: "check.executed", receiptId: receipt.id, taskId, checkId: definition.id, passed: receipt.passed });
@@ -3406,6 +3429,8 @@ export function previewRunTask(cwd, runId, taskId, options = {}) {
       const receipt = {
         id, taskId, attemptId: attempt.id, planRevision: run.planRevision,
         targetHead: run.repository.integrationHead, candidateHead: inspection.head, commits: inspection.commits,
+        integratedTasks: Object.values(run.tasks).filter((entry) => entry.integration)
+          .map((entry) => ({ taskId: entry.id, head: entry.integration.integrationHead })),
         worktree: { path: path.join(localDir(cwd), "previews", run.id, id) },
         owner: { pid: process.pid, startedAt: processStartIso() },
         startedAt: nowIso(), status: "preparing", passed: false, checks: []
@@ -3451,12 +3476,27 @@ export function previewRunTask(cwd, runId, taskId, options = {}) {
       const before = checkoutFingerprint(receipt.worktree.path, { gitDir: receipt.worktree.gitDir });
       const execution = executeCheck(receipt.worktree.path, definition, { codexCommand: options.codexCommand });
       receipt.mayBeRunning ||= Boolean(execution.terminationUncertain);
-      const after = checkoutFingerprint(receipt.worktree.path, { gitDir: receipt.worktree.gitDir });
-      receipt.checks.push({ ...execution, definition, fingerprint: before, changedDuringCheck: before !== after, passed: execution.passed && before === after });
+      let after = null, fingerprintError = null;
+      try { after = checkoutFingerprint(receipt.worktree.path, { gitDir: receipt.worktree.gitDir }); }
+      catch (error) { fingerprintError = error.message; }
+      receipt.checks.push({ ...execution, definition, fingerprint: before, changedDuringCheck: !after || before !== after,
+        ...(fingerprintError ? { fingerprintError } : {}), passed: Boolean(execution.passed && after && before === after) });
       save();
     }
     receipt.passed = receipt.checks.every((check) => check.passed);
     receipt.status = receipt.passed ? "passed" : "failed";
+    if (!receipt.passed) {
+      const earlier = (run.previews ?? []).findLast((entry) => entry.passed && entry.taskId === taskId &&
+        entry.candidateHead === receipt.candidateHead && entry.planRevision === receipt.planRevision &&
+        entry.targetHead !== receipt.targetHead && Date.parse(entry.finishedAt) <= Date.parse(receipt.startedAt) &&
+        JSON.stringify(entry.checks?.map((check) => check.definition)) === JSON.stringify(receipt.checks.map((check) => check.definition)));
+      if (earlier) receipt.regression = {
+        previousPassingPreviewId: earlier.id, candidateTaskId: taskId,
+        newlyIntegratedTaskIds: receipt.integratedTasks.filter((entry) => !earlier.integratedTasks?.some((old) => old.head === entry.head)).map((entry) => entry.taskId),
+        attribution: "Candidate unchanged; target integrations changed. Inspect the interaction, not an assumed guilty worker.",
+        next: `Reject or replan ${taskId} with a correction scoped to the failing interaction, then repeat task checks and preview. Preserve the original receipts; do not auto-revert accepted work.`
+      };
+    }
   } catch (error) {
     receipt.status = "failed";
     receipt.error = error.message;
@@ -4214,6 +4254,10 @@ export function runDiagnostics(cwd, run) {
   }
   const checkpoint = checkpointStatus(run);
   if (!checkpoint.current && !["completed", "cancelled"].includes(run.status)) alerts.push({ reason: checkpoint.reason, next: `orch run checkpoint ${run.id} --summary <reviewed-plan-and-why>` });
+  const budget = dispatchBudgetStatus(run, { usage: run.budgets?.maxWorkerTokens ? runUsage(run) : null });
+  if (!["completed", "cancelled"].includes(run.status)) {
+    for (const reason of budget.blocked) alerts.push({ reason, next: `orch run budget ${run.id} — inspect or explicitly revise limits` });
+  }
   const writePending = Object.values(run.tasks).some((task) => task.kind === "write" && ["pending", "reported"].includes(task.status));
   let checkoutBlock = null;
   if (writePending) {
@@ -4234,11 +4278,17 @@ export function runDiagnostics(cwd, run) {
     } else if (task.status === "reported") {
       state = "awaiting review"; reason = task.kind === "write" ? "inspect, check, and integrate the candidate" : reviewFreshness(cwd, task, { quick: true }).reason;
       next = task.kind === "write" ? `orch run inspect ${run.id} ${task.id}` : `orch run verify ${run.id} ${task.id} --verdict <pass|fail> --evidence <review>`;
+      const preview = run.previews?.findLast((entry) => entry.taskId === task.id && entry.attemptId === attempt?.id);
+      if (preview?.status === "failed") {
+        reason = `combined preview failed (${preview.id}); prior evidence is preserved`;
+        next = preview.regression?.next ?? "Inspect the preview's checks/error, correct the candidate, and rerun checks and preview before integration.";
+      }
     } else if (task.status === "pending") {
       const dependencies = task.dependsOn.filter((id) => run.tasks[id]?.status !== "completed");
       const conflicts = [...grantedSurfaceConflicts(run, task), ...plannedSurfaceConflicts(run, task)];
       const route = effectiveTaskRoute(run, task);
       const blocks = [...dependencies.map((id) => `dependency ${id} not accepted`), ...conflicts];
+      blocks.push(...budget.blocked);
       if (!checkpoint.current) blocks.push(checkpoint.reason);
       if (route.exhausted) blocks.push("model route exhausted; replan the route");
       if (task.kind === "write" && checkoutBlock) blocks.push(checkoutBlock);
@@ -4250,9 +4300,9 @@ export function runDiagnostics(cwd, run) {
       reason = "setup_failed — no model worker started; setup receipt and worktree preserved";
       next = `Inspect attempts[].worktree.setup; fix the prerequisite, then orch run retry ${run.id} ${task.id} (or --fresh for changed inputs).`;
     } else if (attempt?.outcome?.reasonCode) reason = `${task.status}: ${attempt.outcome.reasonCode}`;
-    return { taskId: task.id, state, reason, next };
+    return { taskId: task.id, state, reason, next, progress: attemptProgress(attempt) };
   });
-  return { alerts, tasks: entries };
+  return { alerts, tasks: entries, budget };
 }
 
 export function recoveryReport(run) {
@@ -4540,9 +4590,10 @@ function renderList(items) {
  * (see `routes.mjs`), or null to leave the section out. The caller decides, so
  * this module never reads other runs.
  */
-export function renderSupervisorBriefing(cwd, run, lane, { routeEvidence = null } = {}) {
+export function renderSupervisorBriefing(cwd, run, lane, { routeEvidence = null, taskId = null } = {}) {
   lane = run.contract ?? lane;
-  const ledger = ledgerForBriefing(cwd);
+  if (taskId && !run.tasks[taskId]) throw new Error(`Unknown task "${taskId}".`);
+  const ledger = ledgerForBriefing(cwd, { lane: run.lane });
   const checkpoint = checkpointStatus(run);
   const latest = checkpoint.latest;
   const runGuidance = run.guidance ?? disabledGuidanceState();
@@ -4554,6 +4605,7 @@ export function renderSupervisorBriefing(cwd, run, lane, { routeEvidence = null 
     ? `${run.workerPolicy.reasoningEffort} — legacy default; saved task overrides remain valid`
     : run.workerPolicy.reasoningEffort ?? "none — supervisor must route each task";
   const tasks = Object.values(run.tasks)
+    .filter((task) => !taskId || task.id === taskId)
     .map((task) => {
       const dependencies = task.dependsOn.length ? task.dependsOn.join(", ") : "none";
       const attempt = task.attempts.at(-1);
@@ -4623,7 +4675,9 @@ ${renderList(workerTests)}
 ${renderList(task.verification?.evidence ?? [])}
 - integrated commits: ${task.integration?.commits?.join(", ") || "none"}
 - acceptance:
-${renderList(task.acceptance)}`;
+${renderList(task.acceptance)}
+- interface handoff:
+${renderList(task.interfaces ?? [])}`;
     })
     .join("\n\n");
   const ledgerText = ledger.populated.length
@@ -4682,7 +4736,7 @@ ${lane.done || "No lane-level definition of done was recorded."}
 
 ## Task graph
 
-${tasks || "No plan has been approved yet."}
+${taskId ? `Focused on ${taskId}; other task details omitted, not waived. Use orch run briefing ${run.id} for complete recovery.\n${Object.values(run.tasks).filter((task) => task.id !== taskId).map((task) => `- ${task.id}: ${task.status}`).join("\n")}\n\n` : ""}${tasks || "No plan has been approved yet."}
 
 ## Latest checkpoint
 
