@@ -814,5 +814,5 @@ await Promise.race([
 ]);
 clearTimeout(flushTimer);
 writeStatus({ ...finalStatus, finishedAt: new Date().toISOString(),
-  capture: { limitBytesPerStream: output.limitBytes, stdoutTruncated: output.truncated, stderrTruncated: errors.truncated,
+  capture: { limitBytesPerStream: output.limitBytes + output.tailBytes, stdoutTruncated: output.truncated, stderrTruncated: errors.truncated,
     observedBytes: output.observedBytes + errors.observedBytes } });

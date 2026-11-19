@@ -21,7 +21,12 @@ const groups = supportsConcurrency ? [files] : files.map((file) => [file]);
 // A single bounded-duty CPU process, not a stress test or a timing guarantee.
 const load = flags.includes("--load") ? spawn(process.execPath, ["-e", "setInterval(()=>{const end=Date.now()+20;while(Date.now()<end){}},50)"], { stdio: "ignore" }) : null;
 let active;
-const stop = (signal) => { active?.kill(signal); load?.kill(signal); };
+let interrupted = 0;
+const stop = (signal) => {
+  interrupted = signal === "SIGINT" ? 130 : 143;
+  active?.kill(signal);
+  load?.kill(signal);
+};
 process.on("SIGINT", () => stop("SIGINT"));
 process.on("SIGTERM", () => stop("SIGTERM"));
 try {
@@ -35,6 +40,7 @@ try {
         active.on("error", (error) => { console.error(error.message); resolve(1); });
         active.on("exit", (exit) => resolve(code || (exit ?? 1)));
       });
+      if (interrupted) { code = interrupted; break; }
       // Repeat stops at the first failure; the other suites still run every
       // file one at a time on old Node, so a full run is never cut short.
       if (code && mode === "repeat") break;

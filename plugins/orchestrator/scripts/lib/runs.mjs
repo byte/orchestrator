@@ -3365,7 +3365,7 @@ export function runChecks(cwd, runId, taskId = null, options = {}) {
       const receipt = {
         id: randomUUID(), checkId: definition.id, definition, executionId,
         taskId, attemptId: target.attempt?.id ?? null, planRevision: run.planRevision,
-        fingerprint: before, changedDuringCheck: !after || before !== after,
+        fingerprint: before, changedDuringCheck: after === null ? null : before !== after,
         integratedTasks: Object.values(run.tasks).filter((task) => task.integration)
           .map((task) => ({ taskId: task.id, head: task.integration.integrationHead })),
         ...execution, ...(fingerprintError ? { fingerprintError } : {}),
@@ -3375,7 +3375,7 @@ export function runChecks(cwd, runId, taskId = null, options = {}) {
         const current = loadRun(cwd, runId);
         // A checkout that changed under the check (an integration landing
         // meanwhile, say) is not evidence of a regression by anyone.
-        if (!taskId && !receipt.passed && !receipt.changedDuringCheck) receipt.regression = combinedRegression(current, receipt);
+        if (!taskId && !receipt.passed && receipt.changedDuringCheck === false) receipt.regression = combinedRegression(current, receipt);
         (current.checkReceipts ??= []).push(receipt);
         writeRun(cwd, current);
         appendEvent(cwd, current.id, { type: "check.executed", receiptId: receipt.id, taskId, checkId: definition.id, passed: receipt.passed });
@@ -3482,13 +3482,13 @@ export function previewRunTask(cwd, runId, taskId, options = {}) {
       let after = null, fingerprintError = null;
       try { after = checkoutFingerprint(receipt.worktree.path, { gitDir: receipt.worktree.gitDir }); }
       catch (error) { fingerprintError = error.message; }
-      receipt.checks.push({ ...execution, definition, fingerprint: before, changedDuringCheck: !after || before !== after,
+      receipt.checks.push({ ...execution, definition, fingerprint: before, changedDuringCheck: after === null ? null : before !== after,
         ...(fingerprintError ? { fingerprintError } : {}), passed: Boolean(execution.passed && after && before === after) });
       save();
     }
     receipt.passed = receipt.checks.every((check) => check.passed);
     receipt.status = receipt.passed ? "passed" : "failed";
-    if (!receipt.passed && !receipt.checks.some((check) => check.changedDuringCheck)) {
+    if (!receipt.passed && receipt.checks.every((check) => check.changedDuringCheck === false)) {
       const earlier = (run.previews ?? []).findLast((entry) => entry.passed && entry.taskId === taskId &&
         entry.candidateHead === receipt.candidateHead && entry.planRevision === receipt.planRevision &&
         entry.targetHead !== receipt.targetHead && Date.parse(entry.finishedAt) <= Date.parse(receipt.startedAt) &&

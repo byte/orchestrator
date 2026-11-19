@@ -972,7 +972,8 @@ function commandRun(argv, cwd) {
     if (receipts.some((receipt) => !receipt.passed)) process.exitCode = 1;
     return options.json ? emitJson(receipts) : emit(receipts.length
       ? receipts.map((receipt) => `${receipt.checkId}: ${receipt.passed ? "passed" : "failed"} (exit ${receipt.exitCode ?? receipt.signal ?? "unknown"})` +
-        (receipt.changedDuringCheck ? "\nthe checkout changed while the check ran (an integration may have landed); rerun it" : "") +
+        (receipt.fingerprintError ? `\ncould not verify the checkout: ${receipt.fingerprintError}` :
+          receipt.changedDuringCheck ? "\nthe checkout changed while the check ran (an integration may have landed); rerun it" : "") +
         (receipt.regression ? `\n${receipt.regression.attribution}; candidate tasks: ${receipt.regression.candidateTaskIds.join(", ") || "unresolved"}\n${receipt.regression.next}` : "")).join("\n")
       : "No required checks configured for this stage; manual evidence is still required.");
   }

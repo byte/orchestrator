@@ -94,8 +94,9 @@ process.stdin.on('end', async () => {
     assert.ok(attempt.runner.capture.observedBytes > 18 * 1024 * 1024);
     assert.ok(attempt.runner.lastOutputAt);
     const spec = JSON.parse(fs.readFileSync(attempt.runner.specFile, "utf8"));
+    assert.equal(attempt.runner.capture.limitBytesPerStream, 8 * 1024 * 1024 + 64 * 1024);
     for (const file of [spec.outputFile, spec.errorFile]) {
-      assert.ok(fs.statSync(file).size <= 8 * 1024 * 1024 + 64 * 1024);
+      assert.equal(fs.statSync(file).size, attempt.runner.capture.limitBytesPerStream);
       assert.match(fs.readFileSync(file, "utf8").slice(-(64 * 1024 + 100)), /output truncated/);
     }
     // The end of the stream survives truncation, so failure diagnosis still sees it.

@@ -107,6 +107,17 @@ test("sequential combined checks preserve the passing baseline and identify the 
   assert.equal(moved.passed, false);
   assert.equal(moved.changedDuringCheck, true);
   assert.equal(moved.regression, undefined);
+
+  // An unreadable Git index prevents the initial fingerprint, before any check runs.
+  write(root, ".git/index", "invalid");
+  const unavailable = runCli(root, ["run", "check", "preview"]);
+  assert.equal(unavailable.code, 1);
+  const receipt = loadRun(root, "preview").checkReceipts.at(-1);
+  assert.equal(receipt.changedDuringCheck, null);
+  assert.equal(receipt.regression, undefined);
+  assert.ok(receipt.fingerprintError);
+  assert.ok(unavailable.stdout.includes(`could not verify the checkout: ${receipt.fingerprintError}`));
+  assert.doesNotMatch(unavailable.stdout, /the checkout changed/);
 });
 
 test("changing the candidate invalidates its preview even after isolated checks pass again", () => {
