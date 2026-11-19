@@ -1,0 +1,65 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "id": "localized-bug",
+      "kind": "code",
+      "scale": "One numeric helper; not a repository-scale bug hunt.",
+      "task": "Fix clamp.mjs: clamp(value, min, max) returns value inside the inclusive bounds, min below them and max above them. Zero is a value, not a missing argument. Inputs are finite numbers with min <= max. Preserve the named export; change only clamp.mjs.",
+      "files": { "clamp.mjs": "export const clamp = (value, min, max) => Math.min(max, Math.max(min, value || min));\n" },
+      "candidateFiles": ["clamp.mjs"],
+      "rejects": "A truthiness-based fix that still loses zero, or a fix that only handles zero and breaks bounds."
+    },
+    {
+      "id": "independent-parts",
+      "kind": "code",
+      "scale": "Two independent string helpers suitable for separate workers.",
+      "task": "Implement named exports slug in slug.mjs and initials in initials.mjs. Inputs are ASCII strings. slug lowercases, replaces each run of non-alphanumeric characters with one hyphen, and removes leading/trailing hyphens. initials splits on whitespace, takes the first character of the first two nonempty words, and uppercases them. An empty input gives an empty string. These files have no dependency on each other; change only these files.",
+      "files": { "slug.mjs": "export const slug = (text) => text;\n", "initials.mjs": "export const initials = (text) => text;\n" },
+      "candidateFiles": ["slug.mjs", "initials.mjs"],
+      "rejects": "Completing only one independent part, or replacing spaces without handling punctuation/repeated separators."
+    },
+    {
+      "id": "interface-dependent",
+      "kind": "code",
+      "scale": "A producer and one consumer; not a large API migration.",
+      "task": "Change parsePrice in price.mjs from a number to { cents, currency: 'USD' }. Accept only strings of digits optionally followed by a dot and exactly two digits; reject other strings with TypeError. Update receipt in receipt.mjs to consume this object and sum an array of price strings, returning '$' plus the total with two decimals. receipt([]) is '$0.00'. Preserve both named exports and change only these two files. Coordinate the interface before updating the consumer.",
+      "files": { "price.mjs": "export const parsePrice = (text) => Math.round(Number(text) * 100);\n", "receipt.mjs": "import { parsePrice } from './price.mjs';\nexport const receipt = (items) => '$' + (items.reduce((sum, item) => sum + parsePrice(item), 0) / 100).toFixed(2);\n" },
+      "candidateFiles": ["price.mjs", "receipt.mjs"],
+      "rejects": "Changing only the producer or using parseFloat to accept malformed prices."
+    },
+    {
+      "id": "offline-dependency",
+      "kind": "setup",
+      "scale": "Tiny offline local-package bootstrap only; no registry, native build, network or real dependency ecosystem coverage.",
+      "task": "Make app.mjs runnable by installing the frozen local @fixture/words package into node_modules/@fixture/words as regular files (not symlinks). Copy vendor/words/package.json and vendor/words/index.mjs there, or use an offline installer that produces those identical files. Do not change app.mjs, package.json or vendor. The package exports shout; greet(name) must return 'HELLO ' plus the uppercase name. No network is needed or permitted. This case measures tiny offline setup mechanics, not registry dependency management.",
+      "files": {
+        "package.json": "{\"name\":\"offline-fixture\",\"private\":true,\"type\":\"module\",\"dependencies\":{\"@fixture/words\":\"file:vendor/words\"}}\n",
+        "app.mjs": "import { shout } from '@fixture/words';\nexport const greet = (name) => shout('Hello ' + name);\n",
+        "vendor/words/package.json": "{\"name\":\"@fixture/words\",\"version\":\"1.0.0\",\"type\":\"module\",\"main\":\"./index.mjs\"}\n",
+        "vendor/words/index.mjs": "export const shout = (text) => text.toUpperCase();\n"
+      },
+      "candidateFiles": ["package.json", "app.mjs", "vendor/words/package.json", "vendor/words/index.mjs", "node_modules/@fixture/words/package.json", "node_modules/@fixture/words/index.mjs"],
+      "rejects": "Claiming setup succeeded without the installed package, or hardcoding greet while bypassing setup."
+    },
+    {
+      "id": "dirty-review",
+      "kind": "review",
+      "scale": "One tracked dirty file and one untracked file; structured counterexamples, not prose-quality scoring.",
+      "task": "Review the current dirty tree, including untracked files, without changing pricing.mjs or discount.mjs. total(price, count) should multiply nonnegative price and integer count; discounted(total, percent) should apply a percentage in [0,100]. Write findings.json as a JSON array with exactly one counterexample per defective file. Each item has path, line (1), input (two numbers), and expected (the correct numeric result). For witnesses use price/total in [0,10000], integer count in [0,1000], and percent in [0,100], with an actual result that differs from expected. The review is graded by executing the counterexamples against the dirty files, not by reading prose. Change only findings.json.",
+      "files": { "pricing.mjs": "export const total = (price, count) => price * count;\n" },
+      "dirty": { "pricing.mjs": "export const total = (price, count) => price + count;\n", "discount.mjs": "export const discounted = (total, percent) => total * (1 - percent);\n" },
+      "candidateFiles": ["pricing.mjs", "discount.mjs", "findings.json"],
+      "rejects": "Reviewing HEAD only, missing the untracked defect, or proposing a counterexample that does not demonstrate a defect."
+    },
+    {
+      "id": "interrupted-integration",
+      "kind": "mechanics",
+      "scale": "Pure interrupted/conflicting integration protocol simulation, not actual Git recovery or a real model-quality comparison.",
+      "task": "Implement recover(state) in recover.mjs for a simulated integration of part-a. Return { action, integrated }. state has phase ('interrupted' or 'conflict'), applied (boolean), and completed (an array containing zero or one 'part-a'). A conflict always requests 'request-resolution' and preserves completed. Otherwise, an already completed part gives 'noop'; an applied but unrecorded part gives 'record' and appends 'part-a'; an unapplied part gives 'retry' without appending. Do not mutate state. Repeated recovery must not duplicate completion. This is protocol mechanics only: do not describe it as a real model-quality comparison or real Git recovery. Change only recover.mjs.",
+      "files": { "recover.mjs": "export const recover = (state) => ({ action: 'record', integrated: ['part-a'] });\n" },
+      "candidateFiles": ["recover.mjs"],
+      "rejects": "Marking an interrupted or conflicting integration complete before it is applied, or recording a completion twice."
+    }
+  ]
+}
