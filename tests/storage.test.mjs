@@ -231,3 +231,13 @@ test("an unreadable owned scratch tree stays incomplete and retained without cha
   assert.deepEqual(entry(inventory, "scratch").cleanup, { eligible: false, reason: "unavailable" });
   assert.equal(fs.statSync(scratch).mode, permissions);
 });
+
+test("paths cleanup already removed are left out, not reported as unowned", (t) => {
+  const f = fixture(t);
+  const { scratch } = withScratch(t, f);
+  fs.rmSync(scratch, { recursive: true, force: true });
+  fs.rmSync(f.worktree, { recursive: true, force: true });
+  const inventory = inventoryStorage(f.root);
+  assert.deepEqual(inventory.entries.filter((item) => item.kind !== "artifacts"), []);
+  assert.equal(exportDiagnosticMetadata(f.root).storage.worktree.entries, 0);
+});

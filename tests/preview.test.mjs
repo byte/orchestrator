@@ -14,7 +14,8 @@ const codexCommand = [process.execPath, "-e", `const {spawnSync}=require('node:c
 const options = { codexCommand };
 const evidence = { evidence: ["Reviewed the exact candidate and passing checks"] };
 
-function candidates() {
+// With conflict, b also rewrites a.json under an overlapping (not identical) scope.
+function candidates({ conflict = false } = {}) {
   const root = makeRepo();
   repos.push(root);
   runCli(root, ["init"]);
@@ -28,18 +29,20 @@ function candidates() {
   git(root, ["add", "-A"]);
   git(root, ["commit", "-qm", "project"]);
   createRun(root, { id: "preview", lane: "work", objective: "Combine safely", workerModel: "sol", reasoningEffort: "high" });
-  replacePlan(root, "preview", ["a", "b"].map((id) => ({ id, title: id, objective: id, scope: [`${id}.json`], acceptance: ["Combined check passes"] })));
+  const file = (id) => conflict && id === "b" ? "a.json" : `${id}.json`;
+  replacePlan(root, "preview", ["a", "b"].map((id) => ({ id, title: id, objective: id, scope: [conflict && id === "b" ? "?.json" : `${id}.json`], acceptance: ["Combined check passes"] })),
+    conflict ? { approvedTasks: ["b"] } : {});
   checkpointPlan(root, "preview");
   for (const id of ["a", "b"]) {
     const dispatch = claimTask(root, "preview", id);
     const run = loadRun(root, "preview"), task = run.tasks[id], attempt = task.attempts.at(-1);
     const worktree = createTaskWorktree(root, run, task, attempt);
     prepareTaskWorktree(root, run, worktree, options);
-    write(worktree.path, `${id}.json`, "2\n");
+    write(worktree.path, file(id), id === "b" && conflict ? "3\n" : "2\n");
     git(worktree.path, ["add", "-A"]);
     git(worktree.path, ["commit", "-qm", `candidate ${id}`]);
     attachExecution(root, "preview", id, { attemptId: dispatch.attemptId, worktree, runner: null });
-    recordTaskResult(root, "preview", id, { attemptId: dispatch.attemptId, resultText: JSON.stringify({ summary: "done", files_touched: [`${id}.json`], tests: [], decisions: [], assumptions: [], blockers: [], confidence: "high" }) });
+    recordTaskResult(root, "preview", id, { attemptId: dispatch.attemptId, resultText: JSON.stringify({ summary: "done", files_touched: [file(id)], tests: [], decisions: [], assumptions: [], blockers: [], confidence: "high" }) });
     assert.equal(runChecks(root, "preview", id, options)[0].passed, true);
   }
   return root;
@@ -96,6 +99,14 @@ test("sequential combined checks preserve the passing baseline and identify the 
   assert.deepEqual(failing.regression.candidateTaskIds, []);
   assert.match(failing.regression.attribution, /unresolved/);
   assert.equal(loadRun(root, "preview").checkReceipts.find((entry) => entry.id === baseline.id).passed, true);
+  // A checkout that changes while the check runs (an integration landing
+  // meanwhile) fails the receipt but is not attributed to anyone.
+  write(root, "b.json", "1\n");
+  const mutating = [process.execPath, "-e", `require('fs').writeFileSync('b.json','2\\n');${codexCommand[2]}`, "--"];
+  const moved = runChecks(root, "preview", null, { codexCommand: mutating })[0];
+  assert.equal(moved.passed, false);
+  assert.equal(moved.changedDuringCheck, true);
+  assert.equal(moved.regression, undefined);
 });
 
 test("changing the candidate invalidates its preview even after isolated checks pass again", () => {
@@ -110,4 +121,25 @@ test("changing the candidate invalidates its preview even after isolated checks 
   assert.equal(previewRunTask(root, "preview", "a", options).passed, true);
   integrateRunTask(root, "preview", "a", evidence);
   assert.equal(fs.readFileSync(path.join(root, "a.json"), "utf8"), "3\n");
+});
+
+test("a conflict a required preview finds is recorded on the attempt, so a conflict retry carries it", () => {
+  const root = candidates({ conflict: true });
+  assert.equal(previewRunTask(root, "preview", "a", options).passed, true);
+  integrateRunTask(root, "preview", "a", evidence);
+  const head = git(root, ["rev-parse", "HEAD"]);
+  const preview = previewRunTask(root, "preview", "b", options);
+  assert.equal(preview.passed, false);
+  assert.equal(preview.reasonCode, "integration_conflict");
+  assert.equal(git(root, ["rev-parse", "HEAD"]), head, "a failed preview leaves the supervisor branch alone");
+  const diagnostic = loadRun(root, "preview").tasks.b.attempts.at(-1).diagnostics.at(-1);
+  assert.equal(diagnostic.reasonCode, "integration_conflict");
+  assert.deepEqual(diagnostic.details.conflictingPaths, ["a.json"]);
+  assert.equal(diagnostic.details.targetHead, head.trim());
+  assert.equal(diagnostic.details.previewId, preview.id);
+  const shown = runCli(root, ["run", "show", "preview"]);
+  assert.match(shown.stdout, /run retry preview b --conflict/);
+  const retried = runCli(root, ["run", "retry", "preview", "b", "--conflict", "--note", "Keep a's value; redo b on the new head", "--json"]);
+  assert.equal(retried.code, 0, retried.stderr);
+  assert.equal(loadRun(root, "preview").tasks.b.status, "pending");
 });

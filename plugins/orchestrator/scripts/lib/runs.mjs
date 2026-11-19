@@ -2141,7 +2141,8 @@ export function claimTask(cwd, runId, taskId, lane) {
   const id = assertId(runId, "run");
   const filePath = runFile(cwd, id);
   const precomputed = precomputeReadSurface(cwd, id, taskId, (task) => task && task.kind !== "write" ? task.scope : null);
-  const usage = loadRun(cwd, id).budgets?.maxWorkerTokens ? runUsage(loadRun(cwd, id)) : null;
+  const snapshot = loadRun(cwd, id);
+  const usage = snapshot.budgets?.maxWorkerTokens ? runUsage(snapshot) : null;
   return withFileLock(filePath, () => {
     const run = loadRun(cwd, id);
     const task = requireTask(run, taskId);
@@ -3372,7 +3373,9 @@ export function runChecks(cwd, runId, taskId = null, options = {}) {
       };
       withFileLock(runFile(cwd, runId), () => {
         const current = loadRun(cwd, runId);
-        if (!taskId && !receipt.passed) receipt.regression = combinedRegression(current, receipt);
+        // A checkout that changed under the check (an integration landing
+        // meanwhile, say) is not evidence of a regression by anyone.
+        if (!taskId && !receipt.passed && !receipt.changedDuringCheck) receipt.regression = combinedRegression(current, receipt);
         (current.checkReceipts ??= []).push(receipt);
         writeRun(cwd, current);
         appendEvent(cwd, current.id, { type: "check.executed", receiptId: receipt.id, taskId, checkId: definition.id, passed: receipt.passed });
@@ -3485,7 +3488,7 @@ export function previewRunTask(cwd, runId, taskId, options = {}) {
     }
     receipt.passed = receipt.checks.every((check) => check.passed);
     receipt.status = receipt.passed ? "passed" : "failed";
-    if (!receipt.passed) {
+    if (!receipt.passed && !receipt.checks.some((check) => check.changedDuringCheck)) {
       const earlier = (run.previews ?? []).findLast((entry) => entry.passed && entry.taskId === taskId &&
         entry.candidateHead === receipt.candidateHead && entry.planRevision === receipt.planRevision &&
         entry.targetHead !== receipt.targetHead && Date.parse(entry.finishedAt) <= Date.parse(receipt.startedAt) &&
@@ -3506,9 +3509,28 @@ export function previewRunTask(cwd, runId, taskId, options = {}) {
       receipt.worktree?.setup?.terminationUncertain);
     // A Git child's group is not recorded, so only the user can settle it.
     if (error.gitMayBeRunning) receipt.unknownProcess = true;
+    if (error.reasonCode === "integration_conflict") {
+      receipt.reasonCode = "integration_conflict";
+      receipt.conflictDetails = error.details ?? {};
+    }
   }
   receipt.finishedAt = nowIso();
   save({ type: "integration.previewed", receiptId: receipt.id, taskId, passed: receipt.passed });
+  // When checks are required, a preview is where a conflict shows up first:
+  // integration refuses without a passing preview and never cherry-picks. Record
+  // the conflict on the attempt as integration would, so `run retry --conflict`
+  // can carry its paths, bases, and commits into the retry.
+  if (receipt.reasonCode === "integration_conflict") {
+    try {
+      recordIntegrationDiagnostic(cwd, runId, taskId, {
+        kind: "failed", reasonCode: "integration_conflict", signals: ["integration_conflict"],
+        error: receipt.error, attemptId: attempt.id,
+        details: { ...(receipt.conflictDetails ?? {}), previewId: receipt.id }
+      });
+    } catch {
+      // The task moved on (retried, cancelled) meanwhile; the receipt keeps the evidence.
+    }
+  }
   return receipt;
 }
 
@@ -3770,7 +3792,8 @@ export function recordIntegrationDiagnostic(
     reasonCode = "integration_inspection_failed",
     signals = ["integration_inspection_failed"],
     error = "",
-    details = {}
+    details = {},
+    attemptId = null
   } = {}
 ) {
   if (!["refused", "failed"].includes(kind)) {
@@ -3787,6 +3810,9 @@ export function recordIntegrationDiagnostic(
       );
     }
     const attempt = currentAttempt(task);
+    if (attemptId && attempt.id !== attemptId) {
+      throw new Error(`Task "${task.id}" moved on from attempt "${attemptId}".`);
+    }
     const diagnostic = appendAttemptDiagnostic(attempt, {
       type: `integration_${kind}`,
       reasonCode,
@@ -4281,7 +4307,9 @@ export function runDiagnostics(cwd, run) {
       const preview = run.previews?.findLast((entry) => entry.taskId === task.id && entry.attemptId === attempt?.id);
       if (preview?.status === "failed") {
         reason = `combined preview failed (${preview.id}); prior evidence is preserved`;
-        next = preview.regression?.next ?? "Inspect the preview's checks/error, correct the candidate, and rerun checks and preview before integration.";
+        next = preview.reasonCode === "integration_conflict"
+          ? `Inspect the conflicting paths, then orch run retry ${run.id} ${task.id} --conflict --note "<what to preserve and redo>"`
+          : preview.regression?.next ?? "Inspect the preview's checks/error, correct the candidate, and rerun checks and preview before integration.";
       }
     } else if (task.status === "pending") {
       const dependencies = task.dependsOn.filter((id) => run.tasks[id]?.status !== "completed");

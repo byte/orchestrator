@@ -33,9 +33,11 @@ try {
       active = spawn(process.execPath, ["--test", ...(supportsConcurrency ? ["--test-concurrency=2"] : []), ...group.map((file) => `tests/${file}`)], { cwd: root, stdio: "inherit" });
       code = await new Promise((resolve) => {
         active.on("error", (error) => { console.error(error.message); resolve(1); });
-        active.on("exit", (code) => resolve(code ?? 1));
+        active.on("exit", (exit) => resolve(code || (exit ?? 1)));
       });
-      if (code) break;
+      // Repeat stops at the first failure; the other suites still run every
+      // file one at a time on old Node, so a full run is never cut short.
+      if (code && mode === "repeat") break;
     }
     console.log(`# ${mode} ${iteration}: exit ${code}, elapsed ${((Date.now() - started) / 1000).toFixed(1)}s`);
     if (code) { process.exitCode = code; break; } // Never retry or hide a failed iteration.

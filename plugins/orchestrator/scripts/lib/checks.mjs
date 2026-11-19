@@ -161,7 +161,7 @@ export function executeCheck(cwd, definition, { codexCommand = ["codex"], writab
         "--", resolveExecutable(command.argv[0], cwd), ...command.argv.slice(1)
       ];
       const specFile = path.join(directory, "command.json");
-      fs.writeFileSync(specFile, JSON.stringify({ argv, stdout, stderr, result: resultFile, maxOutputBytes }), { mode: 0o600 });
+      fs.writeFileSync(specFile, JSON.stringify({ argv, stdout, stderr, result: resultFile, maxOutputBytes, ownGroup: true }), { mode: 0o600 });
       result = spawnSync(process.execPath, [fileURLToPath(new URL("../check-child.mjs", import.meta.url)), specFile], {
         cwd, env: { ...process.env, TMPDIR: scratch }, detached: true,
         timeout: command.timeoutSeconds * 1000,

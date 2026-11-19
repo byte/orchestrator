@@ -555,7 +555,9 @@ export function integrateTaskWorktree(cwd, run, task, attempt, {
       // Preserve the original cherry-pick error; the caller reports manual recovery.
     }
     throw new WorktreeOperationError(
-      `Integration conflict for task "${task.id}": ${error.stderr || error.message}`,
+      // Git's advice lines (how to resolve by hand) are noise in a worker briefing.
+      `Integration conflict for task "${task.id}": ${String(error.stderr || error.message)
+        .split("\n").filter((line) => !line.startsWith("hint:")).join("\n").trim()}`,
       {
         reasonCode: "integration_conflict",
         kind: "failed",

@@ -575,7 +575,7 @@ failures, or treat it as a blocker if the evidence points at the briefing rather
 not retries and do not count toward this. Scope conflicts, missing authority, or an unmet
 prerequisite are blockers; do not loop indefinitely.
 
-After a recorded cherry-pick conflict, `run retry <run-id> <task-id> --conflict --note "<what must change>"` records the conflict disposition and prepares a fresh worktree at the current integration head while retaining warm-thread context. Inspect its recorded paths and preserved commits first. The retry still needs launch, renewed review, checks, and preview; it is not an accepted merge resolution.
+After a recorded cherry-pick conflict (found by `run integrate`, or first by `run preview` when the lane has checks), `run retry <run-id> <task-id> --conflict --note "<what must change>"` records the conflict disposition and prepares a fresh worktree at the current integration head while retaining warm-thread context. Inspect its recorded paths and preserved commits first. The retry still needs launch, renewed review, checks, and preview; it is not an accepted merge resolution.
 
 ## 8. Finish
 

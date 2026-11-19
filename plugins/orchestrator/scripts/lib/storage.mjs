@@ -14,6 +14,11 @@ const EXECUTORS = new Set(["cli", "codex-plugin"]);
 const KINDS = new Set(["artifacts", "worktree", "preview", "scratch"]);
 const REASONS = new Set(["no_artifact_cleanup", "state_unavailable", "not_owned", "unavailable", "task_active", "worker_live", "process_uncertain", "pending_integration", "dirty", "git_unknown", "finished_clean", "finished_scratch"]);
 const component = (value) => typeof value === "string" && /^[a-z0-9][a-z0-9._-]*$/.test(value) && value !== "." && value !== "..";
+// A path cleanup already removed is not retained storage; leave it out rather
+// than report it as an unowned entry. Any other lstat failure stays unknown.
+const removed = (target) => {
+  try { fs.lstatSync(target); return false; } catch (error) { return error.code === "ENOENT"; }
+};
 const within = (root, target) => target === root || target.startsWith(root.endsWith(path.sep) ? root : `${root}${path.sep}`);
 
 // Reject symlinks in *every* component, not just the leaf. Called before any
@@ -206,7 +211,7 @@ export function inventoryStorage(cwd = process.cwd()) {
         const worktree = attempt.worktree;
         const reason = taskReason || setupReason(worktree);
         let treeReason = null;
-        if (typeof worktree?.path === "string" && !worktree.inPlace) {
+        if (typeof worktree?.path === "string" && !worktree.inPlace && !removed(path.resolve(root, worktree.path))) {
           const target = path.resolve(root, worktree.path);
           const owned = within(path.join(local, "worktrees", directory.name), target) && realOwned(local, target);
           treeReason = owned ? reason || checkReason(run, target) || cleanReason(root, target) : "not_owned";
@@ -215,6 +220,7 @@ export function inventoryStorage(cwd = process.cwd()) {
         for (const { file, status } of statuses) {
           if (typeof status?.scratchDir !== "string") continue;
           const scratch = status.scratchDir;
+          if (path.isAbsolute(scratch) && removed(scratch)) continue;
           let owned = path.isAbsolute(scratch) && path.basename(scratch).startsWith("orch-worker-") && realOwned(path.parse(scratch).root, scratch);
           try {
             const marker = path.join(scratch, SCRATCH_OWNER_FILE);
@@ -232,6 +238,7 @@ export function inventoryStorage(cwd = process.cwd()) {
     for (const preview of run.previews ?? []) {
       if (typeof preview?.worktree?.path !== "string") continue;
       const target = path.resolve(root, preview.worktree.path);
+      if (removed(target)) continue;
       const owned = within(path.join(local, "previews", directory.name), target) && realOwned(local, target);
       const settled = ["passed", "failed"].includes(preview.status);
       const reason = run.pendingIntegration ? "pending_integration" :

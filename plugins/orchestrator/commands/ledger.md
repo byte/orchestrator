@@ -18,7 +18,7 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" ledger add <section> "<text>" --la
 node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" ledger deprecate <section> <entry-id> --reason "<why-outdated>"
 ```
 
-Sections: `Decisions`, `Conventions`, `Commands`, `Failed approaches`.
+Sections: `Decisions`, `Conventions`, `Commands`, `Failed approaches`. Text that begins with `--` (a flag the entry is about) goes after a `--` terminator: `ledger add Commands -- "--no-verify is banned"`.
 
 What belongs here:
 

@@ -150,7 +150,7 @@ function checkPendingGitOperations(cwd) {
   for (const name of ["sequencer", "CHERRY_PICK_HEAD", "MERGE_HEAD", "REVERT_HEAD", "rebase-merge", "rebase-apply", "index.lock"]) {
     const probe = tryExec("git", [...SUPERVISOR_GIT_ARGS, "rev-parse", "--git-path", name], cwd);
     if (!probe.ok) return { id: "git-operations", label: "Pending Git operations", ok: false, warning: true, detail: "unknown; inspect Git state manually" };
-    if (fs.existsSync(path.resolve(cwd, probe.output))) pending.push(name);
+    if (fs.existsSync(path.resolve(cwd, probe.stdout.trim()))) pending.push(name);
   }
   return { id: "git-operations", label: "Pending Git operations", ok: pending.length === 0, warning: true,
     detail: pending.length ? `present: ${pending.join(", ")}; preserve checkout and inspect before write launch/integration` : "none detected",

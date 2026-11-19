@@ -25,11 +25,12 @@ test("noisy capture stays bounded with visible truncation and the chosen head or
     capture.write("finish");
     await new Promise((resolve) => capture.end(resolve));
     const text = fs.readFileSync(file, "utf8");
-    assert.ok(fs.statSync(file).size <= 1024);
     assert.match(text, /output truncated/);
     assert.equal(capture.observedBytes, 40011);
-    if (tail) { assert.ok(text.endsWith("finish")); assert.ok(!text.includes("start")); }
-    else { assert.ok(text.startsWith("start")); assert.ok(!text.includes("finish")); }
+    // Both modes keep the end, where a failing process reports its error.
+    assert.ok(text.endsWith("finish"));
+    if (tail) { assert.ok(fs.statSync(file).size <= 1024); assert.ok(!text.includes("start")); }
+    else { assert.ok(text.startsWith("start")); assert.ok(fs.statSync(file).size <= 1024 + 64 * 1024); }
   }
 });
 
@@ -45,6 +46,12 @@ test("trusted checks fail explicitly at output limits and retain a bounded tail 
   assert.equal(exceeded.passed, false);
   assert.match(exceeded.error, /exceeded maxOutputBytes/);
   assert.ok(Buffer.byteLength(exceeded.stdout.text) <= 32768);
+  // A descendant holding the pipes open does not keep the check alive until its timeout.
+  const started = Date.now();
+  const held = executeCheck(root, { argv: ["/bin/sh", "-c", "sleep 30 & yes"], timeoutSeconds: 20, maxOutputBytes: 1024 }, { codexCommand });
+  assert.equal(held.passed, false);
+  assert.match(held.error, /exceeded maxOutputBytes/);
+  assert.ok(Date.now() - started < 10000, `stopped after ${Date.now() - started} ms`);
 });
 
 test("a noisy worker drains oversized event lines, retains its final report, and publishes bounded capture", async () => {
@@ -88,9 +95,11 @@ process.stdin.on('end', async () => {
     assert.ok(attempt.runner.lastOutputAt);
     const spec = JSON.parse(fs.readFileSync(attempt.runner.specFile, "utf8"));
     for (const file of [spec.outputFile, spec.errorFile]) {
-      assert.ok(fs.statSync(file).size <= 8 * 1024 * 1024);
-      assert.match(fs.readFileSync(file, "utf8").slice(-100), /output truncated/);
+      assert.ok(fs.statSync(file).size <= 8 * 1024 * 1024 + 64 * 1024);
+      assert.match(fs.readFileSync(file, "utf8").slice(-(64 * 1024 + 100)), /output truncated/);
     }
+    // The end of the stream survives truncation, so failure diagnosis still sees it.
+    assert.match(fs.readFileSync(spec.outputFile, "utf8").slice(-200), /thread-after-noise/);
   } finally { stopTaskWorker(loadRun(root, "noisy").tasks.task.attempts.at(-1)); }
 });
 
