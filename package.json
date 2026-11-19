@@ -9,6 +9,9 @@
     "node": ">=18.18"
   },
   "scripts": {
-    "test": "node --test tests/*.test.mjs"
+    "test": "node scripts/test.mjs full",
+    "test:fast": "node scripts/test.mjs fast",
+    "test:protocol": "node scripts/test.mjs protocol",
+    "test:repeat": "node scripts/test.mjs repeat"
   }
 }

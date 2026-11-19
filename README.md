@@ -17,6 +17,11 @@ model is selected by the plugin; every resolved worker route is pinned to its at
 The important boundary is simple: Codex workers produce scoped work and evidence; Claude decides
 what should happen, what is acceptable, what gets integrated, and when the whole run is done.
 
+Start with the [six natural-language examples](docs/examples.md). For operators, see
+[compatibility and opt-in certification](docs/compatibility.md), [local verification](docs/testing.md),
+and [repeatable evaluation](docs/evaluation.md). These distinguish implemented protocol checks
+from real-model usefulness; no comparative quality or speed advantage is claimed.
+
 ## What it provides
 
 - A task DAG planned and owned by the supervising Claude model
@@ -698,7 +703,7 @@ The package has no runtime dependencies. Tests use throwaway Git repositories an
 processes to exercise concurrency, cancellation, structured collection, worktree integration,
 finalization, and cleanup without consuming model quota.
 
-Run this suite locally with `npm test`; there is no hosted CI. These are protocol tests, not real-model sandbox certification. Before relying on a new Codex installation or upgrade, separately exercise a write task through integration/finalization, a read task that can write only its scratch directory, warm resume, and cancellation with the authenticated CLI; these opt-in checks consume model quota.
+`npm run test:fast` runs a small deterministic subset; `npm test` runs every test with concurrency 2. `npm run test:protocol` runs the complementary set, and `npm run test:repeat -- --load` repeats the lock/wait/cleanup group twice under bounded CPU contention, stopping on the first failure without retries. See [test scopes and evidence limits](docs/testing.md). There is no hosted CI. Before relying on a new Codex installation or upgrade, separately exercise a write task through integration/finalization, private read scratch, warm resume, and cancellation with the authenticated CLI; live-model checks consume model quota.
 
 ## Operational limits
 

@@ -1,6 +1,6 @@
 ---
-description: Show or add to the project ledger that gets carried into every Codex briefing
-argument-hint: "[show|add] [decisions|conventions|commands|failed approaches] [text]"
+description: Show, add, or deprecate durable project facts carried into relevant Codex briefings
+argument-hint: "[show|add|deprecate] [decisions|conventions|commands|failed approaches] [text]"
 allowed-tools: Bash(node:*), AskUserQuestion
 ---
 
@@ -13,6 +13,9 @@ $ARGUMENTS
 ```bash
 node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" ledger show
 node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" ledger add <section> "<text>"
+node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" ledger show --lane <lane> --json
+node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" ledger add <section> "<text>" --lane <lane> --source "<reviewed-source>" --json
+node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" ledger deprecate <section> <entry-id> --reason "<why-outdated>"
 ```
 
 Sections: `Decisions`, `Conventions`, `Commands`, `Failed approaches`.
@@ -27,8 +30,6 @@ What belongs here:
   re-exploring.
 
 What does not belong: anything already obvious from the code, anything true only for the
-current task, and anything that will be stale next week. Every entry is paid for on every
-future briefing.
+current task, and anything that will be stale next week. Unscoped entries appear in every briefing; lane-scoped entries appear only in that lane. Optional `--provenance`, `--confirmed-by`, and `--confirmed-at` record known context; never invent confirmation. Metadata is human-editable context, not authenticated evidence.
 
-If the ledger has grown past the point of being worth reading in full, say so and offer to
-prune the entries that have gone stale. Do not delete entries without confirmation.
+If the ledger has grown past the point of being worth reading in full, identify conflicting or stale entries and offer to deprecate them. Deprecation retains history and omits the entry from future briefings; raw `ledger show` still shows everything. Inspect annotated IDs in raw Markdown (or use the exact dated bullet text for a legacy entry). Do not deprecate a settled decision just because a worker disagrees; review the evidence with the user first. Do not delete entries without confirmation.

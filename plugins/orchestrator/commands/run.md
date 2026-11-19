@@ -93,6 +93,7 @@ Produce a small task DAG. Each task must have:
 - `dependsOn`: task ids that must be supervisor-verified first
 - `constraints`
 - `acceptance`: evidence-based completion criteria
+- `interfaces` (optional): the few exported symbols, data shapes, shared-file owners, or compatibility decisions downstream tasks need; downstream workers receive these alongside accepted dependency results and must inspect the actual code
 - `model`: `astra`, `sol`, `terra`, `luna`, or an exact slug (`gpt-6.2-astra`, `gpt-6.2-sol`,
   `gpt-6.1-terra`, `gpt-5.6-luna`) unless the run pins a model. Family names such as `gpt-6` or
   `gpt-6.2` are rejected because they do not name a tier.
@@ -221,6 +222,10 @@ until a checkpoint covers the current plan and provisional-guidance revisions.
 
 New runs use their frozen lane contract, not later edits to the lane. Every task needs acceptance criteria. If planning refuses an initial scope outside the lane, narrow the task or ask the user; only after approval repeat `run plan --user-approved-task <task-id>`, once per task the user approved. Do not approve it yourself, and never name a task the user did not approve. Read plan warnings before dispatch: identical planned write surfaces are serialized, and approximate glob intersections require your judgment about ownership.
 
+When the contract defines combined checks, run `run check <run-id> --json` after planning and before the first dispatch to save the passing baseline. Repeat it after integrations when diagnosing interactions. Failed receipts preserve the prior passing receipt and intervening integration IDs as suspects, not proof of causality. Inspect the changed code and create one scoped repair with the original failing check as acceptance; do not auto-revert or ask every worker to debug the run.
+
+If the user sets a run budget, record it with `run budget <run-id> --max-attempts <n>`, `--max-elapsed-minutes <n>`, or `--max-worker-tokens <n>` (combinable). These stop new dispatch, not live work. Attempt limits include retired tasks and setup failures. Token counts are delayed and may be incomplete, so they are not an exact spend cap. Explain a reached budget rather than silently increasing or clearing it; revise limits only after the user agrees.
+
 ### Optional provisional guidance
 
 Guidance is off by default. If the local learning store contains a supervisor- or user-reviewed
@@ -247,6 +252,8 @@ For normal in-scope implementation work, approve your own plan and continue. Sto
 when the plan requires destructive action, an external write, or material scope expansion.
 
 ## 4. Dispatch a wave
+
+`run ready --json` includes advisory counts of dependents each ready task unlocks. Prefer useful dependency progress over filling every slot; reduce simultaneous builds when machine/account limits dominate. Advice never overrides dependencies, checkpoints, scope, or budgets. For a task-level review, `run briefing <run-id> --task <task-id> --json` returns the selected authority, acceptance, interfaces, and briefing byte count. Other task details are explicitly omitted, not waived; use the complete briefing for recovery and run-wide decisions.
 
 Get the ready queue:
 
@@ -567,6 +574,8 @@ failures, or treat it as a blocker if the evidence points at the briefing rather
 `run retry` prints this advice once the count is reached. Answered `needs_input` round trips are
 not retries and do not count toward this. Scope conflicts, missing authority, or an unmet
 prerequisite are blockers; do not loop indefinitely.
+
+After a recorded cherry-pick conflict, `run retry <run-id> <task-id> --conflict --note "<what must change>"` records the conflict disposition and prepares a fresh worktree at the current integration head while retaining warm-thread context. Inspect its recorded paths and preserved commits first. The retry still needs launch, renewed review, checks, and preview; it is not an accepted merge resolution.
 
 ## 8. Finish
 
