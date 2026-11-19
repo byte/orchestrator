@@ -1011,6 +1011,7 @@ function normalizeTask(raw, defaultScope, workerPolicy, { allowLegacy = [] } = {
     ),
     constraints: stringList(raw.constraints, `Task "${id}" constraints`),
     acceptance: stringList(raw.acceptance, `Task "${id}" acceptance`),
+    interfaces: stringList(raw.interfaces, `Task "${id}" interfaces`),
     model: exactModel,
     reasoningEffort: exactEffort,
     routingReason: routingReason || null,
@@ -1139,6 +1140,7 @@ function taskDefinition(run, task) {
     dependsOn: task.dependsOn,
     constraints: task.constraints,
     acceptance: task.acceptance,
+    interfaces: task.interfaces ?? [],
     model: route.model,
     reasoningEffort: route.reasoningEffort,
     routingReason: task.routingReason ?? null
@@ -1790,6 +1792,9 @@ function renderPreviousAttempt(task, attempt) {
       details.undeclared?.length ? `changed but not declared: ${details.undeclared.join(", ")}` : null,
       details.phantom?.length ? `declared but not changed: ${details.phantom.join(", ")}` : null,
       details.dirty?.length ? `left uncommitted: ${details.dirty.join(", ")}` : null,
+      details.conflictingPaths?.length ? `conflicting paths: ${details.conflictingPaths.join(", ")}` : null,
+      details.oldBase ? `previous base: ${details.oldBase}; integration target: ${details.targetHead}` : null,
+      details.commits?.length ? `preserved commits: ${details.commits.join(", ")}` : null,
       details.commits && !details.commits.length ? "no commits were made" : null
     ].filter(Boolean);
     lines.push("", `Integration findings (${diagnostic.reasonCode}):`, renderList(findings));
@@ -1923,6 +1928,7 @@ export function renderWorkerBriefing(cwd, run, task, lane, launchRoute = null) {
         structured?.summary || dependency.result?.summary || "completed without a stored summary";
       const lines = [`### ${dependency.id}`, "", summary];
       const detail = [
+        ["Accepted interface contract; inspect the actual code before using it", dependency.interfaces],
         ["Decisions you must not contradict", structured?.decisions],
         ["Assumptions it made", structured?.assumptions],
         ["Files it changed", structured?.files_touched],
@@ -1966,6 +1972,10 @@ ${renderList([...(lane.constraints ?? []), ...task.constraints])}
 ${guidance?.briefing ? `${guidance.briefing}\n\n` : ""}## Acceptance criteria
 
 ${renderList(task.acceptance)}
+
+## Interface handoff
+
+${renderList(task.interfaces ?? [])}
 
 ## Completed dependency context
 
@@ -3303,32 +3313,60 @@ export function runChecks(cwd, runId, taskId = null, options = {}) {
   // background `run wait` included, must not time out waiting. Each receipt is
   // bound to the attempt, plan revision, and content fingerprint it measured,
   // so a change made meanwhile makes it stale at acceptance, never wrongly fresh.
-  const { run, target, definitions } = withFileLock(runFile(cwd, runId), () => {
+  const { run, target, definitions, executionId } = withFileLock(runFile(cwd, runId), () => {
     const run = loadRun(cwd, runId);
     assertNoPendingIntegration(run);
     const target = checkTarget(cwd, run, taskId);
     if (target.task && target.task.status !== "reported") throw new Error("Task checks require a reported result.");
     if (!target.task && run.status !== "finalizing") throw new Error("Final checks require a finalizing run.");
-    return { run, target, definitions: requiredChecks(run, taskId) };
+    const definitions = requiredChecks(run, taskId);
+    const executionId = randomUUID();
+    if (definitions.length) {
+      (run.checkExecutions ??= []).push({
+        id: executionId, taskId, attemptId: target.attempt?.id ?? null,
+        path: target.cwd, ownerPid: process.pid, startedAt: nowIso(), status: "running"
+      });
+      writeRun(cwd, run);
+    }
+    return { run, target, definitions, executionId };
   });
   const receipts = [];
-  for (const definition of definitions) {
-    const before = checkoutFingerprint(target.cwd, { gitDir: target.gitDir });
-    const execution = executeCheck(target.cwd, definition, options);
-    const after = checkoutFingerprint(target.cwd, { gitDir: target.gitDir });
-    const receipt = {
-      id: randomUUID(), checkId: definition.id, definition,
-      taskId, attemptId: target.attempt?.id ?? null, planRevision: run.planRevision,
-      fingerprint: before, changedDuringCheck: before !== after,
-      ...execution, passed: execution.passed && before === after, provenance: "supervisor-executed"
-    };
+  try {
+    for (const definition of definitions) {
+      let before = null, after = null, execution = {}, fingerprintError = null;
+      try {
+        before = checkoutFingerprint(target.cwd, { gitDir: target.gitDir });
+        execution = executeCheck(target.cwd, definition, options);
+        after = checkoutFingerprint(target.cwd, { gitDir: target.gitDir });
+      } catch (error) {
+        fingerprintError = error.message;
+      }
+      const receipt = {
+        id: randomUUID(), checkId: definition.id, definition, executionId,
+        taskId, attemptId: target.attempt?.id ?? null, planRevision: run.planRevision,
+        fingerprint: before, changedDuringCheck: !after || before !== after,
+        ...execution, ...(fingerprintError ? { fingerprintError } : {}),
+        passed: Boolean(execution.passed && after && before === after), provenance: "supervisor-executed"
+      };
+      withFileLock(runFile(cwd, runId), () => {
+        const current = loadRun(cwd, runId);
+        (current.checkReceipts ??= []).push(receipt);
+        writeRun(cwd, current);
+        appendEvent(cwd, current.id, { type: "check.executed", receiptId: receipt.id, taskId, checkId: definition.id, passed: receipt.passed });
+      });
+      receipts.push(receipt);
+    }
+  } finally {
     withFileLock(runFile(cwd, runId), () => {
       const current = loadRun(cwd, runId);
-      (current.checkReceipts ??= []).push(receipt);
-      writeRun(cwd, current);
-      appendEvent(cwd, current.id, { type: "check.executed", receiptId: receipt.id, taskId, checkId: definition.id, passed: receipt.passed });
+      const intent = current.checkExecutions?.find((entry) => entry.id === executionId);
+      if (intent && receipts.length === definitions.length) {
+        intent.status = "settled";
+        intent.finishedAt = nowIso();
+        intent.uncertainGroups = receipts.filter((receipt) => receipt.terminationUncertain).map((receipt) => receipt.processGroup);
+        writeRun(cwd, current);
+      }
     });
-    receipts.push(receipt);
   }
   return receipts;
 }
@@ -3821,7 +3859,7 @@ export function configureRunGuidance(
   });
 }
 
-export function retryTask(cwd, runId, taskId, { note = null, fresh = false } = {}) {
+export function retryTask(cwd, runId, taskId, { note = null, fresh = false, conflict = false } = {}) {
   const id = assertId(runId, "run");
   const filePath = runFile(cwd, id);
   const correction = String(note ?? "").trim();
@@ -3832,6 +3870,21 @@ export function retryTask(cwd, runId, taskId, { note = null, fresh = false } = {
     // pass finalization while the run still reads cancelled. Start a new run.
     if (run.status === "cancelled") {
       throw new Error(`Run "${run.id}" was cancelled; its tasks cannot be retried. Create a new run.`);
+    }
+    if (conflict) {
+      const attempt = currentAttempt(task);
+      const diagnostic = attempt.diagnostics?.at(-1);
+      if (task.status !== "reported" || diagnostic?.reasonCode !== "integration_conflict") {
+        throw new Error("Conflict retry requires a reported attempt with a recorded integration conflict.");
+      }
+      if (!correction) throw new Error("Conflict retry requires --note explaining what to preserve and redo.");
+      const outcome = assignAttemptOutcome(attempt, outcomeInput("integration_failed", "replan", "integration_conflict", {
+        provenance: "supervisor", evidence: [correction], signals: ["integration_conflict"]
+      }));
+      task.disposition = { ...outcome, at: nowIso() };
+      task.status = "failed";
+      attempt.status = "failed";
+      attempt.finishedAt ??= nowIso();
     }
     if (!RETRYABLE_TASK_STATUSES.has(task.status)) {
       throw new Error(
@@ -3991,6 +4044,28 @@ export function takeWorktreesForRemoval(cwd, runId, taskId, detach, live = () =>
     if (taskId && !tasks.length) {
       throw new Error(`Unknown task "${taskId}" in run "${id}".`);
     }
+    // Protection belongs to the directory, not the attempt: warm retries and
+    // retired assignments can hold aliases of the same physical worktree.
+    const protectedPaths = new Map();
+    const pathKey = (file) => {
+      try { return fs.realpathSync(file); } catch { return path.resolve(file); }
+    };
+    for (const task of taskHistory(run)) {
+      for (const attempt of task.attempts) {
+        const reason = live(attempt) ? "its worker is still running" : setupUncertainty(attempt.worktree, releaseUncertain);
+        if (reason && attempt.worktree?.path) protectedPaths.set(pathKey(attempt.worktree.path), reason);
+      }
+    }
+    for (const execution of run.checkExecutions ?? []) {
+      let reason = null;
+      if (execution.status !== "settled") {
+        reason = pidAlive(execution.ownerPid) ? "Check is still in progress (its process is alive)."
+          : !releaseUncertain ? `Check was interrupted; its processes may still be running. ${RELEASE_HINT}` : null;
+      } else if (execution.uncertainGroups?.some((group) => !groupGone(group)) && !releaseUncertain) {
+        reason = `Check process ownership is uncertain. ${RELEASE_HINT}`;
+      }
+      if (reason) protectedPaths.set(pathKey(execution.path), reason);
+    }
     const taken = [];
     const refused = [];
     for (const task of tasks) {
@@ -4006,7 +4081,7 @@ export function takeWorktreesForRemoval(cwd, runId, taskId, detach, live = () =>
         continue;
       }
       for (const attempt of task.attempts) {
-        const uncertain = setupUncertainty(attempt.worktree, releaseUncertain);
+        const uncertain = attempt.worktree?.path && protectedPaths.get(pathKey(attempt.worktree.path));
         if (uncertain) {
           refused.push({ taskId: task.id, attemptId: attempt.id, error: uncertain });
           continue;

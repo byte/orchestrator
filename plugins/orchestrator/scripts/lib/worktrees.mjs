@@ -542,6 +542,12 @@ export function integrateTaskWorktree(cwd, run, task, attempt, {
     // still mutate this checkout. Leave the durable phase at started.
     if (error.gitMayBeRunning) throw error;
     stopped = true;
+    let conflictingPaths = [];
+    try {
+      conflictingPaths = gitRaw(cwd, ["diff", "--name-only", "--diff-filter=U", "-z"]).split("\0").filter(Boolean);
+    } catch {
+      // Keep the original failure even when Git cannot inspect the index.
+    }
     try {
       git(cwd, ["cherry-pick", "--abort"], null, process.env, GIT_MUTATION_TIMEOUT_MS);
     } catch (abortError) {
@@ -553,7 +559,12 @@ export function integrateTaskWorktree(cwd, run, task, attempt, {
       {
         reasonCode: "integration_conflict",
         kind: "failed",
-        signals: ["integration_conflict"]
+        signals: ["integration_conflict"],
+        details: {
+          conflictingPaths, oldBase: attempt.worktree.baseHead,
+          targetHead: supervisorHead, commits: inspection.commits,
+          files: inspection.files
+        }
       }
     );
   } finally {

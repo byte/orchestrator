@@ -119,7 +119,7 @@ Usage:
   orch run report <run-id> <task-id> --attempt <id> --result-file <path> [--json]
   orch run verify <run-id> <task-id> --verdict <pass|fail> [--evidence <text>]... [--json]
   orch run decide <run-id> <task-id> --outcome <policy_refused|authority_escalated|integration_failed> --action <refuse|escalate|replan> --reason-code <code> [--evidence <text>]... [--json]
-  orch run retry <run-id> <task-id> [--note <what to change>] [--fresh] [--json]
+  orch run retry <run-id> <task-id> [--note <what to change>] [--fresh] [--conflict] [--json]
   orch run answer <run-id> <task-id> (--grant-scope <glob>... [--user-approved] | --deny | --reply <text>) [--reply <text>] [--json]
   orch run cancel <run-id> [task-id] [--reason <text>] [--json]
   orch run recover <run-id> [--json]
@@ -696,7 +696,7 @@ function commandRun(argv, cwd) {
   }
 
   const { options, positionals } = parseArgs(rest, {
-    booleanOptions: ["json", "fresh", "deny", "user-approved", "no-watch", "release-uncertain"],
+    booleanOptions: ["json", "fresh", "conflict", "deny", "user-approved", "no-watch", "release-uncertain"],
     repeatableOptions: ["decision", "risk", "next", "evidence", "grant-scope", "user-approved-task"],
     valueOptions: [
       "plan-file",
@@ -979,7 +979,8 @@ function commandRun(argv, cwd) {
     }
     const task = retryTask(cwd, runId, taskId, {
       note: options.note,
-      fresh: Boolean(options.fresh)
+      fresh: Boolean(options.fresh),
+      conflict: Boolean(options.conflict)
     });
     const plan = task.retryPlan;
     const how = plan.mode === "warm"

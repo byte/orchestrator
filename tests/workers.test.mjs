@@ -693,6 +693,11 @@ test("a conflicted integration rolls back without running a worker-changed fsmon
   assert.match(result.stderr, /integration|cherry-pick|conflict/i);
   assert.equal(loadRun(root, "run-conflict").pendingIntegration, undefined);
   assert.equal(loadRun(root, "run-conflict").tasks.build.status, "reported");
+  const conflict = loadRun(root, "run-conflict").tasks.build.attempts.at(-1).diagnostics.at(-1).details;
+  assert.deepEqual(conflict.conflictingPaths, ["src/same.js"]);
+  assert.equal(conflict.oldBase, worktree.baseHead);
+  assert.equal(conflict.targetHead, run.repository.integrationHead);
+  assert.equal(conflict.commits.length, 2);
   assert.equal(fs.existsSync(marker) ? fs.readFileSync(marker, "utf8") : "", "", "the worker's fsmonitor did not run");
   assert.equal(fs.readFileSync(path.join(root, "src/mon.sh"), "utf8"), "#!/bin/sh\nexit 1\n", "rolled back");
   git(root, ["config", "--unset", "core.fsmonitor"]);

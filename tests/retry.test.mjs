@@ -199,25 +199,28 @@ test("a warm retry after an integration conflict recreates the worktree; otherwi
   const root = repo();
   plan(root, "run-conflict", { kind: "write" });
   reportedAttempt(root, "run-conflict");
+  assert.throws(() => retryTask(root, "run-conflict", "work", { conflict: true, note: "Redo" }), /recorded integration conflict/);
   recordIntegrationDiagnostic(root, "run-conflict", "work", {
     kind: "failed",
     reasonCode: "integration_conflict",
     signals: ["integration_conflict"],
-    error: "CONFLICT (content): Merge conflict in src/a.js"
+    error: "CONFLICT (content): Merge conflict in src/a.js",
+    details: { conflictingPaths: ["src/a.js"], oldBase: "old-base", targetHead: "new-base", commits: ["preserved-change"] }
   });
-  recordTaskDisposition(root, "run-conflict", "work", {
-    terminalOutcome: "integration_failed",
-    action: "replan",
-    reasonCode: "integration_conflict",
-    evidence: ["cherry-pick conflicted with the integrated head"]
-  });
-  assert.equal(retryTask(root, "run-conflict", "work").retryPlan.mode, "warm");
+  assert.throws(() => retryTask(root, "run-conflict", "work", { conflict: true }), /requires --note/);
+  const result = runCli(root, ["run", "retry", "run-conflict", "work", "--conflict", "--note", "cherry-pick conflicted with the integrated head", "--json"]);
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout).retryPlan.mode, "warm");
+  assert.throws(() => retryTask(root, "run-conflict", "work", { conflict: true, note: "Redo" }), /recorded integration conflict/);
   const second = claimTask(root, "run-conflict", "work", lane);
   assert.equal(second.resumedFromAttemptId, "work-attempt-1");
   assert.deepEqual(second.retry.worktree, { mode: "new", reason: "integration_conflict" });
   assert.match(second.briefing, /set aside because its commits conflicted/);
   assert.match(second.briefing, /Integration findings \(integration_conflict\):\n- error: CONFLICT/);
   assert.match(second.briefing, /cherry-pick conflicted with the integrated head/);
+  assert.match(second.briefing, /conflicting paths: src\/a.js/);
+  assert.match(second.briefing, /previous base: old-base; integration target: new-base/);
+  assert.match(second.briefing, /preserved commits: preserved-change/);
 });
 
 test("the CLI exposes --note and --fresh on run retry", () => {

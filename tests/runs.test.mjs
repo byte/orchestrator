@@ -1740,7 +1740,7 @@ test("a worker inherits its dependencies' decisions, not just their summaries", 
   const root = repo();
   createRun(root, { id: "run-context", lane: "api", objective: "Ship pagination" });
   replacePlan(root, "run-context", [
-    { id: "design", title: "Design", objective: "Choose the cursor format", kind: "read" },
+    { id: "design", title: "Design", objective: "Choose the cursor format", kind: "read", interfaces: ["export encodeCursor({ offset }) from src/cursors.js; preserve opaque strings"] },
     {
       id: "build",
       title: "Build",
@@ -1776,6 +1776,8 @@ test("a worker inherits its dependencies' decisions, not just their summaries", 
     { name: "api", constraints: [] }
   );
   assert.match(briefing, /### design/);
+  assert.match(briefing, /Accepted interface contract; inspect the actual code/);
+  assert.match(briefing, /export encodeCursor\(\{ offset \}\) from src\/cursors.js/);
   assert.match(briefing, /Chose an opaque base64 cursor/);
   assert.match(briefing, /Decisions you must not contradict:\n- Cursors are opaque base64/);
   assert.match(briefing, /Assumptions it made:\n- Page size stays at 50/);
