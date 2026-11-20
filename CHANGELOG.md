@@ -1,6 +1,9 @@
 # Changelog
 
-## Unreleased
+## 0.6.8
+
+- `/orchestrator:run` now dispatches workers: the supervisor may skip them only on the user's explicit yes, and an answer produced without a worker says so first. A real PRD review had been answered by the supervisor alone, citing earlier runs on a since-revised PRD.
+- `/orchestrator:run show <status|cost|runs|processlist|workers|routes|lanes|ledger|storage>` inspects without a run id, defaulting to the latest run or the one the words describe, and never starts a run.
 
 - Freeze configured lane contracts on new runs. Initial out-of-lane tasks require recorded owner approval, acceptance criteria are required, and identical planned writer surfaces are serialized. Plan output diagnoses potential overlap. State version 7 keeps older releases from ignoring the new contract while preserving legacy runs.
 - Lanes can freeze trusted argv checks into new runs. `run check` executes them without a model call in Codex's read-only sandbox and saves state-bound receipts; missing, failed, timed-out, or stale required checks block task acceptance and finalization. Contracted acceptance also requires supervisor evidence rather than worker claims alone.
