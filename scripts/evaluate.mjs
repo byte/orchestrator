@@ -1,11 +1,13 @@
 #!/usr/bin/env node
 import fs from "node:fs";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { createHash } from "node:crypto";
-import { execFileSync } from "node:child_process";
+import { once } from "node:events";
 import { fileURLToPath } from "node:url";
 import { executeCheck } from "../plugins/orchestrator/scripts/lib/checks.mjs";
+import { execGit } from "../plugins/orchestrator/scripts/lib/exec.mjs";
 
 const self = fileURLToPath(import.meta.url);
 const evaluation = path.resolve(path.dirname(self), "../evaluation");
@@ -97,9 +99,8 @@ function prepare(options) {
     }
   };
   writeFiles(fixture.files);
-  const git = (args) => execFileSync("git", ["-c", "core.hooksPath=/dev/null", ...args], {
-    cwd: workspace, encoding: "utf8", timeout: 10000, maxBuffer: 65536,
-    stdio: ["ignore", "pipe", "pipe"],
+  const git = (args) => execGit(["-c", "core.hooksPath=/dev/null", ...args], {
+    cwd: workspace, timeout: 10000,
     env: {
       PATH: process.env.PATH, HOME: destination, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null",
       GIT_AUTHOR_NAME: "Evaluation", GIT_AUTHOR_EMAIL: "evaluation@example.invalid",
@@ -146,27 +147,33 @@ function snapshot(candidate, destination, fixture) {
   return files;
 }
 
-function grade(options) {
+async function grade(options) {
   const fixture = caseById(options.case);
   if (!options.candidate || !options.metadata) fail("grade requires --candidate and --metadata");
   const candidate = fs.realpathSync(options.candidate);
   const metadata = normalizeMetadata(readJson(options.metadata), fixture);
   if (options.out) {
     const output = path.resolve(options.out);
-    const resolved = path.join(fs.realpathSync(path.dirname(output)), path.basename(output));
-    if (inside(candidate, resolved)) fail("Receipt --out must be outside the candidate");
-    if (fs.existsSync(resolved)) fail("Receipt --out must be a new file");
+    if (inside(candidate, output)) fail("Receipt --out must be outside the candidate");
+    if (fs.existsSync(output)) fail("Receipt --out must be a new file");
   }
   const temporary = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "orch-evaluation-grade-"));
   let preserve = false;
+  const listener = net.createServer((socket) => socket.destroy());
   try {
     const files = snapshot(candidate, temporary, fixture);
     const started = Date.now();
-    const check = executeCheck(temporary, { argv: [process.execPath, checker, fixture.id], timeoutSeconds: 15 }, { writable: false, network: false });
+    const listening = once(listener, "listening");
+    listener.listen({ host: "127.0.0.1", port: 0 });
+    await listening;
+    const check = executeCheck(temporary, {
+      argv: [process.execPath, checker, fixture.id, String(listener.address().port)], timeoutSeconds: 15
+    }, { writable: false, network: false });
     preserve = Boolean(check.terminationUncertain);
     let verdict;
     try { verdict = JSON.parse(check.stdout.text); } catch { /* Infrastructure failure, not a candidate verdict. */ }
-    const valid = !check.error && !check.signal && verdict?.caseId === fixture.id && typeof verdict.passed === "boolean" && check.exitCode === (verdict.passed ? 0 : 1);
+    const sandboxVerified = verdict?.caseId === fixture.id && verdict.sandboxVerified === true;
+    const valid = !check.error && !check.signal && sandboxVerified && typeof verdict.passed === "boolean" && check.exitCode === (verdict.passed ? 0 : 1);
     const outcome = valid ? (verdict.passed ? "passed" : "failed") : "unavailable";
     return {
       schemaVersion: 1, caseId: fixture.id, suiteDigest, caseDigest: sha(JSON.stringify(fixture)),
@@ -176,12 +183,14 @@ function grade(options) {
         startedAt: check.startedAt, finishedAt: check.finishedAt, timeoutSeconds: check.timeoutSeconds,
         exitCode: check.exitCode, signal: check.signal, error: check.error?.slice(0, 512) ?? null,
         sandbox: check.sandbox,
+        sandboxVerified,
         stdout: { text: check.stdout.text.slice(-4096), truncated: check.stdout.truncated || check.stdout.text.length > 4096 },
         stderr: { text: check.stderr.text.slice(-4096), truncated: check.stderr.truncated || check.stderr.text.length > 4096 },
         ...(preserve ? { terminationUncertain: true, snapshot: temporary, captureDirectory: check.captureDirectory, processGroup: check.processGroup } : {})
       }
     };
   } finally {
+    listener.close();
     if (!preserve) fs.rmSync(temporary, { recursive: true, force: true });
   }
 }
@@ -191,7 +200,8 @@ function compare(options) {
   const receipts = [readJson(options.left), readJson(options.right)];
   for (const receipt of receipts) {
     if (receipt.schemaVersion !== 1 || !["passed", "failed"].includes(receipt.outcome)) fail("Only completed schemaVersion 1 grades can be compared");
-    normalizeMetadata(receipt.metadata, caseById(receipt.caseId));
+    if (receipt.check?.sandboxVerified !== true) fail("Regrade receipts without a verified sandbox before comparing");
+    receipt.metadata = normalizeMetadata(receipt.metadata, caseById(receipt.caseId));
     if (!receipt.metadata.matchId || conditionsKeys.some((key) => receipt.metadata.conditions?.[key] == null)) fail("Matched comparison requires matchId and all declared conditions (unknown stays unknown)");
   }
   const [left, right] = receipts;
@@ -208,7 +218,7 @@ function compare(options) {
   };
 }
 
-function main() {
+async function main() {
   const [command, ...args] = process.argv.slice(2);
   const allowed = { list: [], prepare: ["case", "dest"], grade: ["case", "candidate", "metadata", "out"], compare: ["left", "right", "out"] };
   if (!Object.hasOwn(allowed, command)) fail("Usage: evaluate.mjs list | prepare --case ID [--dest NEW_DIR] | grade --case ID --candidate DIR --metadata FILE [--out FILE] | compare --left FILE --right FILE [--out FILE]");
@@ -218,14 +228,21 @@ function main() {
     if (!args[index].startsWith("--") || !allowed[command].includes(key) || Object.hasOwn(options, key) || !args[index + 1] || args[index + 1].startsWith("--")) fail(`Invalid option: ${args[index]}`);
     options[key] = args[index + 1];
   }
+  if (options.out) {
+    const output = path.resolve(options.out);
+    const resolved = path.join(fs.realpathSync(path.dirname(output)), path.basename(output));
+    const isLearningPath = (file) => /(?:^|\/)\.orchestrator\/local\/learning(?:\/|$)/i.test(file);
+    if (isLearningPath(output) || isLearningPath(resolved)) fail("--out must be outside the learning store");
+    options.out = resolved;
+  }
   const result = command === "list" ? { schemaVersion: 1, suiteDigest, cases: manifest.cases.map(({ id, kind, scale, rejects }) => ({ id, kind, scale, rejects })) }
-    : command === "prepare" ? prepare(options) : command === "grade" ? grade(options) : compare(options);
-  if (options.out) writeNew(path.resolve(options.out), json(result));
+    : command === "prepare" ? prepare(options) : command === "grade" ? await grade(options) : compare(options);
+  if (options.out) writeNew(options.out, json(result));
   process.stdout.write(json(result));
   if (command === "grade") process.exitCode = result.outcome === "passed" ? 0 : result.outcome === "failed" ? 1 : 2;
 }
 
-try { main(); } catch (error) {
+try { await main(); } catch (error) {
   process.stderr.write(`evaluation: ${error.message}\n`);
   process.exitCode = 2;
 }

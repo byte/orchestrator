@@ -333,12 +333,18 @@ Task checks run on the reported attempt's checkout; final checks run after every
 The runner invokes `codex sandbox` without a model call, with a read-only checkout, no network,
 and a private writable `TMPDIR`. Check scripts must work within those permissions. Each receipt
 records argv, times, timeout, exit status, attempt/plan identity, tested HEAD plus dirty source
-contents, and the last 32 KiB of each output stream (with a truncation marker). Ignored dependency
-contents are not fingerprinted. Missing, failing, timed-out, or stale required receipts block
+contents, and the last 32 KiB of each output stream (with a truncation marker). Top-level ignored
+dependencies are outside the fingerprint. Missing, failing, timed-out, or stale required receipts block
 acceptance; worker-reported commands never become trusted check definitions. There is no implicit
 waiver. Manual supervisor evidence remains required for acceptance on contracted runs, including
 criteria that cannot be established by a passing command. Lanes without checks retain manual
 verification, and existing runs do not acquire checks retroactively.
+
+Checks on the supervisor checkout are invalidated by overlapping integrations, including a
+cherry-pick that returns to its original HEAD after rollback. Rerun required supervisor-checkout
+checks created by earlier versions to capture this evidence. When repeated checks finish out of
+order, acceptance uses the most recently started check for the current definition and plan.
+
 `lane show` lists a lane's checks and setup; `lane add <name> --clear-checks` or `--clear-setup`
 removes them for new runs, while existing runs keep the definitions they froze.
 
@@ -364,14 +370,12 @@ candidate at a time, not a batch merge queue.
 
 Checks, setup, and previews do not hold the run's lock while their commands run, so other commands
 on the run (a background `run wait`, another launch, a cancellation) keep working. Each receipt is
-bound to the attempt, plan revision, and contents it measured, so anything that changes meanwhile
-makes it stale rather than wrongly fresh. These commands can run longer than a foreground Claude
-Code Bash call allows, so the supervisor runs them in the background. If a launch is killed during
-setup, the next poll records the attempt as `setup_failed`; the setup command may still be running
-in that worktree, so retry with `--fresh`. `run cleanup` keeps such worktrees and previews until the
-recorded process group has exited; when no group was recorded (a killed launch, a Git child), it
-keeps them until `run cleanup <run-id> --release-uncertain`, which you should pass only after
-confirming nothing is running there.
+bound to the attempt, plan revision, and contents it measured. The check and setup wrappers enforce
+their deadline even if the calling CLI exits. If a launch dies before attaching its worker, the
+next poll after any pending integration is resolved records the launch failure. An interrupted
+setup is recorded as `setup_failed` and can be retried with `--fresh`. `run cleanup` retains
+worktrees and previews with uncertain process ownership until the recorded group has exited or
+the operator confirms termination using `run cleanup <run-id> --release-uncertain`.
 
 ## Worktrees and your branch
 
@@ -703,7 +707,7 @@ The package has no runtime dependencies. Tests use throwaway Git repositories an
 processes to exercise concurrency, cancellation, structured collection, worktree integration,
 finalization, and cleanup without consuming model quota.
 
-`npm run test:fast` runs a small deterministic subset; `npm test` runs every test with concurrency 2. `npm run test:protocol` runs the complementary set, and `npm run test:repeat -- --load` repeats the lock/wait/cleanup group twice under bounded CPU contention, stopping on the first failure without retries. See [test scopes and evidence limits](docs/testing.md). There is no hosted CI. Before relying on a new Codex installation or upgrade, separately exercise a write task through integration/finalization, private read scratch, warm resume, and cancellation with the authenticated CLI; live-model checks consume model quota.
+`npm run test:fast` runs a small deterministic subset. `npm test` runs every test with concurrency 2 on Node versions that support `--test-concurrency`, and runs one file at a time on older supported versions. `npm run test:protocol` runs the complementary set, and `npm run test:repeat -- --load` repeats the lock/wait/cleanup group twice under bounded CPU contention, stopping on the first failure without retries. See [test scopes and evidence limits](docs/testing.md). There is no hosted CI. Before relying on a new Codex installation or upgrade, separately exercise a write task through integration/finalization, private read scratch, warm resume, and cancellation with the authenticated CLI; live-model checks consume model quota.
 
 ## Operational limits
 

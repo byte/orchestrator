@@ -1,11 +1,11 @@
 import fs from "node:fs";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
 
 import { loadRun, taskHistory } from "./runs.mjs";
 import { resolveWorkspaceRoot } from "./workspace.mjs";
-import { worktreeGitDir } from "./worktrees.mjs";
+import { registeredWorktreeGitDir } from "./worktrees.mjs";
 import { worktreeGitEnv } from "./git.mjs";
+import { execGit } from "./exec.mjs";
 import { SCRATCH_OWNER_FILE } from "./remove-tree.mjs";
 
 const FINISHED = new Set(["completed", "failed", "blocked", "cancelled"]);
@@ -94,24 +94,19 @@ function checkReason(run, target) {
   return null;
 }
 
-function cleanReason(cwd, target) {
+function cleanReason(cwd, worktree) {
+  const target = worktree.path;
+  let gitDir;
+  try { gitDir = registeredWorktreeGitDir(cwd, worktree); } catch { return "not_owned"; }
   try {
     // Resolve from supervisor Git records, never trust a worker's .git file or
     // an arbitrary gitDir string in saved state. Status cannot refresh indexes.
-    const gitDir = worktreeGitDir(cwd, target);
-    const probe = spawnSync("git", ["status", "--porcelain", "-z", "--untracked-files=all", "--ignore-submodules=all"], {
-      cwd: target, env: { ...worktreeGitEnv(target, gitDir), GIT_OPTIONAL_LOCKS: "0" },
-      encoding: "utf8", timeout: 15000, stdio: ["ignore", "pipe", "pipe"]
-    });
-    if (probe.error || probe.status !== 0) return "git_unknown";
-    if (probe.stdout.length) return "dirty";
+    const options = { cwd: target, env: { ...worktreeGitEnv(target, gitDir), GIT_OPTIONAL_LOCKS: "0" }, timeout: 15000 };
+    const probe = execGit(["status", "--porcelain", "-z", "--untracked-files=all", "--ignore-submodules=all"], options);
+    if (probe.length) return "dirty";
     // Existing cleanup retains submodule paths even when status ignores them.
-    const modules = spawnSync("git", ["ls-files", "--stage", "-z"], {
-      cwd: target, env: { ...worktreeGitEnv(target, gitDir), GIT_OPTIONAL_LOCKS: "0" },
-      encoding: "utf8", timeout: 15000, stdio: ["ignore", "pipe", "pipe"]
-    });
-    if (modules.error || modules.status !== 0) return "git_unknown";
-    if (modules.stdout.split("\0").some((record) => record.startsWith("160000 "))) return "dirty";
+    const modules = execGit(["ls-files", "--stage", "-z"], options);
+    if (modules.split("\0").some((record) => record.startsWith("160000 "))) return "dirty";
     return "finished_clean";
   } catch { return "git_unknown"; }
 }
@@ -214,8 +209,8 @@ export function inventoryStorage(cwd = process.cwd()) {
         if (typeof worktree?.path === "string" && !worktree.inPlace && !removed(path.resolve(root, worktree.path))) {
           const target = path.resolve(root, worktree.path);
           const owned = within(path.join(local, "worktrees", directory.name), target) && realOwned(local, target);
-          treeReason = owned ? reason || checkReason(run, target) || cleanReason(root, target) : "not_owned";
-          add("worktree", owned ? target : null, treeReason);
+          treeReason = owned ? reason || checkReason(run, target) || cleanReason(root, { ...worktree, path: target }) : "not_owned";
+          add("worktree", owned && treeReason !== "not_owned" ? target : null, treeReason);
         }
         for (const { file, status } of statuses) {
           if (typeof status?.scratchDir !== "string") continue;
@@ -245,7 +240,8 @@ export function inventoryStorage(cwd = process.cwd()) {
         !settled && alive(preview.owner?.pid) ? "worker_live" :
         !settled || preview.unknownProcess || (preview.mayBeRunning && !(preview.checks ?? []).some((check) => check.terminationUncertain)) ||
           (preview.checks ?? []).some(uncertain) ? "process_uncertain" : setupReason(preview.worktree);
-      add("preview", owned ? target : null, owned ? reason || checkReason(run, target) || cleanReason(root, target) : "not_owned");
+      const treeReason = owned ? reason || checkReason(run, target) || cleanReason(root, { ...preview.worktree, path: target }) : "not_owned";
+      add("preview", owned && treeReason !== "not_owned" ? target : null, treeReason);
     }
   }
   for (const [scratch, tree] of scratchTrees) {

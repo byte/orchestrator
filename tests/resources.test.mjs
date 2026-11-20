@@ -3,6 +3,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { after, test } from "node:test";
+import { spawn, spawnSync } from "node:child_process";
+import { once } from "node:events";
+import { setTimeout as delay } from "node:timers/promises";
 import { BoundedLog } from "../plugins/orchestrator/scripts/lib/bounded-log.mjs";
 import { executeCheck } from "../plugins/orchestrator/scripts/lib/checks.mjs";
 import { attemptProgress, dispatchBudgetStatus, schedulingAdvice } from "../plugins/orchestrator/scripts/lib/run-insights.mjs";
@@ -52,6 +55,32 @@ test("trusted checks fail explicitly at output limits and retain a bounded tail 
   assert.equal(held.passed, false);
   assert.match(held.error, /exceeded maxOutputBytes/);
   assert.ok(Date.now() - started < 10000, `stopped after ${Date.now() - started} ms`);
+});
+
+test("a check keeps its deadline after the CLI process is killed", async (t) => {
+  const root = makeRepo(); roots.push(root);
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "orch-check-parent-test-")); roots.push(scratch);
+  const heartbeat = path.join(root, "heartbeat");
+  const checks = new URL("../plugins/orchestrator/scripts/lib/checks.mjs", import.meta.url).href;
+  const pulse = "const fs=require('node:fs'), file=process.argv[1];const beat=()=>fs.appendFileSync(file,'x');beat();setInterval(beat,25);";
+  const cli = spawn(process.execPath, ["--input-type=module", "-e", `
+    import { executeCheck } from ${JSON.stringify(checks)};
+    executeCheck(process.cwd(), { argv: [process.execPath, '-e', ${JSON.stringify(pulse)}, ${JSON.stringify(heartbeat)}], timeoutSeconds: 2 },
+      { codexCommand: ${JSON.stringify(codexCommand)} });
+  `], { cwd: root, env: { ...process.env, TMPDIR: scratch }, stdio: "inherit" });
+  const cliExit = once(cli, "exit");
+  t.after(() => cli.kill("SIGKILL"));
+  const deadline = Date.now() + 5000;
+  while (!fs.existsSync(heartbeat) && Date.now() < deadline) await delay(20);
+  assert.ok(fs.existsSync(heartbeat), "check reached the trusted command");
+  cli.kill("SIGKILL");
+  assert.deepEqual(await cliExit, [null, "SIGKILL"]);
+  await delay(2200);
+  const stoppedAt = fs.statSync(heartbeat).size;
+  await delay(150);
+  assert.equal(fs.statSync(heartbeat).size, stoppedAt, "the command stopped despite the CLI dying");
+  const capture = fs.readdirSync(scratch).find((file) => file.startsWith("orch-check-"));
+  assert.match(JSON.parse(fs.readFileSync(path.join(scratch, capture, "result.json"), "utf8")).error, /ETIMEDOUT/);
 });
 
 test("a noisy worker drains oversized event lines, retains its final report, and publishes bounded capture", async () => {
@@ -104,6 +133,53 @@ process.stdin.on('end', async () => {
   } finally { stopTaskWorker(loadRun(root, "noisy").tasks.task.attempts.at(-1)); }
 });
 
+test("a provider content filter is recorded as a refusal without substituting the model", async () => {
+  const root = makeRepo(); roots.push(root);
+  runCli(root, ["init"]);
+  runCli(root, ["lane", "add", "review"]);
+  createRun(root, { id: "refusal", lane: "review", objective: "Review", workerModel: "sol", reasoningEffort: "high" });
+  replacePlan(root, "refusal", [{ id: "review", kind: "read", title: "Review", objective: "Review", acceptance: ["Verified"] }]);
+  checkpointPlan(root, "refusal");
+  const fixture = path.join(root, ".orchestrator/local/refusal.cjs");
+  fs.writeFileSync(fixture, `
+    process.stdin.resume();
+    process.stdin.on('end', () => {
+      console.log(JSON.stringify({type:'turn.failed', error:{code:'content_filter', message:'Blocked by the cybersecurity safety system.'}}));
+      process.exitCode = 1;
+    });`);
+  launchTaskWorker(root, "refusal", "review", {}, { codexCommand: [process.execPath, fixture] });
+  const deadline = Date.now() + 15000;
+  while (Date.now() < deadline) {
+    pollRunWorkers(root, "refusal");
+    if (loadRun(root, "refusal").tasks.review.attempts.at(-1).outcome) break;
+    await delay(30);
+  }
+  const run = loadRun(root, "refusal");
+  assert.equal(run.tasks.review.attempts.length, 1);
+  assert.equal(run.tasks.review.attempts[0].outcome?.terminalOutcome, "policy_refused");
+  assert.equal(run.tasks.review.attempts[0].outcome?.reasonCode, "policy_boundary");
+  assert.equal(run.unavailableModels?.length ?? 0, 0);
+});
+
+test("poll recovers a dispatch with a dead launcher and no attached runner", () => {
+  const root = makeRepo(); roots.push(root);
+  runCli(root, ["init"]);
+  runCli(root, ["lane", "add", "review"]);
+  createRun(root, { id: "orphan", lane: "review", objective: "Review", workerModel: "sol", reasoningEffort: "high" });
+  replacePlan(root, "orphan", [{ id: "review", kind: "read", title: "Review", objective: "Review", acceptance: ["Verified"] }]);
+  checkpointPlan(root, "orphan");
+  const runs = new URL("../plugins/orchestrator/scripts/lib/runs.mjs", import.meta.url).href;
+  const launch = spawnSync(process.execPath, ["--input-type=module", "-e", `
+    import { claimTask } from ${JSON.stringify(runs)};
+    claimTask(process.cwd(), 'orphan', 'review', undefined, { trackLauncher: true });
+  `], { cwd: root });
+  assert.equal(launch.status, 0, launch.stderr?.toString());
+  assert.equal(loadRun(root, "orphan").tasks.review.status, "dispatching");
+  const [update] = pollRunWorkers(root, "orphan");
+  assert.equal(update.status, "failed");
+  assert.equal(loadRun(root, "orphan").tasks.review.attempts[0].outcome?.reasonCode, "worker_launch_failed");
+});
+
 test("dispatch budgets count retired attempts, distinguish missing tokens, and enforce boundary equality", () => {
   const run = { createdAt: "2026-01-01T00:00:00Z", tasks: { a: { attempts: [{}] } }, retiredTasks: [{ attempts: [{}] }],
     budgets: { maxAttempts: 3, maxElapsedMinutes: 2, maxWorkerTokens: 100 } };
@@ -122,7 +198,9 @@ test("CLI limits stop claims until explicitly revised; focused briefings preserv
   runCli(root, ["init"]);
   runCli(root, ["lane", "add", "work"]);
   createRun(root, { id: "resources", lane: "work", objective: "Observe", workerModel: "sol", reasoningEffort: "high" });
-  replacePlan(root, "resources", ["a", "b"].map((id) => ({ id, title: id, objective: id, kind: "read", scope: [id], acceptance: [`accept ${id}`] })));
+  replacePlan(root, "resources", ["a", "b"].map((id) => ({
+    id, title: id, objective: id, kind: "read", scope: [id], acceptance: [`accept ${id}`], constraints: [`constraint for ${id}`]
+  })));
   checkpointPlan(root, "resources");
   assert.equal(runCli(root, ["run", "budget", "resources", "--max-attempts", "1"]).code, 0);
   const first = claimTask(root, "resources", "a");
@@ -136,6 +214,8 @@ test("CLI limits stop claims until explicitly revised; focused briefings preserv
   assert.ok(focused.length < full.length);
   assert.match(focused, /accept b/);
   assert.match(focused, /scope: b/);
+  assert.match(focused, /constraint for b/);
+  assert.doesNotMatch(focused, /constraint for a/);
   assert.match(focused, /other task details omitted, not waived/);
   assert.doesNotMatch(focused, /accept a/);
   assert.equal(runCli(root, ["run", "budget", "resources", "--max-attempts", "2"]).code, 0);
@@ -147,6 +227,17 @@ test("scheduling advice counts shared descendants once without making dependenci
     ["a-leaf", []], ["z-root", []], ["left", ["z-root"]], ["right", ["z-root"]], ["join", ["left", "right"]]
   ].map(([id, dependsOn]) => [id, { id, dependsOn, status: "pending" }]));
   assert.deepEqual(schedulingAdvice({ tasks }), [{ taskId: "z-root", unlocks: 3 }, { taskId: "a-leaf", unlocks: 0 }]);
+});
+
+test("a shared successor contributes no unlock until its other prerequisites are complete", () => {
+  const tasks = {
+    a: { id: "a", dependsOn: [], status: "pending" },
+    b: { id: "b", dependsOn: [], status: "pending" },
+    join: { id: "join", dependsOn: ["a", "b"], status: "pending" }
+  };
+  assert.deepEqual(schedulingAdvice({ tasks }), [{ taskId: "a", unlocks: 0 }, { taskId: "b", unlocks: 0 }]);
+  tasks.a.status = "completed";
+  assert.deepEqual(schedulingAdvice({ tasks }), [{ taskId: "b", unlocks: 1 }]);
 });
 
 test("active time excludes answered and outstanding pauses, not quiet work", () => {

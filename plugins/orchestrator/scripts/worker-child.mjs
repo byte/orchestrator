@@ -667,6 +667,7 @@ async function runPlugin() {
     misses = 0;
     if (job.threadId && job.threadId !== threadId) {
       threadId = job.threadId;
+      noteActivity();
       writeStatus({ status: "running" });
     }
     if (PLUGIN_TERMINAL.has(job.status)) {
@@ -689,6 +690,7 @@ async function runPlugin() {
   const status = stored.status ?? job.status;
   const raw = stored.result?.rawOutput ?? "";
   const failure = String(stored.errorMessage ?? (status === "completed" ? "" : stored.rendered ?? "")).trim();
+  if (raw || failure) noteActivity();
   if (failure) {
     errors.write(`${failure}\n`);
     output.write(`${JSON.stringify({ type: "turn.failed", error: { message: failure } })}\n`);

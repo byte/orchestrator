@@ -228,23 +228,18 @@ test("an over-limit worker is reported once and left running", async () => {
   // 0.01 minutes is 600 ms.
   plan(root, "run-limit", [{ id: "work", timeoutMinutes: 0.01 }, { id: "other" }]);
   assert.equal(loadRun(root, "run-limit").tasks.work.timeoutMinutes, 0.01);
-  const launched = launch(root, "run-limit", "work", [process.execPath, slowFixture, "--delay=10000"]);
+  launch(root, "run-limit", "work", [process.execPath, slowFixture, "--delay=10000"]);
   reap(root, "run-limit", "work");
-  const deadline = Date.parse(launched.runner.launchedAt) + 0.01 * 60000;
-  const beforeDeadline = Date.now() < deadline - 100;
-
   // No watching and a 60 s fallback: only the deadline timer can wake this wait
-  // in time, which is what reports a worker whose files have gone quiet.
+  // after its first poll, which is what reports a worker whose files have gone quiet.
   const result = await waitForRunChange(root, "run-limit", {
     timeoutMs: 15000,
     intervalMs: NO_FALLBACK_MS,
     watch: false
   });
   assert.equal(result.outcome, "changed");
-  // On a heavily loaded machine the launch can already be past its limit when
-  // the wait starts; the first poll then reports it instead of the timer.
-  assert.equal(result.wakeSource, beforeDeadline ? "limit" : result.wakeSource);
-  assert.ok(["limit", "start"].includes(result.wakeSource));
+  // The initial poll can run after the limit on a busy machine.
+  assert.equal(result.wakeSource, result.polls === 1 ? "start" : "limit");
   const [update] = result.updates;
   assert.equal(update.status, "running");
   assert.equal(update.changed, true);

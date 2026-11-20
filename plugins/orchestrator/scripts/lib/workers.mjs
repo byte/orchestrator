@@ -162,6 +162,20 @@ function streamEvents(filePath) {
   return events;
 }
 
+function providerPolicyRefusal(filePath, stderr) {
+  const explicitRefusal = /\b(?:blocked|rejected)\b.{0,120}\b(?:cybersecurity (?:safety system|content filter)|content filter)\b|flagged as potentially risky cybersecurity activity/i;
+  for (const event of streamEvents(filePath)) {
+    if (!["error", "turn.failed"].includes(event?.type)) continue;
+    const detail = event.error;
+    const message = (typeof detail === "string" ? detail : detail?.message) ?? event.message;
+    const code = detail?.code ?? event.code;
+    if (["content_filter", "content_policy_violation"].includes(code) || explicitRefusal.test(message ?? "")) {
+      return message || "Codex reported a provider content-policy refusal.";
+    }
+  }
+  return explicitRefusal.test(stderr) ? stderr : null;
+}
+
 const UNAVAILABLE_PHRASES =
   /not supported|not available|unavailable|does not exist|not found|do(?:es)? not have access|no access|not enabled|not allowed/i;
 // Wording that marks an outage rather than an entitlement. Such an error, even one
@@ -527,7 +541,7 @@ export function launchTaskWorker(
   const execution = resolveExecutor(planned.workerPolicy?.executor);
   let dispatch;
   try {
-    dispatch = claimTask(cwd, runId, taskId, lane);
+    dispatch = claimTask(cwd, runId, taskId, lane, { trackLauncher: true });
   } catch (error) {
     // The claim reached disk but its event did not: fail the attempt, or the
     // task would sit dispatching with no worker and refuse launch and retry.
@@ -741,20 +755,19 @@ export function pollRunWorkers(cwd, runId, { now = Date.now() } = {}) {
         finishedAt: new Date().toISOString()
       }, null, 2)}\n`);
     }
-    // A launch killed during worktree setup (a Bash timeout, say) leaves the
-    // attempt dispatching with no runner; nothing else would ever collect it.
-    // The setup command ran in its own process group and may still be running,
-    // so the worktree keeps its pending-setup mark and cleanup preserves it.
+    // A launcher can exit before attaching a runner, including while a
+    // concurrent integration prevents it from recording its launch failure.
+    // Keep a pending setup mark for cleanup if setup had already started.
     const pendingSetup = attempt.worktree?.setupPending;
-    if (!attempt.runner && pendingSetup?.launcherPid &&
-        !sameProcess(pendingSetup.launcherPid, pendingSetup.launcherStartedAt)) {
-      const error = "The launch exited during worktree setup, so no worker started. The setup command may still be " +
-        "running in that worktree: preserve it and use `run retry --fresh`.";
+    const launcher = attempt.launcher ?? (pendingSetup ? { pid: pendingSetup.launcherPid, startedAt: pendingSetup.launcherStartedAt } : null);
+    if (!attempt.runner && launcher?.pid && !sameProcess(launcher.pid, launcher.startedAt)) {
+      const error = pendingSetup ? "The launch exited during worktree setup, so no worker was attached. Preserve the worktree and use `run retry --fresh`."
+        : "The launch exited before attaching a worker. Inspect its artifacts and retry the task.";
       try {
         const failed = failTaskAttempt(cwd, runId, task.id, {
           attemptId: attempt.id,
           error,
-          reasonCode: "setup_failed",
+          reasonCode: pendingSetup ? "setup_failed" : "worker_launch_failed",
           signals: ["worker_launch_error"],
           launchFailed: true,
           runnerStatusFile: null
@@ -858,25 +871,27 @@ export function pollRunWorkers(cwd, runId, { now = Date.now() } = {}) {
       }
       // A runner launched by `run answer` resumes an attempt that has already
       // worked, so its failure is never a launch rejection of the attempt.
-      const unavailable = status.status === "failed" && !attempt.runner.inputRound
+      const stderr = tail(attempt.runner.errorFile);
+      const refusal = status.status === "failed" ? providerPolicyRefusal(attempt.runner.outputFile, stderr) : null;
+      const unavailable = !refusal && status.status === "failed" && !attempt.runner.inputRound
         ? modelUnavailableError(attempt.runner.outputFile, attempt.model)
         : null;
       if (unavailable) {
         updates.push(substituteUnavailableModel(cwd, runId, task, attempt, status, unavailable));
         return;
       }
-      const error = status.error
-        || tail(attempt.runner.errorFile)
+      const error = refusal || status.error
+        || stderr
         || eventStreamError(attempt.runner.outputFile)
         || `Codex exited ${status.exitCode}.`;
       const missingResult = status.status === "completed";
       const failed = failTaskAttempt(cwd, runId, task.id, {
         attemptId: attempt.id,
         error,
-        terminalOutcome: missingResult ? "contract_failed" : "execution_failed",
-        action: missingResult ? "replan" : "execute",
-        reasonCode: missingResult ? "missing_result" : "worker_process_failed",
-        signals: missingResult ? ["missing_result"] : ["worker_process_error"],
+        terminalOutcome: refusal ? "policy_refused" : missingResult ? "contract_failed" : "execution_failed",
+        action: refusal ? "refuse" : missingResult ? "replan" : "execute",
+        reasonCode: refusal ? "policy_boundary" : missingResult ? "missing_result" : "worker_process_failed",
+        signals: refusal ? [] : missingResult ? ["missing_result"] : ["worker_process_error"],
         runnerStatusFile: statusFile
       });
       updates.push({
@@ -887,6 +902,7 @@ export function pollRunWorkers(cwd, runId, { now = Date.now() } = {}) {
         threadId: status.threadId,
         exitCode: status.exitCode,
         error,
+        ...(refusal ? { reasonCode: "policy_boundary" } : {}),
         ...(status.resumeFallback ? { resumeFallback: status.resumeFallback } : {})
       });
     } catch (error) {

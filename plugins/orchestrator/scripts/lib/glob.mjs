@@ -67,7 +67,7 @@ function normalizePath(filePath) {
  * negation can carve an exclusion out of a broad include.
  * An empty pattern list matches nothing — scope must be stated explicitly.
  */
-export function matchesScope(filePath, patterns = []) {
+export function matchesScope(filePath, patterns = [], { directory = false } = {}) {
   const candidate = normalizePath(filePath);
   let matched = false;
 
@@ -78,7 +78,8 @@ export function matchesScope(filePath, patterns = []) {
     }
     const negated = pattern.startsWith("!");
     const body = negated ? pattern.slice(1) : pattern;
-    if (globToRegExp(normalize(body)).test(candidate)) {
+    const glob = globToRegExp(normalize(body));
+    if (glob.test(candidate) || (directory && glob.test(`${candidate}/`))) {
       matched = !negated;
     }
   }

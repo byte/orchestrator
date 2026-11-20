@@ -29,7 +29,7 @@ import {
   nowIso,
   withFileLock
 } from "./state.mjs";
-import { createPreviewWorktree, gitOperationInProgress, inspectTaskWorktree, integrateTaskWorktree, prepareTaskWorktree, recoverTaskIntegration } from "./worktrees.mjs";
+import { createPreviewWorktree, gitOperationInProgress, inspectTaskWorktree, integrateTaskWorktree, prepareTaskWorktree, recoverTaskIntegration, worktreeGitDir } from "./worktrees.mjs";
 import { DEFAULT_EXECUTOR, normalizeExecutor } from "./codex-plugin.mjs";
 
 export const DEFAULT_WORKER_MODEL = null;
@@ -2090,6 +2090,7 @@ function claimRetry(task) {
     note: pending.note ?? null,
     resumeThreadId: mode === "warm" ? previous.threadId : null,
     worktree,
+    ...(pending.reuseSetupWorktree ? { reuseSetupWorktree: true } : {}),
     requestedAt: pending.requestedAt
   };
 }
@@ -2102,6 +2103,7 @@ function restorePendingRetry(task, attempt) {
       mode: attempt.retry.mode,
       reason: attempt.retry.reason,
       note: attempt.retry.note,
+      ...(attempt.retry.reuseSetupWorktree ? { reuseSetupWorktree: true } : {}),
       requestedAt: attempt.retry.requestedAt
     };
   }
@@ -2112,16 +2114,19 @@ function restorePendingRetry(task, attempt) {
  * taken at the same moment so a later look can skip rereading unchanged files.
  */
 function readSurfaceIdentity(cwd, scope) {
-  return {
-    scope: [...scope],
-    statFingerprint: reviewFingerprint(cwd, scope, { contents: false }),
-    fingerprint: reviewFingerprint(cwd, scope)
-  };
+  for (let pass = 0; pass < 3; pass += 1) {
+    const statFingerprint = reviewFingerprint(cwd, scope, { contents: false });
+    const fingerprint = reviewFingerprint(cwd, scope);
+    if (statFingerprint === reviewFingerprint(cwd, scope, { contents: false })) {
+      return { scope: [...scope], statFingerprint, fingerprint };
+    }
+  }
+  throw new Error("Review contents are changing. Capture the review again once the checkout is stable.");
 }
 
 // Hashing a whole source tree can take seconds; do it before taking the run
 // lock, which polls and other commands are waiting on. The caller re-reads the
-// task under the lock and recomputes only if its scope changed meanwhile.
+// task under the lock and checks that both scope and files still match.
 function precomputeReadSurface(cwd, runId, taskId, scopeOf) {
   try {
     const scope = scopeOf(loadRun(cwd, runId).tasks[taskId]);
@@ -2132,12 +2137,13 @@ function precomputeReadSurface(cwd, runId, taskId, scopeOf) {
 }
 
 function surfaceFor(cwd, precomputed, scope) {
-  return precomputed && JSON.stringify(precomputed.scope) === JSON.stringify(scope)
+  return precomputed && JSON.stringify(precomputed.scope) === JSON.stringify(scope) &&
+      reviewFingerprint(cwd, scope, { contents: false }) === precomputed.statFingerprint
     ? precomputed
     : readSurfaceIdentity(cwd, scope);
 }
 
-export function claimTask(cwd, runId, taskId, lane) {
+export function claimTask(cwd, runId, taskId, lane, { trackLauncher = false } = {}) {
   const id = assertId(runId, "run");
   const filePath = runFile(cwd, id);
   const precomputed = precomputeReadSurface(cwd, id, taskId, (task) => task && task.kind !== "write" ? task.scope : null);
@@ -2147,7 +2153,9 @@ export function claimTask(cwd, runId, taskId, lane) {
     const run = loadRun(cwd, id);
     const task = requireTask(run, taskId);
     assertTaskAuthority(run, task);
-    const budget = dispatchBudgetStatus(run, { usage });
+    const budget = dispatchBudgetStatus(run, {
+      usage: run.budgets?.maxWorkerTokens ? (usage && JSON.stringify(run) === JSON.stringify(snapshot) ? usage : runUsage(run)) : null
+    });
     if (budget.blocked.length) throw new Error(`Dispatch budget: ${budget.blocked.join("; ")}.`);
     const ready = new Set(readyTasks(run).map((entry) => entry.id));
     if (!ready.has(task.id)) {
@@ -2222,6 +2230,7 @@ export function claimTask(cwd, runId, taskId, lane) {
       resumedFromAttemptId: retry?.mode === "warm" ? retry.previousAttemptId : null,
       retry,
       claimedAt: nowIso(),
+      ...(trackLauncher ? { launcher: { pid: process.pid, startedAt: processStartIso() } } : {}),
       startedAt: null,
       finishedAt: null,
       outcome: null,
@@ -2805,13 +2814,25 @@ export function prepareTaskAttempt(cwd, runId, taskId, attemptId, worktree, opti
   // setup can run for many minutes, and every other command on the run (a
   // background `run wait` included) needs the lock meanwhile.
   const run = withFileLock(runFile(cwd, runId), () => {
-    const run = loadRun(cwd, runId), task = requireTask(run, taskId), attempt = currentAttempt(task, attemptId);
+    const run = loadRun(cwd, runId);
+    if (run.pendingIntegration || run.pendingIntegrationEvent) {
+      const attempt = run.tasks[taskId]?.attempts.find((entry) => entry.id === attemptId);
+      if (attempt && !attempt.worktree) {
+        attempt.worktree = worktree;
+        writeRun(cwd, run);
+      }
+      assertNoPendingIntegration(run);
+    }
+    const task = requireTask(run, taskId), attempt = currentAttempt(task, attemptId);
     if (task.status !== "dispatching" || attempt.status !== "dispatching") {
       if (!attempt.worktree) { attempt.worktree = worktree; writeRun(cwd, run); }
       throw new AttachRefusedError("Task no longer dispatching; setup refused.");
     }
     attempt.worktree = worktree;
-    if (!run.contract?.setup) return null;
+    if (!run.contract?.setup) {
+      writeRun(cwd, run);
+      return null;
+    }
     if (worktree.setupPending || worktree.setup?.terminationUncertain) {
       // Inherited from an attempt whose setup was interrupted: that command may
       // still be writing this worktree, so never start another over it.
@@ -3320,12 +3341,56 @@ function checkTarget(cwd, run, taskId) {
   if (task?.kind === "write" && !worktree) throw new Error("Write checks require an attached task worktree.");
   return {
     task, attempt, cwd: worktree?.path ?? cwd,
-    gitDir: worktree?.inPlace ? null : worktree?.gitDir ?? null
+    gitDir: worktree && !worktree.inPlace ? worktree.gitDir ?? worktreeGitDir(cwd, worktree.path) : null
   };
 }
 
 function requiredChecks(run, taskId) {
   return normalizeChecks(run.contract?.checks ?? []).filter((check) => check.stages.includes(taskId ? "task" : "final"));
+}
+
+const integrationLockPath = (cwd) => path.join(localDir(cwd), "integration");
+const integrationActivityPath = (cwd) => path.join(localDir(cwd), "integration-activity.json");
+
+// Read under the checkout lock. The ID changes before Git can modify the
+// checkout, even if a multi-commit pick later returns to the original HEAD.
+function integrationActivity(cwd, run) {
+  let activity;
+  try { activity = JSON.parse(fs.readFileSync(integrationActivityPath(cwd), "utf8")); }
+  catch (error) { if (error.code !== "ENOENT") throw error; }
+  if (activity) {
+    const owner = activity.runId === run.id ? run : loadRun(cwd, activity.runId);
+    assertNoPendingIntegration(owner);
+  }
+  if (run.repository.baseHead && gitOperationInProgress(cwd)) throw new Error("A Git operation is still in progress in the supervisor checkout.");
+  return activity?.id ?? null;
+}
+
+function sampleCheck(cwd, runId, taskId, target, planRevision, { start = false } = {}) {
+  const sample = () => {
+    const state = withFileLock(runFile(cwd, runId), () => {
+      const run = loadRun(cwd, runId);
+      assertNoPendingIntegration(run);
+      if (start && run.planRevision !== planRevision) throw new Error("The plan changed before this check started.");
+      const current = checkTarget(cwd, run, taskId);
+      if (current.attempt?.id !== target.attempt?.id || current.cwd !== target.cwd) {
+        throw new Error("The check target moved to another attempt.");
+      }
+      const activity = target.gitDir ? null : integrationActivity(cwd, run);
+      if (!start) return { activity, planRevision: run.planRevision };
+      const order = run.checkSequence = (run.checkSequence ?? 0) + 1;
+      writeRun(cwd, run);
+      return {
+        activity, order, planRevision: run.planRevision,
+        integratedTasks: Object.values(run.tasks).filter((task) => task.integration)
+          .map((task) => ({ taskId: task.id, head: task.integration.integrationHead }))
+      };
+    });
+    try { state.fingerprint = checkoutFingerprint(target.cwd, { gitDir: target.gitDir }); }
+    catch (error) { state.fingerprintError = error.message; }
+    return state;
+  };
+  return target.gitDir ? sample() : withFileLock(integrationLockPath(cwd), sample);
 }
 
 export function runChecks(cwd, runId, taskId = null, options = {}) {
@@ -3356,26 +3421,35 @@ export function runChecks(cwd, runId, taskId = null, options = {}) {
     for (const definition of definitions) {
       let before = null, after = null, execution = {}, fingerprintError = null;
       try {
-        before = checkoutFingerprint(target.cwd, { gitDir: target.gitDir });
-        execution = executeCheck(target.cwd, definition, options);
-        after = checkoutFingerprint(target.cwd, { gitDir: target.gitDir });
+        before = sampleCheck(cwd, runId, taskId, target, run.planRevision, { start: true });
+        fingerprintError = before.fingerprintError ?? null;
       } catch (error) {
         fingerprintError = error.message;
       }
+      if (before?.fingerprint) {
+        try { execution = executeCheck(target.cwd, definition, options); }
+        catch (error) { execution = { error: error.message }; }
+        try {
+          after = sampleCheck(cwd, runId, taskId, target, run.planRevision);
+          fingerprintError = after.fingerprintError ?? null;
+        }
+        catch (error) { fingerprintError = error.message; }
+      }
+      const changedDuringCheck = !after?.fingerprint ? null : before.fingerprint !== after.fingerprint ||
+        before.activity !== after.activity || before.planRevision !== after.planRevision;
       const receipt = {
         id: randomUUID(), checkId: definition.id, definition, executionId,
-        taskId, attemptId: target.attempt?.id ?? null, planRevision: run.planRevision,
-        fingerprint: before, changedDuringCheck: after === null ? null : before !== after,
-        integratedTasks: Object.values(run.tasks).filter((task) => task.integration)
-          .map((task) => ({ taskId: task.id, head: task.integration.integrationHead })),
+        taskId, attemptId: target.attempt?.id ?? null, planRevision: before?.planRevision ?? run.planRevision,
+        fingerprint: before?.fingerprint ?? null, changedDuringCheck,
+        order: before?.order, integratedTasks: before?.integratedTasks ?? [],
         ...execution, ...(fingerprintError ? { fingerprintError } : {}),
-        passed: Boolean(execution.passed && after && before === after), provenance: "supervisor-executed"
+        passed: Boolean(execution.passed && changedDuringCheck === false), provenance: "supervisor-executed"
       };
       withFileLock(runFile(cwd, runId), () => {
         const current = loadRun(cwd, runId);
         // A checkout that changed under the check (an integration landing
         // meanwhile, say) is not evidence of a regression by anyone.
-        if (!taskId && !receipt.passed && receipt.changedDuringCheck === false) receipt.regression = combinedRegression(current, receipt);
+        if (!taskId && !receipt.passed && !receipt.error && receipt.changedDuringCheck === false) receipt.regression = combinedRegression(current, receipt);
         (current.checkReceipts ??= []).push(receipt);
         writeRun(cwd, current);
         appendEvent(cwd, current.id, { type: "check.executed", receiptId: receipt.id, taskId, checkId: definition.id, passed: receipt.passed });
@@ -3401,12 +3475,14 @@ function assertRequiredChecks(cwd, run, taskId = null) {
   const definitions = requiredChecks(run, taskId);
   if (!definitions.length) return;
   const target = checkTarget(cwd, run, taskId);
+  if (!target.gitDir) integrationActivity(cwd, run);
   const fingerprint = checkoutFingerprint(target.cwd, { gitDir: target.gitDir });
   for (const definition of definitions) {
     const receipt = (run.checkReceipts ?? []).filter((entry) => entry.checkId === definition.id &&
-      entry.taskId === taskId && entry.attemptId === (target.attempt?.id ?? null)).at(-1);
-    if (!receipt?.passed || receipt.planRevision !== run.planRevision || receipt.fingerprint !== fingerprint ||
-        JSON.stringify(receipt.definition) !== JSON.stringify(definition)) {
+      entry.taskId === taskId && entry.attemptId === (target.attempt?.id ?? null) &&
+      entry.planRevision === run.planRevision && JSON.stringify(entry.definition) === JSON.stringify(definition))
+      .sort((a, b) => (a.order ?? 0) - (b.order ?? 0)).at(-1);
+    if (!receipt?.passed || (!target.gitDir && !receipt.order) || receipt.fingerprint !== fingerprint) {
       throw new Error(`Required check "${definition.id}" is missing, failed, or stale. Run orch run check ${run.id}${taskId ? ` ${taskId}` : ""}.`);
     }
   }
@@ -3423,6 +3499,7 @@ export function previewRunTask(cwd, runId, taskId, options = {}) {
     withFileLock(runFile(cwd, runId), () => {
       const run = loadRun(cwd, runId);
       assertNoPendingIntegration(run);
+      integrationActivity(cwd, run);
       const task = requireTask(run, taskId);
       if (task.kind !== "write" || task.status !== "reported") throw new Error("Preview requires a reported write task.");
       const attempt = currentAttempt(task);
@@ -3454,6 +3531,7 @@ export function previewRunTask(cwd, runId, taskId, options = {}) {
     // `git worktree add` writes the shared repository; take the checkout lock
     // for that step only, and require the target head the receipt names.
     receipt.worktree = withFileLock(integrationLock, () => {
+      integrationActivity(cwd, loadRun(cwd, runId));
       if (headSha(cwd) !== receipt.targetHead) throw new Error("The supervisor branch moved since the preview started; retry preview.");
       return createPreviewWorktree(cwd, run, receipt.worktree.path);
     });
@@ -3522,11 +3600,12 @@ export function previewRunTask(cwd, runId, taskId, options = {}) {
   // can carry its paths, bases, and commits into the retry.
   if (receipt.reasonCode === "integration_conflict") {
     try {
-      recordIntegrationDiagnostic(cwd, runId, taskId, {
+      const recorded = recordIntegrationDiagnostic(cwd, runId, taskId, {
         kind: "failed", reasonCode: "integration_conflict", signals: ["integration_conflict"],
         error: receipt.error, attemptId: attempt.id,
         details: { ...(receipt.conflictDetails ?? {}), previewId: receipt.id }
       });
+      receipt.conflictRecorded = Boolean(recorded);
     } catch {
       // The task moved on (retried, cancelled) meanwhile; the receipt keeps the evidence.
     }
@@ -3571,6 +3650,8 @@ export function integrateRunTask(cwd, runId, taskId, { evidence = [] } = {}) {
           beforeApply(inspection) {
             assertRequiredChecks(cwd, run, task.id);
             assertIntegrationPreview(run, task, inspection);
+            integrationActivity(cwd, run);
+            atomicWrite(integrationActivityPath(cwd), JSON.stringify({ id: operationId, runId: run.id }));
             run.pendingIntegration = {
               id: operationId, taskId: task.id, attemptId: currentAttempt(task).id,
               priorHead: run.repository.integrationHead, inspection, evidence: checks,
@@ -3635,7 +3716,7 @@ export function verifyTask(cwd, runId, taskId, { verdict, evidence = [] }) {
     throw new Error('Verification verdict must be "pass" or "fail".');
   }
   const filePath = runFile(cwd, id);
-  return withFileLock(filePath, () => {
+  const verify = () => withFileLock(filePath, () => {
     const run = loadRun(cwd, id);
     const task = requireTask(run, taskId);
     if (task.status !== "reported") {
@@ -3656,6 +3737,7 @@ export function verifyTask(cwd, runId, taskId, { verdict, evidence = [] }) {
       at: nowIso()
     };
     if (normalizedVerdict === "pass") {
+      integrationActivity(cwd, run);
       assertAcceptanceEvidence(run, evidence);
       if (task.kind !== "write" && reviewFreshness(cwd, task).status === "stale") {
         throw new Error("Review evidence is stale: declared contents changed since dispatch. Reject this result and retry the review.");
@@ -3692,6 +3774,7 @@ export function verifyTask(cwd, runId, taskId, { verdict, evidence = [] }) {
     });
     return { task, ready: readyTasks(run), runStatus: run.status };
   });
+  return normalizedVerdict === "pass" ? withFileLock(integrationLockPath(cwd), verify) : verify();
 }
 
 export function recordTaskDisposition(
@@ -3813,6 +3896,7 @@ export function recordIntegrationDiagnostic(
     if (attemptId && attempt.id !== attemptId) {
       throw new Error(`Task "${task.id}" moved on from attempt "${attemptId}".`);
     }
+    if (details.previewId && !currentConflictPreview(cwd, run, task, details.previewId)) return null;
     const diagnostic = appendAttemptDiagnostic(attempt, {
       type: `integration_${kind}`,
       reasonCode,
@@ -3830,6 +3914,21 @@ export function recordIntegrationDiagnostic(
     });
     return { task, diagnostic, runStatus: run.status };
   });
+}
+
+function currentConflictPreview(cwd, run, task, previewId) {
+  const attempt = currentAttempt(task);
+  const preview = (run.previews ?? []).findLast((entry) => entry.taskId === task.id && entry.attemptId === attempt.id);
+  if (preview?.id !== previewId || preview.reasonCode !== "integration_conflict" ||
+      preview.mayBeRunning || preview.planRevision !== run.planRevision || preview.targetHead !== run.repository.integrationHead ||
+      preview.targetHead !== headSha(cwd)) return false;
+  try {
+    const inspection = inspectTaskWorktree(task, attempt, { cwd });
+    return inspection.ready && inspection.head === preview.candidateHead &&
+      JSON.stringify(inspection.commits) === JSON.stringify(preview.commits);
+  } catch {
+    return false;
+  }
 }
 
 export function configureRunGuidance(
@@ -3929,7 +4028,7 @@ export function retryTask(cwd, runId, taskId, { note = null, fresh = false, conf
   const id = assertId(runId, "run");
   const filePath = runFile(cwd, id);
   const correction = String(note ?? "").trim();
-  return withFileLock(filePath, () => {
+  const retry = () => withFileLock(filePath, () => {
     const run = loadRun(cwd, id);
     const task = requireTask(run, taskId);
     // A cancelled run stays cancelled, so work retried in it could complete and
@@ -3942,6 +4041,10 @@ export function retryTask(cwd, runId, taskId, { note = null, fresh = false, conf
       const diagnostic = attempt.diagnostics?.at(-1);
       if (task.status !== "reported" || diagnostic?.reasonCode !== "integration_conflict") {
         throw new Error("Conflict retry requires a reported attempt with a recorded integration conflict.");
+      }
+      integrationActivity(cwd, run);
+      if (diagnostic.details?.previewId && !currentConflictPreview(cwd, run, task, diagnostic.details.previewId)) {
+        throw new Error(`The preview conflict is stale. Run orch run preview ${run.id} ${task.id} again.`);
       }
       if (!correction) throw new Error("Conflict retry requires --note explaining what to preserve and redo.");
       const outcome = assignAttemptOutcome(attempt, outcomeInput("integration_failed", "replan", "integration_conflict", {
@@ -4029,6 +4132,7 @@ export function retryTask(cwd, runId, taskId, { note = null, fresh = false, conf
       retryPlan: { ...task.pendingRetry, warmFailures, escalationAdvised: warmFailures >= 2 }
     };
   });
+  return conflict ? withFileLock(integrationLockPath(cwd), retry) : retry();
 }
 
 const CLEANABLE_TASK_STATUSES = new Set(["completed", "failed", "blocked", "cancelled"]);
@@ -4307,7 +4411,7 @@ export function runDiagnostics(cwd, run) {
       const preview = run.previews?.findLast((entry) => entry.taskId === task.id && entry.attemptId === attempt?.id);
       if (preview?.status === "failed") {
         reason = `combined preview failed (${preview.id}); prior evidence is preserved`;
-        next = preview.reasonCode === "integration_conflict"
+        next = preview.reasonCode === "integration_conflict" && currentConflictPreview(cwd, run, task, preview.id)
           ? `Inspect the conflicting paths, then orch run retry ${run.id} ${task.id} --conflict --note "<what to preserve and redo>"`
           : preview.regression?.next ?? "Inspect the preview's checks/error, correct the candidate, and rerun checks and preview before integration.";
       }
@@ -4385,9 +4489,10 @@ export function finalizeRun(
     throw new Error("Final verification requires at least one evidence item.");
   }
   const filePath = runFile(cwd, id);
-  return withFileLock(filePath, () => {
+  return withFileLock(integrationLockPath(cwd), () => withFileLock(filePath, () => {
     const run = loadRun(cwd, id);
     assertNoPendingIntegration(run);
+    integrationActivity(cwd, run);
     const tasks = Object.values(run.tasks);
     if (!tasks.length || !tasks.every((task) => task.status === "completed")) {
       const open = tasks.filter((task) => task.status !== "completed").map((task) => `${task.id} (${task.status})`);
@@ -4436,7 +4541,7 @@ export function finalizeRun(
       finalization: run.finalization
     });
     return run;
-  });
+  }));
 }
 
 export function addCheckpoint(
@@ -4691,6 +4796,8 @@ ${renderList(guidanceItems)}
 - scope granted to this task:
 ${renderList(grants)}` : ""}
 - objective: ${task.objective}
+- task constraints:
+${renderList(task.constraints ?? [])}
 - latest worker: ${workerHandle || "not dispatched"}
 - result: ${task.result?.summary || "none"}${task.kind !== "write" && task.status === "reported" ? `\n- review freshness: ${reviewFreshness(cwd, task, { quick: true }).reason}` : ""}
 - confidence: ${structured?.confidence || task.result?.fields?.confidence || "not reported"}

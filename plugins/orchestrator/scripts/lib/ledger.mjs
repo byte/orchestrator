@@ -49,12 +49,14 @@ export function parseLedger(text) {
 // Optional metadata stays on the bullet so old readers still see normal dated
 // Markdown, and hand-written entries never need a migration or sidecar store.
 export function parseLedgerEntry(entry) {
-  const match = /^(.*?)\s+<!-- orch-ledger:(\{.*\}) -->$/.exec(entry);
+  const marker = "<!-- orch-ledger:";
+  const start = entry.lastIndexOf(marker);
+  const match = start <= 0 || !/\s/.test(entry[start - 1]) ? null : /^<!-- orch-ledger:(\{.*\}) -->$/.exec(entry.slice(start));
   if (match) {
     try {
-      const metadata = JSON.parse(match[2]);
+      const metadata = JSON.parse(match[1]);
       if (metadata.version === 1 && typeof metadata.id === "string") {
-        return { text: match[1], metadata };
+        return { text: entry.slice(0, start).trimEnd(), metadata };
       }
     } catch {
       // A malformed or future annotation is plain text, never silently hidden.
@@ -95,7 +97,9 @@ export function addLedgerEntry(cwd, section, text, options = {}) {
     throw new Error("A ledger entry must be a single line.");
   }
 
-  const metadata = metadataOptions(options);
+  // Plain text that looks like an annotation needs an explicit unscoped
+  // suffix so only the metadata written by this command is interpreted.
+  const metadata = metadataOptions(options) ?? (body.includes("<!-- orch-ledger:") ? { version: 1, id: randomUUID() } : null);
   const stamped = annotatedEntry(`(${new Date().toISOString().slice(0, 10)}) ${body}`, metadata);
   const result = { section: target, entry: stamped, ...(metadata ? { id: metadata.id, metadata } : {}) };
   const existing = readLedger(cwd);

@@ -21,7 +21,7 @@ function candidates({ conflict = false } = {}) {
   runCli(root, ["init"]);
   write(root, ".gitignore", "node_modules/\n");
   write(root, "setup.cjs", "const fs=require('fs');fs.mkdirSync('node_modules');fs.writeFileSync('node_modules/ready','ready')");
-  for (const id of ["a", "b"]) write(root, `${id}.json`, "1\n");
+  for (const id of ["a", "b"]) write(root, `${id}.json`, conflict && id === "a" ? "1\nkeep\nkeep\nlast\n" : "1\n");
   addLane(root, "work", { scope: ["*.json"],
     setup: { argv: [process.execPath, "setup.cjs"], inputs: ["setup.cjs"] },
     checks: [{ id: "combined", argv: [process.execPath, "-e", "const fs=require('fs');if(!fs.existsSync('node_modules/ready'))process.exit(8);if(+fs.readFileSync('a.json')===2&&+fs.readFileSync('b.json')===2)process.exit(5)"] }]
@@ -38,7 +38,8 @@ function candidates({ conflict = false } = {}) {
     const run = loadRun(root, "preview"), task = run.tasks[id], attempt = task.attempts.at(-1);
     const worktree = createTaskWorktree(root, run, task, attempt);
     prepareTaskWorktree(root, run, worktree, options);
-    write(worktree.path, file(id), id === "b" && conflict ? "3\n" : "2\n");
+    const value = id === "b" && conflict ? "3\n" : "2\n";
+    write(worktree.path, file(id), conflict ? value + "keep\nkeep\nlast\n" : value);
     git(worktree.path, ["add", "-A"]);
     git(worktree.path, ["commit", "-qm", `candidate ${id}`]);
     attachExecution(root, "preview", id, { attemptId: dispatch.attemptId, worktree, runner: null });
@@ -153,4 +154,67 @@ test("a conflict a required preview finds is recorded on the attempt, so a confl
   const retried = runCli(root, ["run", "retry", "preview", "b", "--conflict", "--note", "Keep a's value; redo b on the new head", "--json"]);
   assert.equal(retried.code, 0, retried.stderr);
   assert.equal(loadRun(root, "preview").tasks.b.status, "pending");
+});
+
+test("a passing candidate with a newer preview cannot be retried on its old conflict", () => {
+  const root = candidates({ conflict: true });
+  assert.equal(previewRunTask(root, "preview", "a", options).passed, true);
+  integrateRunTask(root, "preview", "a", evidence);
+  assert.equal(previewRunTask(root, "preview", "b", options).conflictRecorded, true);
+  const { path: worktree } = loadRun(root, "preview").tasks.b.attempts.at(-1).worktree;
+  write(worktree, "a.json", "1\nkeep\nkeep\nnew last line\n");
+  git(worktree, ["add", "a.json"]);
+  git(worktree, ["commit", "--amend", "--no-edit", "--quiet"]);
+  assert.equal(previewRunTask(root, "preview", "b", options).passed, true);
+  const retried = runCli(root, ["run", "retry", "preview", "b", "--conflict", "--note", "Use latest result"]);
+  assert.equal(retried.code, 1);
+  assert.match(retried.stderr, /preview conflict is stale/);
+  assert.equal(loadRun(root, "preview").tasks.b.status, "reported");
+});
+
+test("a successful check cannot certify a checkout that rolled back an overlapping integration", () => {
+  const root = makeRepo();
+  repos.push(root);
+  runCli(root, ["init"]);
+  addLane(root, "writes", { scope: ["*.txt"] });
+  createRun(root, { id: "writes", lane: "writes", objective: "Land changes", workerModel: "sol", reasoningEffort: "high" });
+  replacePlan(root, "writes", [
+    { id: "first", title: "First", objective: "Edit seed", scope: ["seed.txt"], acceptance: ["Reviewed"] },
+    { id: "second", title: "Second", objective: "Edit files", scope: ["*.txt"], acceptance: ["Reviewed"] }
+  ]);
+  checkpointPlan(root, "writes");
+  for (const id of ["first", "second"]) {
+    const dispatch = claimTask(root, "writes", id);
+    const run = loadRun(root, "writes"), task = run.tasks[id], attempt = task.attempts.at(-1);
+    const worktree = createTaskWorktree(root, run, task, attempt);
+    if (id === "second") {
+      write(worktree.path, "partial.txt", "first commit of the second task");
+      git(worktree.path, ["add", "partial.txt"]);
+      git(worktree.path, ["commit", "-qm", "first pick"]);
+    }
+    write(worktree.path, "seed.txt", `different content from ${id}\n`);
+    git(worktree.path, ["add", "seed.txt"]);
+    git(worktree.path, ["commit", "-qm", "change seed"]);
+    attachExecution(root, "writes", id, { attemptId: dispatch.attemptId, worktree, runner: null });
+    recordTaskResult(root, "writes", id, { attemptId: dispatch.attemptId, resultText: JSON.stringify({
+      summary: "done", files_touched: id === "second" ? ["partial.txt", "seed.txt"] : ["seed.txt"],
+      tests: [], decisions: [], assumptions: [], blockers: [], confidence: "high"
+    }) });
+  }
+  integrateRunTask(root, "writes", "first", evidence);
+  const head = git(root, ["rev-parse", "HEAD"]);
+  const runs = new URL("../plugins/orchestrator/scripts/lib/runs.mjs", import.meta.url).href;
+  addLane(root, "observer", { checks: [{ id: "combined", argv: [process.execPath, "--input-type=module", "-e", `
+    import assert from 'node:assert/strict';
+    import { integrateRunTask } from ${JSON.stringify(runs)};
+    assert.throws(() => integrateRunTask(process.cwd(), 'writes', 'second', {evidence:['Reviewed changes']}), /Integration conflict/);
+  `] }] });
+  createRun(root, { id: "observer", lane: "observer", objective: "Check", workerModel: "sol", reasoningEffort: "high" });
+  replacePlan(root, "observer", [{ id: "observe", kind: "read", title: "Observe", objective: "Observe", acceptance: ["Reviewed"] }]);
+  const [receipt] = runChecks(root, "observer", null, options);
+  assert.equal(receipt.exitCode, 0, receipt.stderr?.text);
+  assert.equal(git(root, ["rev-parse", "HEAD"]), head);
+  assert.equal(fs.existsSync(path.join(root, "partial.txt")), false);
+  assert.equal(receipt.changedDuringCheck, true);
+  assert.equal(receipt.passed, false);
 });

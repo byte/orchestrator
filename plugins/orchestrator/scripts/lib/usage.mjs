@@ -164,14 +164,14 @@ export function attemptUsage(attempt, { home = codexHome(), nowMs = Date.now(), 
   // A worker's last token_count can land just after the orchestrator records
   // the attempt as finished; a minute of slack keeps it, but never past the
   // start of the next attempt, which may resume the same thread.
-  const endMs = Math.min(toMs + 60_000, untilMs);
+  const endMs = toMs + 60_000;
   let before = null;
   let last = null;
   const inWindow = [];
   for (const event of events) {
     if (event.atMs < fromMs) {
       if (event.total) before = event.total;
-    } else if (event.atMs <= endMs) {
+    } else if (event.atMs <= endMs && event.atMs < untilMs) {
       inWindow.push(event);
       if (event.total) last = event.total;
     }
@@ -204,7 +204,9 @@ export function runUsage(run, { home = codexHome(), nowMs = Date.now() } = {}) {
     const list = task.attempts ?? [];
     for (const [index, attempt] of list.entries()) {
       if (!attempt.startedAt && !attempt.threadId) continue;
-      const next = list.slice(index + 1).map((later) => Date.parse(later.startedAt ?? later.claimedAt ?? ""))
+      const next = list.slice(index + 1).filter((later) => attempt.threadId && (later.threadId === attempt.threadId ||
+        (!later.threadId && ["dispatching", "running"].includes(later.status) && later.retry?.resumeThreadId === attempt.threadId)))
+        .map((later) => Date.parse(later.startedAt ?? later.claimedAt ?? ""))
         .find(Number.isFinite);
       const usage = attemptUsage(attempt, { home, nowMs, untilMs: next ?? Infinity });
       attempts.push({

@@ -147,9 +147,10 @@ from Codex's home directory. Symlink roots/ancestors are rejected and nested
 links are counted without following them. Scratch requires the existing
 `orch-worker-*` naming and owner-marker relationship to a status file beneath a
 saved attempt; unrecorded scratch is not guessed from the temp directory.
-Worktrees must be beneath this run's owned local worktree/preview root. Git
-inspection resolves supervisor registration rather than trusting worker `.git`
-pointers, disables optional index writes, and uses hardened worktree settings.
+Worktrees must be beneath this run's owned local worktree/preview root and match
+the saved checkout and supervisor Git registration. Git inspection uses the
+supervisor registration, disables optional index writes, and uses hardened
+worktree settings.
 
 Eligibility is conservative advice, **not permission to delete**. Finished or
 retired tasks still retain dirty worktrees, live workers, interrupted/uncertain
@@ -157,9 +158,9 @@ setup or previews, missing runner evidence, and pending integrations. Reused
 live PIDs are conservatively retained. Existing `run cleanup` remains the only
 cleanup operation and rechecks under its own locks; it may differ as state
 changes. The inventory never invokes its destructive callbacks or
-`--release-uncertain`. Orphans without authoritative saved state, missing paths,
-unreadable trees, future schemas, and unproven ownership are unknown/retained,
-not reclaimed. Sizes are logical file lengths (not allocated disk blocks), omit
+`--release-uncertain`. Removed paths are omitted. Orphans without authoritative
+saved state, unreadable trees, future schemas, and unproven ownership are retained
+or reported as unavailable. Sizes are logical file lengths (not allocated disk blocks) and omit
 symlink targets and supervisor Git object storage, and are a best-effort
 concurrent snapshot, not an atomic quota/accounting or adversarial filesystem
 race guarantee.

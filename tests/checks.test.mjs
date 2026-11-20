@@ -1,8 +1,12 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
+import { setTimeout as delay } from "node:timers/promises";
 import { after, test } from "node:test";
 
 import { addLane } from "../plugins/orchestrator/scripts/lib/lanes.mjs";
-import { createRun, replacePlan, claimTask, recordTaskResult, runChecks, verifyTask, finalizeRun } from "../plugins/orchestrator/scripts/lib/runs.mjs";
+import { createRun, replacePlan, claimTask, loadRun, recordTaskResult, runChecks, verifyTask, finalizeRun } from "../plugins/orchestrator/scripts/lib/runs.mjs";
 import { checkpointPlan, cleanup, makeRepo, runCli, write } from "./helpers.mjs";
 
 const repos = [];
@@ -42,6 +46,45 @@ test("required receipts cannot be replaced by worker claims and expire on dirty 
   assert.throws(() => finalizeRun(root, "checks", { verdict: "pass", summary: "Reviewed", evidence: ["Manual review"] }), /missing, failed, or stale/);
   runChecks(root, "checks", null, { codexCommand });
   assert.equal(finalizeRun(root, "checks", { verdict: "pass", summary: "Reviewed", evidence: ["Manual review and executed test"] }).status, "completed");
+});
+
+test("an earlier check finishing late cannot hide a newer passing receipt", async (t) => {
+  const root = reported([process.execPath, "-e", "process.exit(0)"]);
+  const runs = new URL("../plugins/orchestrator/scripts/lib/runs.mjs", import.meta.url).href;
+  const oldCommand = [process.execPath, "-e", `
+    const fs = require('node:fs');
+    fs.writeFileSync('.orchestrator/local/check-started', '');
+    const timer = setInterval(() => {
+      if (fs.existsSync('.orchestrator/local/check-release')) { clearInterval(timer); process.exitCode = 1; }
+    }, 20);
+    setTimeout(() => process.exit(2), 10000).unref();
+  `, "--"];
+  const old = spawn(process.execPath, ["--input-type=module", "-e", `
+    import { runChecks } from ${JSON.stringify(runs)};
+    const [receipt] = runChecks(process.cwd(), 'checks', 'review', { codexCommand: ${JSON.stringify(oldCommand)} });
+    process.exitCode = receipt.exitCode === 1 ? 0 : 2;
+  `], { cwd: root, stdio: "inherit" });
+  const oldExit = once(old, "exit");
+  t.after(() => write(root, ".orchestrator/local/check-release", ""));
+  const started = `${root}/.orchestrator/local/check-started`;
+  const deadline = Date.now() + 10000;
+  while (!fs.existsSync(started) && Date.now() < deadline) await delay(20);
+  assert.ok(fs.existsSync(started), "older check began executing");
+  assert.equal(runChecks(root, "checks", "review", { codexCommand })[0].passed, true);
+  write(root, ".orchestrator/local/check-release", "");
+  assert.deepEqual(await oldExit, [0, null]);
+  assert.equal(loadRun(root, "checks").checkReceipts.at(-1).passed, false, "failed receipt arrived last");
+  const accepted = verifyTask(root, "checks", "review", { verdict: "pass", evidence: ["Latest check passed"] });
+  assert.equal(accepted.task.status, "completed");
+});
+
+test("a check launch error is recorded separately from checkout fingerprint errors", () => {
+  const root = reported(["orchestrator-check-command-that-does-not-exist"]);
+  const [receipt] = runChecks(root, "checks", "review", { codexCommand });
+  assert.equal(receipt.passed, false);
+  assert.match(receipt.error, /was not found in absolute PATH/);
+  assert.equal(receipt.changedDuringCheck, false);
+  assert.equal(receipt.fingerprintError, undefined);
 });
 
 test("nonzero and timed-out checks retain failed execution receipts", () => {

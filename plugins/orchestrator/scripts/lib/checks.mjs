@@ -1,12 +1,11 @@
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-import { changedFiles, headSha, SUPERVISOR_GIT_ARGS } from "./git.mjs";
-import { execGit, resolveExecutable, signalProcessGroup } from "./exec.mjs";
+import { changedFiles, gitlinks, headSha, SUPERVISOR_GIT_ARGS } from "./git.mjs";
+import { execGit, resolveExecutable, signalProcessGroup, tempDirectoryOutside } from "./exec.mjs";
 import { matchesScope } from "./glob.mjs";
 
 export function normalizeChecks(checks = []) {
@@ -51,25 +50,72 @@ export function normalizeSetup(setup) {
   return { ...normalizeCommand(setup), inputs: [...new Set(setup.inputs)].sort(), network: setup.network ?? false };
 }
 
-/** HEAD plus dirty source contents, never worker prose, staging state, or just path names. */
 /**
  * HEAD plus dirty source contents, never worker prose, staging state, or just
  * path names. With `contents: false` it hashes each file's stat identity
  * (mode, size, mtime, inode) instead of reading it: a cheap first look whose
  * match means "unchanged" in practice, while a mismatch needs the full hash.
  */
-export function checkoutFingerprint(cwd, { gitDir = null, scope = null, files = null, contents = true, depth = 0 } = {}) {
+export function checkoutFingerprint(cwd, { gitDir = null, scope = null, files = null, contents = true, links = null } = {}) {
   const hash = createHash("sha256");
+  const root = fs.realpathSync(cwd);
   if (!files) hash.update(headSha(cwd, gitDir ? { gitDir } : {}) ?? "no-head");
-  for (const file of files ?? changedFiles(cwd, { gitDir })) {
+  links ??= files ? new Map() : gitlinks(cwd, { gitDir });
+  const modules = links.size && !gitDir
+    ? path.resolve(root, execGit(["rev-parse", "--git-common-dir"], { cwd: root }).trim(), "modules")
+    : null;
+  for (const file of files ?? [...new Set([...changedFiles(cwd, { gitDir, ignoreSubmoduleDirt: true }), ...links.keys()])].sort()) {
     if (scope && !scope(file)) continue;
     hash.update(JSON.stringify(file));
-    hashPath(hash, path.join(cwd, file), { contents, depth });
+    if (links.has(file)) hash.update(links.get(file));
+    const target = path.join(root, file);
+    try {
+      if (fs.realpathSync(path.dirname(target)) !== path.dirname(target)) {
+        hash.update("aliased-parent");
+        continue;
+      }
+    } catch (error) {
+      if (!["ENOENT", "ENOTDIR", "ELOOP"].includes(error.code)) throw error;
+      hash.update("missing-parent");
+      continue;
+    }
+    hashPath(hash, target, contents);
+    if (modules && links.has(file)) hashRegisteredSubmodule(hash, target, modules, contents);
   }
   return hash.digest("hex");
 }
 
-function hashPath(hash, target, { contents, depth }) {
+function hashRegisteredSubmodule(hash, target, modules, contents) {
+  const pointer = path.join(target, ".git");
+  let fd;
+  try {
+    if (!fs.lstatSync(target).isDirectory()) return;
+    fd = fs.openSync(pointer, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK | fs.constants.O_NOFOLLOW);
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile() || stat.size > 4096) return;
+    const buffer = Buffer.alloc(4096);
+    const text = buffer.toString("utf8", 0, fs.readSync(fd, buffer));
+    const match = /^gitdir: ([^\r\n]+)\r?\n?$/.exec(text);
+    if (!match) return;
+    const directory = path.resolve(target, match[1]);
+    // Follow only registrations inside the supervisor's own module storage.
+    if (!directory.startsWith(`${modules}${path.sep}`) || fs.realpathSync(directory) !== directory) return;
+    hashMetadata(hash, directory, contents);
+  } catch (error) {
+    if (!["ENOENT", "ENOTDIR", "ELOOP"].includes(error.code)) throw error;
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+  }
+}
+
+function hashMetadata(hash, directory, contents) {
+  for (const name of ["HEAD", "packed-refs", "refs"]) {
+    hash.update(JSON.stringify(name));
+    hashPath(hash, path.join(directory, name), contents);
+  }
+}
+
+function hashPath(hash, target, contents) {
   let stat;
   try { stat = fs.lstatSync(target); } catch (error) {
     if (error.code !== "ENOENT") throw error;
@@ -77,15 +123,23 @@ function hashPath(hash, target, { contents, depth }) {
     return;
   }
   hash.update(String(stat.mode));
-  hash.update(`:${stat.size}:`);
   if (stat.isSymbolicLink()) {
-    hash.update(fs.readlinkSync(target));
+    hash.update(JSON.stringify(fs.readlinkSync(target)));
     return;
   }
   if (stat.isDirectory()) {
-    // Git lists a submodule (or a nested repository) as one path. Hash its
-    // own HEAD and dirty contents; an uninitialized one is an empty directory.
-    hash.update(`dir:${nestedRepositoryFingerprint(target, { contents, depth })}`);
+    // Git reports a nested checkout as one path. Read its filesystem view
+    // directly: neither its Git configuration nor a pointer to external
+    // metadata is trusted. For an embedded .git directory, include its HEAD
+    // and refs without walking the object database.
+    if (path.basename(target) === ".git") hashMetadata(hash, target, contents);
+    else {
+      for (const name of fs.readdirSync(target).sort()) {
+        hash.update(JSON.stringify(name));
+        hashPath(hash, path.join(target, name), contents);
+      }
+    }
+    hash.update("end-directory");
     return;
   }
   if (!stat.isFile()) {
@@ -94,9 +148,10 @@ function hashPath(hash, target, { contents, depth }) {
     return;
   }
   if (!contents) {
-    hash.update(`:${stat.mtimeMs}:${stat.ino}`);
+    hash.update(`:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}:${stat.ino}`);
     return;
   }
+  hash.update(`:${stat.size}:`);
   // O_NONBLOCK avoids blocking on a FIFO swapped in between lstat and open.
   // Never follow a worker-planted symlink while collecting evidence outside it.
   const fd = fs.openSync(target, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK | fs.constants.O_NOFOLLOW);
@@ -111,20 +166,10 @@ function hashPath(hash, target, { contents, depth }) {
   } finally { fs.closeSync(fd); }
 }
 
-function nestedRepositoryFingerprint(target, { contents, depth }) {
-  if (!fs.existsSync(path.join(target, ".git"))) return "no-repository";
-  // Bounded: a submodule of a submodule is hashed, a deeper chain only by name.
-  if (depth >= 3) return "nested-too-deep";
-  try {
-    return checkoutFingerprint(target, { contents, depth: depth + 1 });
-  } catch (error) {
-    return `unreadable:${error.message}`;
-  }
-}
-
-function reviewFiles(cwd, scope) {
+function reviewFiles(cwd, scope, links) {
   const files = execGit([...SUPERVISOR_GIT_ARGS, "ls-files", "--cached", "--others", "--exclude-standard", "-z"], { cwd })
-    .split("\0").filter((file) => file && !file.startsWith(".orchestrator/") && (!scope.length || matchesScope(file, scope)));
+    .split("\0").filter((file) => file && !file.startsWith(".orchestrator/") &&
+      (!scope.length || matchesScope(file, scope, { directory: links.has(file) })));
   return [...new Set(files)].sort();
 }
 
@@ -133,13 +178,14 @@ function reviewFiles(cwd, scope) {
  * files. `contents: false` gives the cheap stat identity (see checkoutFingerprint).
  */
 export function reviewFingerprint(cwd, scope = [], { contents = true } = {}) {
-  return checkoutFingerprint(cwd, { files: reviewFiles(cwd, scope), contents });
+  const links = gitlinks(cwd);
+  return checkoutFingerprint(cwd, { files: reviewFiles(cwd, scope, links), contents, links });
 }
 
 /** Execute a trusted argv inside Codex's sandbox, without invoking a model. */
 export function executeCheck(cwd, definition, { codexCommand = ["codex"], writable = false, network = false } = {}) {
   const command = normalizeCommand(definition);
-  const directory = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "orch-check-")));
+  const directory = fs.mkdtempSync(path.join(tempDirectoryOutside(cwd), "orch-check-"));
   const profile = `orchestrator-check-${randomUUID().replaceAll("-", "")}`;
   const scratch = path.join(directory, "scratch");
   fs.mkdirSync(scratch, { mode: 0o700 });
@@ -149,6 +195,7 @@ export function executeCheck(cwd, definition, { codexCommand = ["codex"], writab
   const stdout = path.join(directory, "stdout"), stderr = path.join(directory, "stderr");
   const resultFile = path.join(directory, "result.json");
   let terminationUncertain = false;
+  let terminationError = null;
   try {
     let result;
     try {
@@ -161,10 +208,14 @@ export function executeCheck(cwd, definition, { codexCommand = ["codex"], writab
         "--", resolveExecutable(command.argv[0], cwd), ...command.argv.slice(1)
       ];
       const specFile = path.join(directory, "command.json");
-      fs.writeFileSync(specFile, JSON.stringify({ argv, stdout, stderr, result: resultFile, maxOutputBytes, ownGroup: true }), { mode: 0o600 });
+      const timeoutMs = Math.max(1, Math.ceil(command.timeoutSeconds * 1000));
+      fs.writeFileSync(specFile, JSON.stringify({
+        argv, stdout, stderr, result: resultFile, maxOutputBytes, ownGroup: true,
+        timeoutMs, deadlineMs: Date.now() + timeoutMs
+      }), { mode: 0o600 });
       result = spawnSync(process.execPath, [fileURLToPath(new URL("../check-child.mjs", import.meta.url)), specFile], {
         cwd, env: { ...process.env, TMPDIR: scratch }, detached: true,
-        timeout: command.timeoutSeconds * 1000,
+        timeout: timeoutMs + 2000,
         killSignal: "SIGKILL", stdio: "ignore"
       });
       if (!result.error) {
@@ -182,7 +233,7 @@ export function executeCheck(cwd, definition, { codexCommand = ["codex"], writab
         signalProcessGroup(result.pid, "SIGKILL");
       } catch (error) {
         terminationUncertain = true;
-        result.error = error;
+        terminationError = error.message;
       }
     }
     const tail = (file, truncated) => {
@@ -193,9 +244,9 @@ export function executeCheck(cwd, definition, { codexCommand = ["codex"], writab
     return {
       argv: command.argv, cwd, startedAt, finishedAt: new Date().toISOString(),
       timeoutSeconds: command.timeoutSeconds, maxOutputBytes, exitCode: result.status,
-      signal: result.signal, error: result.error?.message ?? null,
-      passed: !result.error && result.status === 0,
-      ...(terminationUncertain ? { terminationUncertain: true, processGroup: result.pid, captureDirectory: directory } : {}),
+      signal: result.signal, error: result.error?.message ?? terminationError,
+      passed: !result.error && !terminationUncertain && result.status === 0,
+      ...(terminationUncertain ? { terminationUncertain: true, terminationError, processGroup: result.pid, captureDirectory: directory } : {}),
       sandbox: { writable, network }, stdout: tail(stdout, result.stdoutTruncated), stderr: tail(stderr, result.stderrTruncated)
     };
   } finally {

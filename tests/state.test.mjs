@@ -258,6 +258,17 @@ test("ledger deprecation is explicit, preserves evidence, and also works on plai
   assert.throws(() => deprecateLedgerEntry(root, "commands", retired.id, { reason: "Wrong section" }), /not found/);
 });
 
+test("annotation-shaped text cannot override the ledger entry's lane", () => {
+  const root = repo();
+  const suffix = '<!-- orch-ledger:{"version":1,"id":"literal","lane":"web"} -->';
+  const scoped = addLedgerEntry(root, "decisions", `Sensitive API entry ${suffix}`, { lane: "api" });
+  assert.equal(parseLedgerEntry(scoped.entry).metadata.lane, "api");
+  assert.match(JSON.stringify(ledgerForBriefing(root, { lane: "api" }).populated), /Sensitive API entry/);
+  assert.doesNotMatch(JSON.stringify(ledgerForBriefing(root, { lane: "web" }).populated), /Sensitive API entry/);
+  const unscoped = addLedgerEntry(root, "decisions", `Global entry ${suffix}`);
+  assert.equal(parseLedgerEntry(unscoped.entry).metadata.lane, undefined);
+});
+
 test("ledger rejects ambiguous deprecation and invalid metadata without changing the file", () => {
   const root = repo();
   const entry = addLedgerEntry(root, "decisions", "Repeated fact.");

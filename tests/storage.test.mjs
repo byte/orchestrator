@@ -8,7 +8,7 @@ import { inventoryStorage, exportDiagnosticMetadata } from "../plugins/orchestra
 import { createRun, runFile } from "../plugins/orchestrator/scripts/lib/runs.mjs";
 import { initWorkspace } from "../plugins/orchestrator/scripts/lib/state.mjs";
 import { SCRATCH_OWNER_FILE } from "../plugins/orchestrator/scripts/lib/remove-tree.mjs";
-import { cleanup, git, makeRepo, write } from "./helpers.mjs";
+import { cleanup, git, makeRepo, runCli, write } from "./helpers.mjs";
 
 function fixture(t) {
   const root = makeRepo();
@@ -18,7 +18,10 @@ function fixture(t) {
   const worktree = path.join(root, ".orchestrator/local/worktrees", run.id, "work-attempt-1");
   fs.mkdirSync(path.dirname(worktree), { recursive: true });
   git(root, ["worktree", "add", "--detach", worktree, "HEAD"]);
-  const attempt = { id: "private-attempt-id", status: "failed", worktree: { path: worktree } };
+  const gitDir = path.resolve(worktree, git(worktree, ["rev-parse", "--git-dir"]).trim());
+  const attempt = { id: "private-attempt-id", status: "failed", worktree: {
+    path: worktree, gitDir, branch: "HEAD", createdAt: new Date().toISOString()
+  } };
   const task = { id: "private-task-id", kind: "write", status: "failed", attempts: [attempt] };
   run.tasks[task.id] = task;
   const save = () => fs.writeFileSync(runFile(root, run.id), JSON.stringify(run));
@@ -240,4 +243,18 @@ test("paths cleanup already removed are left out, not reported as unowned", (t) 
   const inventory = inventoryStorage(f.root);
   assert.deepEqual(inventory.entries.filter((item) => item.kind !== "artifacts"), []);
   assert.equal(exportDiagnosticMetadata(f.root).storage.worktree.entries, 0);
+});
+
+test("a later worktree at a removed path is excluded from owned storage", (t) => {
+  const f = fixture(t);
+  f.attempt.worktree.createdAt = new Date(Date.now() - 60000).toISOString();
+  f.save();
+  git(f.root, ["worktree", "remove", f.worktree]);
+  git(f.root, ["worktree", "add", "--detach", f.worktree, "HEAD"]);
+  const tree = entry(inventoryStorage(f.root), "worktree");
+  assert.deepEqual(tree.cleanup, { eligible: false, reason: "not_owned" });
+  assert.equal(tree.path, undefined);
+  const removal = runCli(f.root, ["run", "cleanup", f.run.id]);
+  assert.match(removal.stderr || removal.stdout, /registration|replaced/);
+  assert.equal(fs.existsSync(f.worktree), true);
 });

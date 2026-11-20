@@ -15,7 +15,7 @@ export const SUPERVISOR_GIT_ARGS = ["-c", "core.hooksPath=/dev/null", "-c", "cor
 function git(cwd, args, gitDir = null) {
   return execGit(gitDir ? args : [...SUPERVISOR_GIT_ARGS, ...args], {
     cwd,
-    ...(gitDir ? { env: worktreeGitEnv(cwd, gitDir) } : {})
+    env: { ...(gitDir ? worktreeGitEnv(cwd, gitDir) : process.env), GIT_OPTIONAL_LOCKS: "0" }
   });
 }
 
@@ -129,7 +129,7 @@ const SELF_STATE = /^\.orchestrator\//;
  * Files that differ from HEAD, including untracked ones. Renames are reported as
  * both paths so a moved file never looks like it vanished from scope.
  */
-export function changedFiles(cwd, { gitDir = null } = {}) {
+export function changedFiles(cwd, { gitDir = null, ignoreSubmoduleDirt = false } = {}) {
   const root = gitDir ? cwd : resolveWorkspaceRoot(cwd);
   if (!gitDir && !isGitRepository(root)) {
     return [];
@@ -139,7 +139,8 @@ export function changedFiles(cwd, { gitDir = null } = {}) {
   // silently turn a broken acceptance check into a clean verdict.
   const output = git(
     root,
-    ["status", "--porcelain", "-z", "--untracked-files=all", ...(gitDir ? ["--ignore-submodules=all"] : [])],
+    ["status", "--porcelain", "-z", "--untracked-files=all",
+      ...(gitDir ? ["--ignore-submodules=all"] : ignoreSubmoduleDirt ? ["--ignore-submodules=dirty"] : [])],
     gitDir
   );
   const records = output.split("\0").filter(Boolean);
@@ -169,21 +170,12 @@ export function changedFiles(cwd, { gitDir = null } = {}) {
     // there is invisible from here (`git add -A` skips it too), and cleanup
     // must not delete it unseen. A worker's worktree is created with every
     // submodule directory empty, so whatever is in one is the worker's.
-    const index = git(root, ["ls-files", "--stage", "-z"], gitDir).split("\0");
-    for (const entry of index) {
-      const tab = entry.indexOf("\t");
-      if (entry.startsWith("160000 ") && tab > 0) {
-        const gitlink = entry.slice(tab + 1);
-        let occupied = false;
-        try {
-          const target = path.join(root, gitlink);
-          occupied = !fs.lstatSync(target).isDirectory() || fs.readdirSync(target).length > 0;
-        } catch {
-          // Nothing there.
-        }
-        if (occupied) {
-          files.add(gitlink);
-        }
+    for (const gitlink of gitlinks(root, { gitDir }).keys()) {
+      try {
+        const target = path.join(root, gitlink);
+        if (!fs.lstatSync(target).isDirectory() || fs.readdirSync(target).length > 0) files.add(gitlink);
+      } catch (error) {
+        if (error.code !== "ENOENT") throw error;
       }
     }
   }
@@ -192,6 +184,24 @@ export function changedFiles(cwd, { gitDir = null } = {}) {
   // worktree (gitDir given) every change counts: an uncommitted edit to a
   // tracked .orchestrator/ledger.md there is work that cleanup must not delete.
   return [...files].filter((filePath) => gitDir || !SELF_STATE.test(filePath)).sort();
+}
+
+export function gitlinks(cwd, { gitDir = null } = {}) {
+  const links = new Map();
+  let output;
+  try {
+    output = git(cwd, ["ls-files", "--stage", "-z"], gitDir);
+  } catch (error) {
+    if (!gitDir && !isGitRepository(cwd)) return links;
+    throw error;
+  }
+  for (const entry of output.split("\0")) {
+    const tab = entry.indexOf("\t");
+    if (tab < 0 || !entry.startsWith("160000 ")) continue;
+    const file = entry.slice(tab + 1);
+    links.set(file, (links.get(file) ?? "") + entry.slice(0, tab));
+  }
+  return links;
 }
 
 export function diffStat(cwd) {

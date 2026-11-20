@@ -13,6 +13,24 @@ const manifest = JSON.parse(fs.readFileSync(new URL("../evaluation/cases.json", 
 const bin = path.join(root, "bin");
 const log = path.join(root, "sandbox.jsonl");
 fs.mkdirSync(bin);
+const sandboxFixture = path.join(bin, "sandbox-fixture.cjs");
+fs.writeFileSync(sandboxFixture, `
+const fs = require('node:fs'), net = require('node:net'), path = require('node:path');
+const write = fs.writeFileSync;
+fs.writeFileSync = (file, ...args) => {
+  if (path.basename(file).startsWith('.orch-evaluation-') && path.dirname(file) !== process.env.TMPDIR && !process.env.EVALUATE_TEST_ALLOW_WRITES) {
+    throw Object.assign(new Error('fixture denied write'), { code: 'EACCES' });
+  }
+  return write.call(fs, file, ...args);
+};
+if (!process.env.EVALUATE_TEST_ALLOW_NETWORK) {
+  net.connect = () => {
+    const socket = new net.Socket();
+    queueMicrotask(() => socket.emit('error', Object.assign(new Error('fixture denied network'), { code: 'EACCES' })));
+    return socket;
+  };
+}
+`);
 // Protocol fixture ONLY: runs trusted test-written candidates, not hostile code.
 // This proves executeCheck argv routing and public CLI grading, NOT OS isolation
 // or model quality. There is no CLI bypass flag and no real model invocation.
@@ -24,12 +42,17 @@ if (a[0] !== 'sandbox' || !a.includes('permissions.' + a.find(x => x.startsWith(
 if (!a.some(x => x.endsWith('.extends=":read-only"'))) process.exit(91);
 fs.appendFileSync(process.env.EVALUATE_TEST_LOG, JSON.stringify(a) + '\\n');
 const i = a.indexOf('--');
-const r = spawnSync(a[i+1], a.slice(i+2), {stdio:'inherit'});
+const r = spawnSync(a[i+1], ['--require', process.env.EVALUATE_SANDBOX_FIXTURE, ...a.slice(i+2)], {
+  stdio:'inherit', env:{...process.env, CODEX_SANDBOX_NETWORK_DISABLED:'1'}
+});
 process.exit(r.status ?? 92);
 `, { mode: 0o700 });
 // Extensionless node files are CommonJS outside a package; use explicit ESM.
 fs.writeFileSync(path.join(bin, "package.json"), '{"type":"module"}\n');
-const env = { ...process.env, PATH: `${bin}${path.delimiter}${process.env.PATH}`, EVALUATE_TEST_LOG: log };
+const env = {
+  ...process.env, PATH: `${bin}${path.delimiter}${process.env.PATH}`,
+  EVALUATE_TEST_LOG: log, EVALUATE_SANDBOX_FIXTURE: sandboxFixture
+};
 let counter = 0;
 function run(args, environment = env) {
   const result = spawnSync(process.execPath, [cli, ...args], { cwd: root, env: environment, encoding: "utf8", timeout: 30000, maxBuffer: 131072 });
@@ -163,6 +186,20 @@ test("public grade reports missing sandbox as unavailable, never falls back to h
   assert.equal(fs.existsSync(marker), false);
 });
 
+test("candidate is withheld when the launcher permits writes or network despite its profile", () => {
+  const trial = prepare("localized-bug");
+  metadata(trial);
+  const marker = path.join(root, "candidate-must-not-run");
+  write(trial.workspace, "clamp.mjs", `import fs from 'node:fs'; fs.writeFileSync(${JSON.stringify(marker)}, 'bad');\n${passing["localized-bug"]["clamp.mjs"]}`);
+  for (const setting of ["EVALUATE_TEST_ALLOW_WRITES", "EVALUATE_TEST_ALLOW_NETWORK"]) {
+    const refused = grade(trial, [], { ...env, [setting]: "1" });
+    assert.equal(refused.code, 2, refused.stderr);
+    assert.equal(refused.value.outcome, "unavailable");
+    assert.equal(refused.value.check.sandboxVerified, false);
+    assert.equal(fs.existsSync(marker), false);
+  }
+});
+
 test("public compare permits descriptive matched pairs and rejects mismatched/unknown conditions", () => {
   const leftTrial = prepare("localized-bug");
   const rightTrial = prepare("localized-bug");
@@ -184,6 +221,16 @@ test("public compare permits descriptive matched pairs and rejects mismatched/un
   assert.match(compared.value.interpretation, /Mechanics is not model-quality/);
   assert.equal(grade(rightTrial, ["--out", rightPath]).code, 2, "no receipt overwrite");
   const original = JSON.parse(fs.readFileSync(rightPath));
+  const extra = structuredClone(original);
+  extra.metadata.private = "must not render";
+  extra.metadata.usage.worker.private = "must not render";
+  fs.writeFileSync(rightPath, JSON.stringify(extra));
+  assert.doesNotMatch(run(args).stdout, /must not render/);
+  const learning = path.join(root, ".orchestrator/local/learning");
+  fs.mkdirSync(learning, { recursive: true });
+  const learningAlias = path.join(root, "learning-alias");
+  fs.symlinkSync(learning, learningAlias);
+  assert.match(run([...args, "--out", path.join(learningAlias, "comparison.json")]).stderr, /outside the learning store/);
   const mutations = [
     r => { r.caseId = "independent-parts"; },
     r => { r.suiteDigest = "other"; },
@@ -208,5 +255,5 @@ test("public compare permits descriptive matched pairs and rejects mismatched/un
   const calls = fs.readFileSync(log, "utf8").trim().split("\n").map(JSON.parse);
   assert.ok(calls.length > 0);
   assert.ok(calls.every(argv => argv[0] === "sandbox" && argv.includes("--") && argv.some(arg => arg.endsWith("evaluation/check.mjs"))));
-  assert.equal(fs.existsSync(path.join(root, ".orchestrator")), false, "no learning writes");
+  assert.deepEqual(fs.readdirSync(learning), [], "no learning writes");
 });

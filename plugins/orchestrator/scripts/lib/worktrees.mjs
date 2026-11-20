@@ -68,6 +68,26 @@ function trustedGitDir(worktree, cwd) {
   );
 }
 
+export function registeredWorktreeGitDir(cwd, worktree) {
+  const gitDir = worktreeGitDir(cwd, worktree.path);
+  if (worktree.gitDir && gitDir !== worktree.gitDir) throw new Error("Worktree Git registration changed.");
+  // A later worktree can get the same Git directory name after prune.
+  const registration = directoryIdentity(gitDir);
+  const directory = directoryIdentity(worktree.path);
+  if (worktree.registration) {
+    if (!sameDirectory(registration, worktree.registration) || !sameDirectory(directory, worktree.directory)) {
+      throw new Error("The registered worktree was replaced.");
+    }
+  } else if (!Number.isFinite(Date.parse(worktree.createdAt)) ||
+      Math.floor(Math.max(directory.birthtimeMs, registration.birthtimeMs)) > Date.parse(worktree.createdAt)) {
+    throw new Error("Worktree Git registration cannot be attributed to the saved checkout.");
+  }
+  if (worktree.branch && git(worktree.path, ["rev-parse", "--abbrev-ref", "HEAD"], gitDir) !== worktree.branch) {
+    throw new Error("Worktree branch changed.");
+  }
+  return gitDir;
+}
+
 export class WorktreeOperationError extends Error {
   constructor(message, { reasonCode, kind = "refused", signals = [], details = {} } = {}) {
     super(message);
@@ -180,14 +200,33 @@ export function createTaskWorktree(cwd, run, task, attempt) {
   const branch = branchName(run, task, attempt);
   fs.mkdirSync(path.dirname(target), { recursive: true });
   git(cwd, ["worktree", "add", "-b", branch, target, baseHead], null, process.env, GIT_MUTATION_TIMEOUT_MS);
-  return { path: target, gitDir: worktreeGitDir(cwd, target), branch, baseHead, createdAt: new Date().toISOString() };
+  return worktreeRecord(cwd, target, branch, baseHead);
 }
 
 export function createPreviewWorktree(cwd, run, target) {
   const baseHead = assertLaunchable(cwd, run);
   fs.mkdirSync(path.dirname(target), { recursive: true });
   git(cwd, ["worktree", "add", "--detach", target, baseHead], null, process.env, GIT_MUTATION_TIMEOUT_MS);
-  return { path: target, gitDir: worktreeGitDir(cwd, target), branch: "HEAD", baseHead, createdAt: new Date().toISOString() };
+  return worktreeRecord(cwd, target, "HEAD", baseHead);
+}
+
+function worktreeRecord(cwd, target, branch, baseHead) {
+  const gitDir = worktreeGitDir(cwd, target);
+  return {
+    path: target, gitDir, branch, baseHead, createdAt: new Date().toISOString(),
+    registration: directoryIdentity(gitDir), directory: directoryIdentity(target)
+  };
+}
+
+function directoryIdentity(target) {
+  const stat = fs.lstatSync(target);
+  if (!stat.isDirectory()) throw new Error("Expected a registered worktree directory.");
+  const { dev, ino, birthtimeMs } = stat;
+  return { dev, ino, birthtimeMs };
+}
+
+function sameDirectory(stat, recorded) {
+  return recorded && stat.dev === recorded.dev && stat.ino === recorded.ino && stat.birthtimeMs === recorded.birthtimeMs;
 }
 
 /** Setup runs only in an isolated, pristine tree, never over worker-modified scripts. */
@@ -233,10 +272,11 @@ export function reuseTaskWorktree(cwd, run, previousAttempt) {
       { reasonCode: "worktree_unavailable", kind: "failed", signals: ["worktree_unavailable"] }
     );
   }
-  const gitDir = trustedGitDir(source, cwd);
+  const gitDir = registeredWorktreeGitDir(cwd, source);
   return {
     path: source.path,
     gitDir,
+    ...(source.registration ? { registration: source.registration, directory: source.directory } : {}),
     branch: source.branch,
     baseHead: source.baseHead,
     createdAt: source.createdAt,
@@ -453,8 +493,9 @@ function untrackedInTheWay(cwd, files) {
 }
 
 export function gitOperationInProgress(cwd) {
-  return ["sequencer", "CHERRY_PICK_HEAD", "MERGE_HEAD", "rebase-merge", "rebase-apply"]
-    .some((entry) => fs.existsSync(path.resolve(cwd, git(cwd, ["rev-parse", "--git-path", entry]))));
+  const markers = ["sequencer", "CHERRY_PICK_HEAD", "MERGE_HEAD", "REVERT_HEAD", "rebase-merge", "rebase-apply", "index.lock"];
+  const paths = git(cwd, ["rev-parse", ...markers.flatMap((entry) => ["--git-path", entry])]);
+  return paths.split("\n").some((entry) => fs.existsSync(path.resolve(cwd, entry)));
 }
 
 export function integrateTaskWorktree(cwd, run, task, attempt, {
@@ -543,6 +584,7 @@ export function integrateTaskWorktree(cwd, run, task, attempt, {
     if (error.gitMayBeRunning) throw error;
     stopped = true;
     let conflictingPaths = [];
+    let abortMayBeRunning = false;
     try {
       conflictingPaths = gitRaw(cwd, ["diff", "--name-only", "--diff-filter=U", "-z"]).split("\0").filter(Boolean);
     } catch {
@@ -551,10 +593,11 @@ export function integrateTaskWorktree(cwd, run, task, attempt, {
     try {
       git(cwd, ["cherry-pick", "--abort"], null, process.env, GIT_MUTATION_TIMEOUT_MS);
     } catch (abortError) {
-      if (abortError.gitMayBeRunning) stopped = false;
+      abortMayBeRunning = Boolean(abortError.gitMayBeRunning);
+      if (abortMayBeRunning) stopped = false;
       // Preserve the original cherry-pick error; the caller reports manual recovery.
     }
-    throw new WorktreeOperationError(
+    const conflict = new WorktreeOperationError(
       // Git's advice lines (how to resolve by hand) are noise in a worker briefing.
       `Integration conflict for task "${task.id}": ${String(error.stderr || error.message)
         .split("\n").filter((line) => !line.startsWith("hint:")).join("\n").trim()}`,
@@ -569,6 +612,11 @@ export function integrateTaskWorktree(cwd, run, task, attempt, {
         }
       }
     );
+    if (abortMayBeRunning) {
+      conflict.gitMayBeRunning = true;
+      conflict.message += "\nThe cherry-pick abort may still be running. Preserve the checkout for diagnosis.";
+    }
+    throw conflict;
   } finally {
     if (stopped) afterStop();
   }
@@ -631,7 +679,7 @@ export function detachTaskWorktree(cwd, attempt) {
   if (!worktree?.path || !fs.existsSync(worktree.path) || isSupervisorCheckout(cwd, worktree)) {
     return null;
   }
-  if (changedFiles(worktree.path, { gitDir: trustedGitDir(worktree, cwd) }).length) {
+  if (changedFiles(worktree.path, { gitDir: registeredWorktreeGitDir(cwd, worktree) }).length) {
     const error = new Error(`Refusing to remove dirty worktree ${worktree.path}.`);
     error.code = "WORKTREE_DIRTY";
     throw error;

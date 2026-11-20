@@ -2,7 +2,9 @@
 // executeCheck sandbox, never in the host CLI or this assertion process.
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import net from "node:net";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
@@ -11,6 +13,34 @@ const manifest = JSON.parse(fs.readFileSync(path.join(directory, "cases.json"), 
 const fixture = manifest.cases.find((entry) => entry.id === process.argv[2]);
 assert.ok(fixture, "known trusted case");
 const read = (file) => fs.readFileSync(path.resolve(file), "utf8");
+
+async function verifySandbox(port) {
+  const marker = `.orch-evaluation-${randomUUID()}`;
+  function writable(directory) {
+    const file = path.join(directory, marker);
+    try { fs.writeFileSync(file, "", { flag: "wx" }); }
+    catch (error) {
+      if (["EPERM", "EACCES", "EROFS"].includes(error.code)) return false;
+      throw error;
+    }
+    fs.unlinkSync(file);
+    return true;
+  }
+  if (!Number.isInteger(port) || port < 1 || port > 65535 ||
+      process.env.CODEX_SANDBOX_NETWORK_DISABLED !== "1" ||
+      !writable(process.env.TMPDIR) || writable(process.cwd()) || writable(path.dirname(process.env.TMPDIR))) {
+    return false;
+  }
+  return new Promise((resolve) => {
+    // The host is listening on this port. A refused connection also covers
+    // Linux sandboxes with an isolated network namespace.
+    const socket = net.connect({ host: "127.0.0.1", port });
+    const finish = (isolated) => { socket.destroy(); resolve(isolated); };
+    socket.once("connect", () => finish(false));
+    socket.once("error", (error) => finish(["EPERM", "EACCES", "ECONNREFUSED", "ENETUNREACH"].includes(error.code)));
+    socket.setTimeout(1000, () => finish(false));
+  });
+}
 
 // The parent checks exact output, rather than allowing process.exit(0) in a
 // candidate import to skip assertions. No candidate-controlled test scripts.
@@ -83,11 +113,17 @@ function grade() {
   }
 }
 
-try {
-  grade();
-  console.log(JSON.stringify({ caseId: fixture.id, passed: true }));
-} catch {
-  // Do not echo arbitrary candidate output, paths, secrets, or huge assertions.
-  console.log(JSON.stringify({ caseId: fixture.id, passed: false, reason: "Observable checks failed (including missing files, invalid witnesses, or bounded probe failure)." }));
-  process.exitCode = 1;
+const sandboxVerified = await verifySandbox(Number(process.argv[3])).catch(() => false);
+if (!sandboxVerified) {
+  console.log(JSON.stringify({ caseId: fixture.id, sandboxVerified, reason: "Could not verify read-only filesystem and disabled network. Candidate was not executed." }));
+  process.exitCode = 2;
+} else {
+  try {
+    grade();
+    console.log(JSON.stringify({ caseId: fixture.id, sandboxVerified, passed: true }));
+  } catch {
+    // Do not echo arbitrary candidate output, paths, secrets, or huge assertions.
+    console.log(JSON.stringify({ caseId: fixture.id, sandboxVerified, passed: false, reason: "Observable checks failed (including missing files, invalid witnesses, or bounded probe failure)." }));
+    process.exitCode = 1;
+  }
 }

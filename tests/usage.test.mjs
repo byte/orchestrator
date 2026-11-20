@@ -110,6 +110,7 @@ test("a warm retry inside the slack minute is not counted twice", () => {
   const home = codexHome();
   writeRollout(home, "t-warm", "2026-11-12T09:00:00.000Z", [
     tokenEvent("2026-11-12T09:09:00.000Z", { input: 100, output: 10 }),
+    tokenEvent("2026-11-12T09:10:10.000Z", { input: 200, output: 20 }),
     tokenEvent("2026-11-12T09:10:20.000Z", { input: 300, output: 30 }),
     tokenEvent("2026-11-12T09:20:00.000Z", { input: 700, output: 70 })
   ]);

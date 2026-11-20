@@ -26,17 +26,20 @@ export function dispatchBudgetStatus(run, { nowMs = Date.now(), usage = null } =
 export function schedulingAdvice(run) {
   const tasks = Object.values(run.tasks);
   const pending = tasks.filter((task) => task.status === "pending");
-  const successors = new Map(tasks.map((task) => [task.id, tasks.filter((other) => other.status !== "completed" && other.dependsOn.includes(task.id)).map((other) => other.id)]));
+  const successors = new Map(tasks.map((task) => [task.id, pending.filter((other) => other.dependsOn.includes(task.id))]));
   return pending.filter((task) => task.dependsOn.every((id) => run.tasks[id].status === "completed"))
     .map((task) => {
-      const descendants = new Set();
+      const unlocked = new Set([task.id]);
       const visit = (id) => {
         for (const next of successors.get(id) ?? []) {
-          if (!descendants.has(next)) { descendants.add(next); visit(next); }
+          if (!unlocked.has(next.id) && next.dependsOn.every((dep) => unlocked.has(dep) || run.tasks[dep].status === "completed")) {
+            unlocked.add(next.id);
+            visit(next.id);
+          }
         }
       };
       visit(task.id);
-      return { taskId: task.id, unlocks: descendants.size };
+      return { taskId: task.id, unlocks: unlocked.size - 1 };
     }).sort((left, right) => right.unlocks - left.unlocks || left.taskId.localeCompare(right.taskId));
 }
 
@@ -58,7 +61,8 @@ export function attemptProgress(attempt, nowMs = Date.now()) {
 export function combinedRegression(run, receipt) {
   const earlier = (run.checkReceipts ?? []).filter((entry) => entry.taskId === null && entry.checkId === receipt.checkId && entry.passed &&
     JSON.stringify(entry.definition) === JSON.stringify(receipt.definition) && entry.planRevision === receipt.planRevision &&
-    Date.parse(entry.finishedAt) <= Date.parse(receipt.startedAt)).at(-1);
+    Date.parse(entry.finishedAt) <= Date.parse(receipt.startedAt))
+    .sort((a, b) => (a.order ?? 0) - (b.order ?? 0)).at(-1);
   if (!earlier || earlier.fingerprint === receipt.fingerprint) return null;
   const changes = (receipt.integratedTasks ?? []).filter((task) =>
     !earlier.integratedTasks?.some((entry) => entry.head === task.head));

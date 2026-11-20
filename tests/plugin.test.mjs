@@ -83,6 +83,7 @@ test("a read task runs through the plugin's job commands in the checkout and its
   assert.equal(task.result.structured.summary, "Done through the plugin.");
   const attempt = task.attempts.at(-1);
   assert.match(attempt.threadId, /^thread-plugin-job-/);
+  assert.ok(attempt.runner.lastOutputAt);
   assert.equal(attempt.sandboxFallback.reason, "codex_plugin_executor");
 
   const [queued] = calls("task").filter((entry) => entry.args.includes(fs.realpathSync(root)));

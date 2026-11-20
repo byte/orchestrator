@@ -1,5 +1,6 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
 /** Resolve before changing into a worker tree; relative PATH entries are not trusted. */
@@ -62,6 +63,13 @@ export function signalProcessGroup(pgid, signal) {
 
 let gitExecutable;
 
+export function tempDirectoryOutside(cwd = process.cwd()) {
+  const temp = fs.realpathSync(os.tmpdir());
+  const relative = path.relative(fs.realpathSync(cwd), temp);
+  const outside = relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative);
+  return outside ? temp : fs.realpathSync("/tmp");
+}
+
 /** Bounded Git with file-backed output: descendants cannot keep a capture pipe open. */
 // Read-only Git gets a short deadline: a worker can leave a FIFO that blocks
 // any Git that reads it, and an inspection must then fail, not stall the
@@ -73,9 +81,9 @@ export const GIT_MUTATION_TIMEOUT_MS = 10 * 60 * 1000;
 
 export function execGit(args, { cwd, env = process.env, timeout = GIT_READ_TIMEOUT_MS, detached = true } = {}) {
   gitExecutable ??= resolveExecutable("git");
-  // TMPDIR may point inside the inspected checkout. Capture files must never
-  // become part of Git's own dirt report (macOS/Linux both provide /tmp).
-  const capture = fs.mkdtempSync("/tmp/orch-git-");
+  // Respect the environment's writable temp directory unless it is in the
+  // inspected checkout, where capture files could affect Git's own dirt report.
+  const capture = fs.mkdtempSync(path.join(tempDirectoryOutside(cwd), "orch-git-"));
   const stdoutPath = path.join(capture, "stdout");
   const stderrPath = path.join(capture, "stderr");
   const descriptors = [];
