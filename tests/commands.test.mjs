@@ -127,6 +127,20 @@ test("the run command lets workers ask and limits who may grant scope", () => {
   assert.match(read("skills", "orchestrator-runtime", "SKILL.md"), /run answer <run-id> <task-id>/);
 });
 
+test("the run command dispatches workers, and show requests inspect without a run id", () => {
+  const command = fs.readFileSync(path.join(root, "plugins", "orchestrator", "commands", "run.md"), "utf8");
+  const show = command.slice(command.indexOf("## 0. `show`"), command.indexOf("## 1. Parse and inspect"));
+  assert.ok(show.length > 0, "section 0 precedes section 1");
+  assert.match(show, /Do not create a run, plan, dispatch, or change any state/);
+  for (const row of ["| `show cost` | `run cost <run>` |", "| `show runs` | `run list` |", "`run list --open`"]) {
+    assert.ok(show.includes(row), row);
+  }
+  assert.match(show, /`<run>` is `latest` unless/);
+  assert.match(command, /### Invoking this command is a request to dispatch workers/);
+  assert.match(command, /proceed without workers only on an explicit yes/);
+  assert.match(command, /its first line must say so plainly/);
+});
+
 test("the supervisor waits on a background run wait instead of polling in a loop", () => {
   const read = (...parts) => fs.readFileSync(path.join(root, "plugins", "orchestrator", ...parts), "utf8");
   const command = read("commands", "run.md");

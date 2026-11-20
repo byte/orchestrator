@@ -1,6 +1,6 @@
 ---
 description: Automatically route and manage a Codex worker pool from the Claude Code main thread
-argument-hint: "<what you want done> [lane] [--max-workers <n>] [--model <auto|astra|sol|terra|luna>] [--effort <auto|level>] [--executor <cli|codex-plugin>]"
+argument-hint: "<what you want done> | show <status|cost|runs|workers|routes|lanes|ledger|storage> [run] [lane] [--max-workers <n>] [--model <auto|astra|sol|terra|luna>] [--effort <auto|level>] [--executor <cli|codex-plugin>]"
 allowed-tools: Read, Grep, Glob, Write, Bash(node:*), AskUserQuestion
 ---
 
@@ -12,6 +12,32 @@ integrate the final result. Do not hand supervisory authority to a subagent.
 
 Raw user request:
 $ARGUMENTS
+
+## 0. `show` requests inspect; they never start a run
+
+If the request starts with the word `show` (any case), it is a read-only look at existing runs,
+in the spirit of MySQL's `SHOW`. Do not create a run, plan, dispatch, or change any state, and the
+dispatch rule in section 1 does not apply. Run the matching command and present its output
+briefly in plain words:
+
+| Request | Command |
+| --- | --- |
+| `show`, `show status`, `show run` | `run show <run>` |
+| `show cost` | `run cost <run>` |
+| `show runs` | `run list` |
+| `show open runs`, `show processlist` | `run list --open` |
+| `show workers`, `show tasks` | `run poll <run>` |
+| `show routes` | `run routes` |
+| `show lanes` | `lane list` |
+| `show ledger` | `ledger show` |
+| `show storage` | `storage` |
+
+Each is `node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" <command>`. Users will not remember run ids.
+`<run>` is `latest` unless the rest of the request picks another run: an id or a fragment of at
+least 6 characters (pass it through), or words such as "the PRD review" or "yesterday's" (read
+`run list` and pick the run whose objective and age match; if two match, show both lines and ask).
+Say which run you showed in one line — its objective and age, not only its id. For an unknown
+`show` target, list the supported ones above instead of guessing. After answering, stop.
 
 ## 1. Parse and inspect
 
@@ -56,6 +82,20 @@ telling them to run `lane add` themselves.
 Ask only when an ambiguity would materially change the result or require new authority. Prefer
 proposing a concrete answer to confirm over asking an open question.
 
+### Invoking this command is a request to dispatch workers
+
+The user chose `/orchestrator:run` instead of asking you directly, so the objective is delivered by
+a run with Codex workers. Do not answer it yourself from your own inspection instead of creating a
+run — not because the work looks small, not because you already read the material while planning,
+and not because an earlier run on the same lane or objective exists. Earlier runs are context for
+the briefing, not a substitute: the material may have changed since (compare its last change to
+the run's date), and the user may be asking again precisely to get a fresh pass.
+
+If you judge a run genuinely unnecessary, say so in one line with the reason and ask whether to
+answer directly or dispatch anyway; proceed without workers only on an explicit yes. Your planning
+inspection exists to write good briefings and to verify worker evidence, not to replace it. If any
+final answer was produced without a worker, its first line must say so plainly.
+
 ## 2. Create the durable run
 
 ```bash
@@ -69,7 +109,8 @@ Pass `--max-workers` only when the user gave a worker count; the default pool is
 workers. Append `--model <astra|sol|terra|luna>` or `--effort <level>` only when the user explicitly
 supplied that override. Omitted dimensions remain supervisor-routed. Keep the returned run id,
 and tell the user it once in plain words, with how to come back to it: "Run `<id>`; if this
-session ends, `/orchestrator:resume` picks it up (or `/orchestrator:resume <last 8 characters>`)."
+session ends, `/orchestrator:resume` picks it up (or `/orchestrator:resume <last 8 characters>`).
+`/orchestrator:run show status` or `show cost` looks at it any time."
 
 Append `--executor codex-plugin` only when the user asks for workers to run through the OpenAI
 Codex plugin for Claude Code (`codex@openai-codex`) rather than the Codex CLI directly; the default

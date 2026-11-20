@@ -242,7 +242,18 @@ Resume the same manager after interruption or compaction:
 /orchestrator:resume 729b948c
 ```
 
-With no argument it finds the open run itself, or asks which one when there are several. Every run
+To look at runs without remembering an id, start the request with `show`. It defaults to the
+latest run, or the one your words describe, and never starts workers:
+
+```text
+/orchestrator:run show cost
+/orchestrator:run show status of the PRD review
+/orchestrator:run show runs
+```
+
+`show` also covers `processlist` (open runs), `workers`, `routes`, `lanes`, `ledger`, and `storage`.
+
+With no argument `/orchestrator:resume` finds the open run itself, or asks which one when there are several. Every run
 command also takes the full id, `latest`, or a unique fragment of at least 6 characters such as the id's last 8.
 To see the runs, newest first with status, age, and progress:
 
