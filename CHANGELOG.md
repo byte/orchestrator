@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.10
+
+- `/orchestrator:run` forbids discarding `run collect` output. In a real 0.6.9 run the supervisor ran `run collect ... >/dev/null &` and then printed a 19.5K-character full report file instead of the compact report.
+
 ## 0.6.9
 
 - `run collect <run-id> [--timeout <s>]` waits like `run wait` (same exit codes), then returns in one payload what changed, a compact report for each task that reported, blocked, failed, or paused (summary, confidence, blockers, one clipped line per finding, tests, and the next command), the path of its full report file, what still awaits a decision, what is running, and what has its dependencies met. `/orchestrator:run` uses it in place of wait + poll + show + reading `run resume --json`, which in a real 4-worker review cost about 10 supervisor turns and printed whole reports into the conversation. Run it in the foreground with `--timeout 540` when there is nothing else to do, so the result arrives in the same turn.

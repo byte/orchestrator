@@ -182,6 +182,7 @@ test("run.md stays lean and points at every reference file it relies on", () => 
   assert.ok(command.length < 34000, `run.md is ${command.length} bytes`);
   const pointed = new Set([...command.matchAll(/\$\{CLAUDE_PLUGIN_ROOT\}\/reference\/([\w-]+\.md)/g)].map((match) => match[1]));
   assert.deepEqual([...pointed].sort(), fs.readdirSync(referenceDir).sort());
+  assert.match(command, /Never discard `run collect` output \(no `>\/dev\/null`, no shell `&`\)/);
   assert.match(command, /If the plan has any write task, read `\$\{CLAUDE_PLUGIN_ROOT\}\/reference\/write-tasks\.md`/);
   // Whole-run JSON dumps are not printed into the conversation for routine steps.
   for (const action of ["create", "plan", "checkpoint", "launch", "verify", "finalize", "ready"]) {

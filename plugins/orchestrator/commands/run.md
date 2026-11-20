@@ -527,4 +527,7 @@ the result some percentage better.
 - Never bypass the run state because the manual path seems faster.
 - Wait for workers with one `run collect` (or `run wait`), never with a loop of `run poll` calls or
   sleeps. A worker over its wall-clock limit is stopped only by your explicit `run cancel`.
+- Never discard `run collect` output (no `>/dev/null`, no shell `&`): it is how reports reach you.
+  Read a report through `run collect` or `run result <run-id> <task-id>`, and open a full report
+  file only to spot-check specific findings or from a script that assembles the final report.
 - Never continue from memory alone when `run briefing` or `run recover` can restore exact state.
