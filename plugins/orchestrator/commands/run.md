@@ -101,8 +101,7 @@ final answer was produced without a worker, its first line must say so plainly.
 ```bash
 node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" run create <lane> \
   --objective "<objective>" \
-  --max-workers <n> \
-  --json
+  --max-workers <n>
 ```
 
 Pass `--max-workers` only when the user gave a worker count; the default pool is 5 concurrent
@@ -113,14 +112,9 @@ session ends, `/orchestrator:resume` picks it up (or `/orchestrator:resume <last
 `/orchestrator:run show status` or `show cost` looks at it any time."
 
 Append `--executor codex-plugin` only when the user asks for workers to run through the OpenAI
-Codex plugin for Claude Code (`codex@openai-codex`) rather than the Codex CLI directly; the default
-is `cli`. The plugin path is weaker, and every attempt records how: Codex does not enforce the
-output schema (the report is parsed from the final message, and a malformed one is a contract
-failure), saved Codex approval rules are not ignored, a read worker has no private writable
-`TMPDIR` (recorded as a sandbox fallback, so rerun tests it reports failing), `max` and `ultra`
-effort run at `xhigh` (recorded as `effortStepped`), a read task's retry starts a fresh thread, and a cancel interrupts the turn but cannot stop a
-command already running in the plugin's shared app-server.
-Its jobs also appear in `/codex:status`. A run's executor is fixed when it is created.
+Codex plugin (`codex@openai-codex`); the default is `cli`, and the executor is fixed at creation.
+Its weaker guarantees, which every attempt records, are listed in
+`${CLAUDE_PLUGIN_ROOT}/reference/planning.md`; tell the user them once when they choose it.
 
 ## 3. Plan
 
@@ -150,18 +144,11 @@ Before routing, read what each route actually did in this repository:
 node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" run routes --lane <lane>
 ```
 
-It is a read-only table over local run state: per actual model and effort, the finished attempts
-that reached a worker, first-attempt acceptance, retries, and median duration. A substituted
-attempt counts for the model that ran; a launch Codex rejected as unavailable counts for neither
-model; answered input requests are part of their attempt, but the time paused awaiting an answer
-is not counted in its duration; attempts on retired slugs (`gpt-5.6-sol`,
-`gpt-5.6-terra`, `gpt-6-astra`, `gpt-6.1-sol`) are left out unless you pass `--include-legacy`. Every rate sits next to its counts,
-and no rate is printed below 5 samples, so a cell with two attempts is an anecdote, not a trend.
-`run plan`, `run briefing`, and `run resume` print the same table for the run's lane once it holds
-at least 5 counted attempts. Treat it as evidence, not a rule: it says nothing about tasks unlike
-the ones that produced it. When it changed a route you would otherwise have chosen, cite it in
-`routingReason` (for example, "terra/medium accepted 1/6 first attempts in this lane; routed to
-sol").
+Every rate sits next to its counts, and no rate is printed below 5 samples. Treat it as evidence, not
+a rule. When it changed a route you would otherwise have chosen, cite it in `routingReason`
+(for example, "terra/medium accepted 1/6 first attempts in this lane; routed to sol"). Its exact
+counting rules (substitutions, paused time, `--include-legacy` for retired slugs) are in
+`${CLAUDE_PLUGIN_ROOT}/reference/planning.md`.
 
 Route by the demands of each bounded task:
 
@@ -211,23 +198,10 @@ rejected. The same rule applies to an explicit effort pin. Do not use a weaker r
 maximize concurrency. Every model accepts every effort from `low` through `ultra`; the runtime
 rejects unknown models and unknown efforts.
 
-If Codex rejects a model as unavailable to this account, the runtime does not fail the task. It
-relaunches one rung down the ladder `astra` → `sol` → `terra` → `luna`, keeping the effort, and
-remembers the model as unavailable for the rest of the run so later launches go straight to the
-substitute. The substitution is never silent: it is recorded on the attempt (requested and actual
-model), appended as a run event, and shown by `run poll`, `run resume`, and the supervisor
-briefing. A substituted user pin is flagged as such; tell the user which model actually ran. If no
-rung is left, the task fails with a `model_unavailable` outcome for you to escalate. A task other
-tasks depend on never falls to `luna` (the plan-time leaf rule), unless the run is pinned to it
-or was saved before automatic routing existed. Once its model is known unavailable and nothing
-allowed is left, `run launch` refuses it and `run ready` lists it under `blocked`.
-Only a rejection before the worker did anything counts: an error naming the model after work
-began, or on a resume after `run answer`, is an ordinary failure, and so is one worded as an outage
-("currently unavailable", "try again", "overloaded", a 5xx); retry those rather than re-route.
-That split is inferred from wording: only the ChatGPT-account rejection has been observed. Runs saved by
-0.5.x that route to `gpt-5.6-sol` or `gpt-5.6-terra`, or by 0.6.0–0.6.4 to `gpt-6-astra` or
-`gpt-6.1-sol`, keep those exact slugs and are not substituted; if Codex rejects one, re-route the
-task with `run plan`.
+If Codex rejects a model as unavailable, the runtime relaunches one rung down `astra` → `sol` →
+`terra` → `luna`, keeping the effort, and records the substitution; tell the user when a pinned
+model was overridden. Read `${CLAUDE_PLUGIN_ROOT}/reference/planning.md` when a substitution, a
+`model_unavailable` failure, or a retired slug comes up.
 
 Size tasks by write-surface independence, not to a target count. Split work into separate tasks
 where the pieces own disjoint paths and can be verified on their own; keep it as one task where the
@@ -241,8 +215,7 @@ Write `{"tasks": [...]}` to a temporary JSON file outside the tracked tree, then
 
 ```bash
 node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" run plan <run-id> \
-  --plan-file <temporary-plan-file> \
-  --json
+  --plan-file <temporary-plan-file>
 ```
 
 Then record a checkpoint summarizing the approved plan, model-routing rationale, important
@@ -253,8 +226,7 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" run checkpoint <run-id> \
   --summary "<what this plan does and why>" \
   --decision "<a choice a future supervisor must not silently reverse>" \
   --risk "<what could invalidate this route>" \
-  --next "<the immediate next action>" \
-  --json
+  --next "<the immediate next action>"
 ```
 
 This is not optional bookkeeping. The run record preserves what happened; only the checkpoint
@@ -265,114 +237,73 @@ New runs use their frozen lane contract, not later edits to the lane. Every task
 
 When the contract defines combined checks, run `run check <run-id> --json` after planning and before the first dispatch to save the passing baseline. Repeat it after integrations when diagnosing interactions. Failed receipts preserve the prior passing receipt and intervening integration IDs as suspects, not proof of causality. Inspect the changed code and create one scoped repair with the original failing check as acceptance; do not auto-revert or ask every worker to debug the run.
 
-If the user sets a run budget, record it with `run budget <run-id> --max-attempts <n>`, `--max-elapsed-minutes <n>`, or `--max-worker-tokens <n>` (combinable). These stop new dispatch, not live work. Attempt limits include retired tasks and setup failures. Token counts are delayed and may be incomplete, so they are not an exact spend cap. Explain a reached budget rather than silently increasing or clearing it; revise limits only after the user agrees.
-
-### Optional provisional guidance
-
-Guidance is off by default. If the local learning store contains a supervisor- or user-reviewed
-non-success outcome for this lane, the supervisor may explicitly enable fixed-template retry
-guidance:
-
-```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" run guidance <run-id> \
-  --mode provisional \
-  --json
-```
-
-This can only add a bounded advisory block to a retry briefing. It cannot change model or effort,
-scope, constraints, task state, policy, or supervisor authority, and it never copies objectives,
-evidence, source, or worker prose. Enabling, disabling, or rolling back guidance makes the current
-checkpoint stale; review the policy version and hash, then checkpoint before dispatch. Use
-`--mode off` as the kill switch and `--rollback` to restore the previous exact policy snapshot.
-Leave guidance off when no reviewed typed outcome exists; do not fabricate a source from a worker
-self-report. A single explicit supervisor or user review is enough to enable this provisional
-mode, but it is not a high-confidence or promoted policy; the supervisor must still review the
-policy hash and checkpoint every changed selection before dispatch.
+If the user sets a run budget or the learning store has reviewed outcomes for this lane, read
+`${CLAUDE_PLUGIN_ROOT}/reference/planning.md` for `run budget` and provisional guidance.
 
 For normal in-scope implementation work, approve your own plan and continue. Stop for the user only
 when the plan requires destructive action, an external write, or material scope expansion.
 
 ## 4. Dispatch a wave
 
-`run ready --json` includes advisory counts of dependents each ready task unlocks. Prefer useful dependency progress over filling every slot; reduce simultaneous builds when machine/account limits dominate. Advice never overrides dependencies, checkpoints, scope, or budgets. For a task-level review, `run briefing <run-id> --task <task-id> --json` returns the selected authority, acceptance, interfaces, and briefing byte count. Other task details are explicitly omitted, not waived; use the complete briefing for recovery and run-wide decisions.
-
 Get the ready queue:
 
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" run ready <run-id> --json
+node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" run ready <run-id>
 ```
 
-`tasks` is what can launch now. A task in `blocked` has its dependencies met but cannot launch:
-it overlaps scope granted to another active task (it becomes launchable once that task is
-integrated or cancelled), or its model was rejected as unavailable with no allowed model below it
-(re-route it with `run plan`).
+It lists what can launch now, then any task that has its dependencies met but cannot launch (it
+overlaps scope granted to another active task, or its model is unavailable with nothing allowed
+below it: re-route it with `run plan`), and advisory counts of the dependents each task unlocks.
+Prefer useful dependency progress over filling every slot; advice never overrides dependencies,
+checkpoints, scope, or budgets. `run briefing <run-id> --task <task-id> --json` shows one task's
+authority, acceptance, and briefing size.
 
 Select at most the run's remaining worker capacity. Launch each selected task:
 
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" run launch <run-id> <task-id> --json
+node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" run launch <run-id> <task-id>
 ```
 
-Each launch starts one detached `codex exec` process. A write task gets its own Git worktree; a
-read or verify task runs in the supervisor checkout itself, as it is, uncommitted and untracked
-files included, under a sandbox that cannot write it. Each process gets the
-authoritative briefing, an output schema, the task's exact resolved `--model`, its resolved effort,
-and the least sandbox needed for the task. The selected route, PID, files, worktree, and eventual
-Codex thread id are stored in run state. Launch independent ready tasks without waiting between
-them. A launch response whose `substitution` is not null ran on a different model than the plan
-named; read its notice.
+Each launch starts one detached `codex exec` process with the briefing, an output schema, the
+task's exact model and effort, and the least sandbox it needs; a write task gets its own Git
+worktree, a read or verify task runs in your checkout as it is. Launch independent ready tasks in
+one Bash call, without waiting between them. A launch that prints a substitution notice ran on a
+different model than the plan named.
 
-When the frozen lane has setup, launch provisions the isolated worktree before starting Codex. Inspect a `setup_failed` attempt's worktree receipt, fix the external prerequisite, and use `run retry`; no model call is spent while setup fails. If setup inputs changed after coding, use `run retry --fresh` rather than running the worker's modified script outside its sandbox. Do not copy credentials or dependencies from the user's checkout.
+**If the plan has any write task, read `${CLAUDE_PLUGIN_ROOT}/reference/write-tasks.md` before
+the first write launch.** It covers worktree setup, long-running commands, the clean-checkout
+launch gate, how write workers commit, and review, preview, integration, and conflicts.
 
-**Long commands run in the background.** A write launch on a lane with setup, `run check`, and
-`run preview` execute commands that can take longer than a foreground Bash call allows (10 minutes
-at most). Run each of them as a background Bash command (`run_in_background: true`) and read its
-output when the harness reports it finished; a Bash timeout would kill the command midway. None of
-them holds the run lock while its command runs, so a background `run wait` keeps working
-alongside. If a launch was killed during setup anyway, the next `run wait` or `run poll` records the
-attempt as `setup_failed`; the setup command may still be running in that worktree, so use
-`run retry --fresh`. `run cleanup` preserves such worktrees and previews until it can prove their
-processes have exited; `--release-uncertain` removes them, but only after the user confirms
-nothing is still running there.
-
-A write launch requires a clean checkout on the run's branch with no commits made outside the run.
-It checks before claiming the task, so a refusal leaves the task pending and spends no attempt.
-If the checkout has uncommitted work that is not the run's (`init` and preflight warn about it),
-tell the user and ask them to commit or stash it; read and verify tasks can still launch
-meanwhile. Never work around a refusal by running `codex exec` outside the run: the run then
-loses its waits, structured evidence, verdicts, and recovery. A file a worker must see has to be
-in the checkout for a read task, and committed for a write task, whose worktree contains only
-committed files.
-
-A `read` or `verify` worker cannot write the checkout, has no network, and may not ask to leave
-its sandbox (`approval_policy="never"`, and no saved "always allow" rules via `--ignore-rules`),
-but it can run commands and tests: it gets a private
-writable `TMPDIR`. So a read task's acceptance criteria can require test output. If the attempt
-shows `sandboxFallback` (a `task.sandbox_fallback` event), that profile could not be proven on
-this machine and the worker ran under plain `--sandbox read-only` with no writable temp
-directory; rerun any test it reports as failing yourself. A test skipped inside the sandbox is not
-a pass. `run cleanup` also removes a scratch directory a hard-killed worker left behind.
-
-A `write` worker is locked down the same way and cannot run `git commit` (`.git` is read-only in
-its sandbox). It leaves its changes in the worktree, and its wrapper commits them under the task
-title when it finishes, so the inspection gates still see a commit. A worker that reports
-`failed` with `git add failed` or `git commit failed` left a worktree the wrapper could not
-commit; inspect it before retrying.
+A `read` or `verify` worker cannot write the checkout or reach the network, but it can run
+commands and tests with a private writable `TMPDIR`, so a read task's acceptance can require test
+output. If the attempt shows `sandboxFallback`, it had no writable temp directory: rerun any test
+it reports as failing yourself. A test skipped inside the sandbox is not a pass.
 
 ## 5. Monitor and collect
 
-Do not poll in a loop. After launching a wave, start one blocking wait as a **background** Bash
-command (`run_in_background: true`):
+Do not poll in a loop, and do not stitch together `run wait`, `run poll`, `run show`, and
+`run resume --json` to read results: every extra command is a full supervisor turn. After
+launching a wave, use one command that blocks until a worker changes state and then returns
+everything you need to act:
 
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" run wait <run-id> --json
+node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" run collect <run-id> --timeout 540
 ```
 
-Then carry on with anything that does not depend on the running workers: verifying and
-integrating work that was already reported, answering requests, checkpointing. Claude Code wakes
-you when the background command exits, and `run wait` exits exactly when something needs you. Read
-its output; it is the same payload `run poll` returns, so no second call is needed. The exit code
-says why it returned:
+Its output, in one payload: what changed; for each task that just reported, blocked, failed, or
+paused, a compact report (summary, confidence, blockers, every finding clipped to one line, tests)
+with the path of the full report file and the exact next command; which tasks still await your
+decision; what is still running; and what is ready to launch. Review from the compact report, and
+read the full report file only for the findings you spot-check (Read with an offset, or grep it),
+or hand the files to a script when you assemble a final report. Do not print whole reports into
+the conversation.
+
+When you have nothing else to do, run it in the **foreground** with `--timeout 540`, which stays
+under the 10-minute Bash limit, so its output arrives in the same turn. When you do have
+independent work (verifying earlier reports, answering requests, checkpointing, research), run it
+as a **background** command (`run_in_background: true`) without `--timeout` and read its output
+when Claude Code wakes you. `run collect` uses `run wait` underneath; `run wait <run-id> --json`
+remains available when you need only the raw poll payload. The exit code says why it returned:
 
 - `0` — a worker changed state. Act on every update marked `"changed": true`: `reported` or
   `blocked` (review it, section 6), `failed` or `cancelled`, `needs_input` (answer it, section 6),
@@ -381,13 +312,13 @@ says why it returned:
   `running` update with `overLimit` (see below). Updates without `changed` are context: workers
   still running, and paused workers still awaiting an answer (`awaitingAnswer: true`).
 - `2` — timed out (default 30 minutes, `--timeout <seconds>`) with workers still running and
-  nothing changed. Start another `run wait` if you have nothing else to do.
+  nothing changed. Start another `run collect` if you have nothing else to do.
 - `3` — no worker is running or paused. Dispatch the next ready wave, or finish.
 - `4` — no worker is running and every remaining one is paused on a request. Nothing can change
-  until you answer; `run wait` returns at once rather than blocking on you.
+  until you answer; it returns at once rather than blocking on you.
 
-After handling a wake, start the next `run wait` whenever workers are still running, including
-right after each `run launch` or `run answer`; keep exactly one wait in flight per run. `run wait`
+After handling a wake, start the next `run collect` whenever workers are still running, including
+right after each `run launch` or `run answer`; keep exactly one wait or collect in flight per run. It
 polls once when it starts, so a change that landed while you were busy is returned at once, never
 missed. Use `run poll <run-id> --json` only for a one-off look; it does not block.
 
@@ -407,7 +338,7 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" run resume <run-id> --json
 
 This polls detached workers before returning the complete supervisor briefing, active handles,
 results, checkpoints, provisional-guidance revisions and attempt snapshots, model substitutions,
-and memory. After it, start a background `run wait` again if workers are still running; a wait
+and memory. After it, start `run collect` again if workers are still running; a wait
 started before the interruption may have ended unseen. Polling (by `run wait`, `run poll`, or
 `run resume`) collects finished structured output into the task automatically, and relaunches
 a task whose model Codex rejected as unavailable; a poll update with status `substituted` names
@@ -419,52 +350,10 @@ ask you something and is waiting for the answer described in section 6.
 
 ### Answer worker requests first
 
-A worker no longer has to stop when it needs one adjacent file outside its scope or when its
-objective admits two materially different readings. It returns `needs_input` with a typed request
-instead: a `scope_extension` (exact paths and the reason) or a `question` (the question and the
-options it sees). The task is then `needs_input`: paused, not finished, holding its pool slot, with
-no outcome recorded. Answer it promptly; a paused worker does no work.
-
-```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" run answer <run-id> <task-id> \
-  --grant-scope "<glob>" \
-  --reply "<optional explanation>" \
-  --json
-```
-
-Use exactly one decision: `--grant-scope <glob>` (repeatable, write tasks and scope requests only),
-`--deny`, or `--reply <text>`. A `--reply` may accompany a grant or a denial to explain it. The same
-attempt resumes on the same Codex thread, in the same worktree, on the model and effort the
-attempt is actually using (a substituted model stays substituted) and the task's sandbox. The
-resumed thread receives only your answer; if Codex no longer has the thread it falls back to a
-fresh thread with the full briefing, which carries every answer so far.
-
-Authority over a grant:
-
-- You may grant an extension inside the lane on your own authority when the change is necessary,
-  adjacent, and small. Prefer the narrowest grant that covers the request; a literal path is
-  better than a glob.
-- You must ask the user before granting anything outside the lane. The runtime refuses such a
-  grant until you repeat it with `--user-approved`, which records that the user agreed.
-- A grant belongs to the task, not the lane: the lane's scope and the task's planned scope stay
-  unchanged, and `run inspect` and `run integrate` accept the granted paths for that task only.
-  Everything else out of scope is still refused.
-- The runtime refuses a grant that may overlap the write surface of another task that is running,
-  paused, or reported but not yet integrated. Deny it, narrow it, or wait for that task. The
-  grant stays exclusive afterwards: a task that was pending when it was made cannot launch onto it
-  (`run launch` refuses and names the grant) until the granted task is integrated or cancelled.
-- Deny when the change belongs to another task or would widen the task's purpose; say in
-  `--reply` how the worker should proceed within scope.
-
-Answer a question with `--reply`. Use `--deny` only when you cannot or will not choose; the worker
-is then told to finish only what is unambiguous or report a blocker. If the question exposes a
-genuinely ambiguous objective that the user must settle, ask the user, then reply.
-
-A round trip is not a failed attempt and does not consume a retry: no new attempt is created, no
-outcome is recorded, and learning data later sees the one outcome the attempt ends with. A task
-gets at most 3 answered round trips; a further request is recorded as an ordinary blocker
-(`worker_blocked` / `scope_required` or `ambiguous_objective`) for you to resolve by retry or
-replan.
+A `needs_input` task is paused, holding its pool slot, until you answer. Before answering, read
+`${CLAUDE_PLUGIN_ROOT}/reference/worker-requests.md`: it has the `run answer` forms and who may
+grant what. In short: grant small in-lane extensions yourself, ask the user before anything
+outside the lane, and never grant a surface another active task owns.
 
 ### Review reported work
 
@@ -485,8 +374,7 @@ For read and verification tasks, record the supervisor verdict:
 ```bash
 node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" run verify <run-id> <task-id> \
   --verdict pass \
-  --evidence "<specific check and outcome>" \
-  --json
+  --evidence "<specific check and outcome>"
 ```
 
 Use `--verdict fail` when the evidence is insufficient or the implementation is wrong, and make
@@ -498,73 +386,18 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" run retry <run-id> <task-id> \
   --note "<what the worker must change>"
 ```
 
-A retry is warm by default: when the previous attempt reached a result or a supervisor verdict and
-left a Codex thread id, the next `run launch` resumes that thread on the attempt's own model,
-effort, and sandbox, in the same worktree. Its briefing gains a "Previous attempt" section with the
-outcome, your evidence, your note, and the files the attempt changed. The retry starts cold (a new
-thread, a new worktree, the same "Previous attempt" section) when the previous attempt crashed,
-returned no result, was cancelled, or has no thread id, or when you pass `--fresh`. Use `--fresh`
-when the earlier thread is anchored on a wrong approach you want the worker to drop. After an
-integration conflict the retry still resumes the thread but in a fresh worktree at the integrated
-head, so the worker redoes the change against it. If Codex reports the thread as missing, the
-launch falls back to a fresh thread with the same briefing and records `task.resume_fallback`.
-A route change in a revised plan does not force a cold start; the resumed thread runs on the new
-route. The "Previous attempt" section is ordinary briefing text, separate from the fixed-template
-provisional guidance block in section 3, and does not loosen any guidance restriction.
+A retry is warm by default: it resumes the worker's Codex thread with a "Previous attempt" section
+carrying your evidence and note. Pass `--fresh` when that thread is anchored on a wrong approach.
+When it starts cold instead, and what happens after a conflict or a missing thread, is in
+`${CLAUDE_PLUGIN_ROOT}/reference/planning.md`.
 
 Do not mark a task complete merely because Codex said it was complete.
-
-For write tasks, first inspect the isolated worktree:
-
-```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" run inspect <run-id> <task-id> --json
-```
-
-Require a clean worktree, at least one worker commit, exact agreement between reported and changed
-files, and no paths outside the task's planned scope plus any scope you granted it (`grantedScope`
-in the inspection). After independently confirming tests and acceptance criteria, run `run preview <run-id> <task-id> --json` to check the combined candidate before integration. It is required when the contract has checks. A failed preview preserves the user's branch; inspect its receipt and fix the candidate rather than bypassing it. A later accepted task or candidate edit invalidates the preview. Candidate changes to setup inputs need separate dependency/setup review, not execution of modified scripts with setup permissions. Then integrate it:
-
-```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" run integrate <run-id> <task-id> \
-  --evidence "<specific check and outcome>" \
-  --json
-```
-
-If review finds the work wrong (a failing check, a missed acceptance criterion, a defect you can
-reproduce), reject it instead of integrating:
-
-```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" run verify <run-id> <task-id> \
-  --verdict fail \
-  --evidence "<the input, what it returned, and what was expected>" \
-  --json
-```
-
-The attempt ends as `verification_failed`, and `run retry --note` resumes the worker's thread in
-the same worktree with your evidence, as for a read task. `--verdict pass` is refused on a write
-task: integration is the only way one completes. Keep `run decide` for integration failures and
-explicit policy or authority dispositions, not for a failed review.
 
 Each `--evidence`, `--decision`, `--risk`, `--next`, `--scope`, `--constraint`, and
 `--grant-scope` value is one entry, commas included; repeat the flag for several entries.
 
-Integration cherry-picks the task commits onto the supervisor branch. Conflicts are aborted and
-reported; never resolve them by silently discarding another worker's change.
-
-A conflicted task stays `reported`, so the same attempt can still be integrated later (after
-reordering, say). To have the worker redo it on the current head instead, close the attempt and
-retry; the retry resumes the worker's thread in a fresh worktree at the integration head:
-
-```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" run decide <run-id> <task-id> \
-  --outcome integration_failed --action replan --reason-code integration_conflict \
-  --evidence "<what it conflicted with>"
-node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" run retry <run-id> <task-id> \
-  --note "<what changed underneath it>"
-```
-
-A task you cancelled and no longer want keeps the run from finalizing; resubmit the plan without
-it (`run plan`) and checkpoint.
+For write tasks, follow `${CLAUDE_PLUGIN_ROOT}/reference/write-tasks.md`: inspect the worktree,
+preview, then integrate or reject. Integration is the only way a write task completes.
 
 ## 7. Continue, replan, and checkpoint
 
@@ -579,8 +412,7 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" run checkpoint <run-id> \
   --summary "<what this wave established>" \
   --decision "<decision made from the evidence>" \
   --risk "<open risk>" \
-  --next "<next wave>" \
-  --json
+  --next "<next wave>"
 ```
 
 Before dispatching the next wave, reconsider the routing of the tasks it will contain. The plan
@@ -616,7 +448,8 @@ failures, or treat it as a blocker if the evidence points at the briefing rather
 not retries and do not count toward this. Scope conflicts, missing authority, or an unmet
 prerequisite are blockers; do not loop indefinitely.
 
-After a recorded cherry-pick conflict (found by `run integrate`, or first by `run preview` when the lane has checks), `run retry <run-id> <task-id> --conflict --note "<what must change>"` records the conflict disposition and prepares a fresh worktree at the current integration head while retaining warm-thread context. Inspect its recorded paths and preserved commits first. The retry still needs launch, renewed review, checks, and preview; it is not an accepted merge resolution.
+A task you cancelled and no longer want keeps the run from finalizing; resubmit the plan without
+it (`run plan`) and checkpoint.
 
 ## 8. Finish
 
@@ -648,8 +481,7 @@ When every task is complete, the run enters `finalizing`. If the frozen contract
 node "${CLAUDE_PLUGIN_ROOT}/scripts/orch.mjs" run finalize <run-id> \
   --verdict pass \
   --summary "<combined outcome>" \
-  --evidence "<exact command and outcome>" \
-  --json
+  --evidence "<exact command and outcome>"
 ```
 
 Finalization refuses a dirty checkout when the plan has a write task (a run of only read and
@@ -693,6 +525,6 @@ the result some percentage better.
   previous worktree unless integration failed on a conflict. Read and verify tasks run in the
   supervisor checkout under a sandbox that cannot write it.
 - Never bypass the run state because the manual path seems faster.
-- Wait for workers with one background `run wait`, never with a loop of `run poll` calls or
+- Wait for workers with one `run collect` (or `run wait`), never with a loop of `run poll` calls or
   sleeps. A worker over its wall-clock limit is stopped only by your explicit `run cancel`.
 - Never continue from memory alone when `run briefing` or `run recover` can restore exact state.

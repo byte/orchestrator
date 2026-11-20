@@ -5,12 +5,16 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
+const referenceDir = path.join(root, "plugins", "orchestrator", "reference");
+
+/** run.md plus the reference files it tells the supervisor to read when they apply. */
+function runGuide() {
+  return [fs.readFileSync(path.join(root, "plugins", "orchestrator", "commands", "run.md"), "utf8"),
+    ...fs.readdirSync(referenceDir).sort().map((file) => fs.readFileSync(path.join(referenceDir, file), "utf8"))].join("\n");
+}
 
 test("the run command keeps Claude in authority and routes only within the worker roster", () => {
-  const command = fs.readFileSync(
-    path.join(root, "plugins", "orchestrator", "commands", "run.md"),
-    "utf8"
-  );
+  const command = runGuide();
   assert.match(
     command,
     /The Claude model running the main thread is always the planner, scheduler, reviewer, replanner,\s+and integrator/
@@ -54,10 +58,7 @@ test("the run command keeps Claude in authority and routes only within the worke
 });
 
 test("the run command requires evidence gates and bounded retries", () => {
-  const command = fs.readFileSync(
-    path.join(root, "plugins", "orchestrator", "commands", "run.md"),
-    "utf8"
-  );
+  const command = runGuide();
   assert.match(command, /evaluate every acceptance criterion/);
   assert.match(command, /Retry transient worker failures \(a crash, a missing result\) once; that retry starts cold/);
   assert.match(command, /run retry <run-id> <task-id> \\\n\s+--note/);
@@ -116,7 +117,7 @@ test("the legacy single-task commands are retired", () => {
 
 test("the run command lets workers ask and limits who may grant scope", () => {
   const read = (...parts) => fs.readFileSync(path.join(root, "plugins", "orchestrator", ...parts), "utf8");
-  const command = read("commands", "run.md");
+  const command = runGuide();
   assert.match(command, /run answer <run-id> <task-id>/);
   assert.match(command, /You may grant an extension inside the lane on your own authority/);
   assert.match(command, /You must ask the user before granting anything outside the lane/);
@@ -173,4 +174,17 @@ test("the run command routes from its own evidence and sizes waves by write surf
   assert.match(plan, /Size tasks by write-surface independence/);
   assert.doesNotMatch(command, /Prefer 3–5/);
   assert.match(command, /the default pool is 5 concurrent\s+workers/);
+});
+
+test("run.md stays lean and points at every reference file it relies on", () => {
+  const command = fs.readFileSync(path.join(root, "plugins", "orchestrator", "commands", "run.md"), "utf8");
+  // Loaded on every supervisor turn: detail that only some runs need belongs in reference/.
+  assert.ok(command.length < 34000, `run.md is ${command.length} bytes`);
+  const pointed = new Set([...command.matchAll(/\$\{CLAUDE_PLUGIN_ROOT\}\/reference\/([\w-]+\.md)/g)].map((match) => match[1]));
+  assert.deepEqual([...pointed].sort(), fs.readdirSync(referenceDir).sort());
+  assert.match(command, /If the plan has any write task, read `\$\{CLAUDE_PLUGIN_ROOT\}\/reference\/write-tasks\.md`/);
+  // Whole-run JSON dumps are not printed into the conversation for routine steps.
+  for (const action of ["create", "plan", "checkpoint", "launch", "verify", "finalize", "ready"]) {
+    assert.doesNotMatch(command, new RegExp(`orch\\.mjs" run ${action} [^\\n]*--json`), action);
+  }
 });

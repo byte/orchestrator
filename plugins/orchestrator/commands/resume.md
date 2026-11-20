@@ -42,9 +42,11 @@ Then read `${CLAUDE_PLUGIN_ROOT}/commands/run.md` and continue its orchestration
 recovered state. Do not create a replacement run. In particular:
 
 - Read structured `diagnostics` for blocked gates and next actions. If resume cannot safely reconcile an interrupted integration, `run show`/`run recover` diagnose without mutation. A `started` phase may still own a live Git child: preserve the intent and work, and do not remove locks or reset the checkout to force recovery.
-- collect and review newly reported results
+- collect and review newly reported results; `run result <run-id> <task-id>` prints one task's
+  compact report and saves the full one to a file, instead of reading `run resume --json` output
 - if workers are still running, start one `run wait <run-id> --json` as a background command and
-  keep working; the harness wakes you when it exits. Do not poll in a loop. A wait started before
+  keep working (or `run collect <run-id> --timeout 540` in the foreground when you have nothing else
+  to do: it also returns each new report compactly, with its full report file); the harness wakes you when it exits. Do not poll in a loop. A wait started before
   the interruption may have ended unseen, so always start a fresh one. Exit codes: `0` a worker
   changed state (act on the updates marked `changed`), `2` timed out, `3` nothing active, `4` only
   paused workers awaiting your answer

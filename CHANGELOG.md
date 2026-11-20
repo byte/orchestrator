@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.9
+
+- `run collect <run-id> [--timeout <s>]` waits like `run wait` (same exit codes), then returns in one payload what changed, a compact report for each task that reported, blocked, failed, or paused (summary, confidence, blockers, one clipped line per finding, tests, and the next command), the path of its full report file, what still awaits a decision, what is running, and what has its dependencies met. `/orchestrator:run` uses it in place of wait + poll + show + reading `run resume --json`, which in a real 4-worker review cost about 10 supervisor turns and printed whole reports into the conversation. Run it in the foreground with `--timeout 540` when there is nothing else to do, so the result arrives in the same turn.
+- `run result <run-id> <task-id>` prints one task's compact report and saves the full one to a file, for recovery and spot checks without `run resume --json`.
+- `run.md`, which rides along on every supervisor turn, is 28% smaller (44.8 KB to 32.3 KB with the new `show` and `collect` guidance included). Write-task setup, review, preview, integration, and conflicts; worker requests; route-evidence rules, model substitution, budgets, guidance, the codex-plugin executor's caveats, and warm/cold retry rules moved to `reference/*.md`, which the command tells Claude to read only when they apply (for example, before a run's first write launch).
+- Routine supervising commands (`create`, `plan`, `checkpoint`, `launch`, `ready`, `verify`, `finalize`, ...) are no longer called with `--json`, whose whole-run dumps the real review had to discard or pipe through Python; their text output is one line. `run launch` text now names the model and effort and prints any substitution notice. A closed output pipe (`| head`) no longer crashes the CLI with EPIPE.
+
 ## 0.6.8
 
 - `/orchestrator:run` now dispatches workers: the supervisor may skip them only on the user's explicit yes, and an answer produced without a worker says so first. A real PRD review had been answered by the supervisor alone, citing earlier runs on a since-revised PRD.

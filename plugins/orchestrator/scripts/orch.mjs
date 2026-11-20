@@ -22,6 +22,7 @@ import {
   purgeLearningExamples
 } from "./lib/learning.mjs";
 import { preflight } from "./lib/preflight.mjs";
+import { collectRun, renderCollect, renderTaskBlock } from "./lib/collect.mjs";
 import { claudeUsageLine, renderRunCost, runClaudeUsage, runUsage, usageLine } from "./lib/usage.mjs";
 import { renderLanes, renderPreflight } from "./lib/render.mjs";
 import {
@@ -47,6 +48,7 @@ import {
   planWarnings,
   previewRunTask,
   summarizeInputRequest,
+  substitutionNotice,
   recordIntegrationDiagnostic,
   recordTaskResult,
   recordTaskDisposition,
@@ -134,6 +136,10 @@ Usage:
   orch run poll <run-id> [--json]
   orch run wait <run-id> [--timeout <seconds>] [--interval <seconds>] [--no-watch] [--json]
       exit 0 changed (poll payload), 2 timed out, 3 no active workers, 4 only paused workers awaiting an answer
+  orch run result <run-id> <task-id> [--json]
+      one task's compact report (summary, clipped findings, tests, next command); the full report is saved to the printed file
+  orch run collect <run-id> [--timeout <seconds>] [--interval <seconds>] [--no-watch] [--json]
+      run wait, then each changed task's compact report (full report saved to a file), what awaits a decision, what runs, and what is ready; same exit codes
   orch run inspect <run-id> <task-id> [--json]
   orch run check <run-id> [task-id] [--json]
   orch run preview <run-id> <task-id> [--json]
@@ -150,6 +156,12 @@ function fail(message) {
   process.stderr.write(`${message}\n`);
   process.exitCode = 1;
 }
+
+// A reader that closes the pipe early (`| head`) is not an error.
+process.stdout.on("error", (error) => {
+  if (error.code === "EPIPE") process.exit(process.exitCode ?? 0);
+  throw error;
+});
 
 function emit(text) {
   process.stdout.write(`${text}\n`);
@@ -465,7 +477,7 @@ function renderPollUpdate(update) {
 // (show, ready, recover, cost, list, inspect, briefing) is not recorded as a supervisor.
 const SUPERVISING_ACTIONS = new Set([
   "plan", "resume", "checkpoint", "claim", "bind", "report", "verify", "decide", "retry",
-  "answer", "cancel", "launch", "poll", "wait", "integrate", "finalize", "tally", "guidance", "check", "preview"
+  "answer", "cancel", "launch", "poll", "wait", "collect", "integrate", "finalize", "tally", "guidance", "check", "preview"
 ]);
 
 // Best effort: a failure to record the session must never stop the command.
@@ -593,6 +605,23 @@ async function commandRunWait(cwd, runId, options) {
     emit(result.updates.length ? result.updates.map(renderPollUpdate).join("\n") : "No active workers.");
   }
   process.stderr.write(`${result.message} (exit ${result.exitCode})\n`);
+  process.exitCode = result.exitCode;
+}
+
+// `run wait`, then everything the supervisor needs to act on the wake in the
+// same output, so one command replaces wait + poll + show + reading reports.
+async function commandRunCollect(cwd, runId, options) {
+  const result = await waitForRunChange(cwd, runId, {
+    timeoutMs: seconds(options.timeout, "--timeout", DEFAULT_WAIT_TIMEOUT_SECONDS) * 1000,
+    intervalMs: seconds(options.interval, "--interval", DEFAULT_WAIT_INTERVAL_SECONDS) * 1000,
+    watch: !options["no-watch"]
+  });
+  const collected = collectRun(cwd, loadRun(cwd, runId), result);
+  if (options.json) {
+    emitJson(collected);
+  } else {
+    emit(renderCollect(collected, result.updates.map(renderPollUpdate)));
+  }
   process.exitCode = result.exitCode;
 }
 
@@ -1092,7 +1121,8 @@ function commandRun(argv, cwd) {
     const launched = launchTaskWorker(cwd, runId, taskId, requireLane(cwd, run.lane));
     return options.json
       ? emitJson(launched)
-      : emit(`Launched ${taskId} as PID ${launched.runner.pid} in ${launched.worktree.path}.`);
+      : emit(`Launched ${taskId} on ${launched.model ?? "?"} (${launched.reasoningEffort ?? "?"}) as PID ${launched.runner.pid} in ${launched.worktree.path}.` +
+          (launched.substitution ? `\n${substitutionNotice(launched.substitution)}` : ""));
   }
 
   if (action === "poll") {
@@ -1104,6 +1134,18 @@ function commandRun(argv, cwd) {
 
   if (action === "wait") {
     return commandRunWait(cwd, runId, options);
+  }
+
+  if (action === "collect") {
+    return commandRunCollect(cwd, runId, options);
+  }
+
+  if (action === "result") {
+    const run = loadRun(cwd, runId);
+    const task = run.tasks[positionals[1]];
+    if (!task) throw new Error(`Unknown task "${positionals[1]}" in run "${runId}".`);
+    const block = renderTaskBlock(cwd, run, task);
+    return options.json ? emitJson({ taskId: task.id, status: task.status, reportFile: block.reportFile }) : emit(block.text);
   }
 
   if (action === "inspect") {

@@ -63,7 +63,10 @@ All support `--json` where structured output is useful.
   is integrated or cancelled. Grant inside the lane on your own authority; a grant outside the lane is refused
   until you ask the user and repeat it with `--user-approved`. A task gets at most 3 answered round
   trips; a further request is recorded as an ordinary blocker.
-- Wait for workers with `run wait <run-id> [--timeout <seconds>] --json` started as a background
+- Prefer `run collect <run-id> [--timeout <seconds>]`: it runs `run wait`, then returns each changed
+  task's compact report (full report saved to a file), what awaits a decision, what is running, and
+  what is ready, with the same exit codes, so one command replaces wait + poll + show + reading
+  reports. Underneath, wait for workers with `run wait <run-id> [--timeout <seconds>] --json` started as a background
   Bash command, never by calling `run poll` in a loop. It blocks until a worker changes state —
   finishes, fails, is cancelled, pauses with `needs_input`, is relaunched on a substitute model,
   falls back from a missing thread, or exceeds its wall-clock limit — then prints the `run poll`
